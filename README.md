@@ -1,4 +1,17 @@
-# WA Gateway POC
+# WA Gateway (v1.0)
+
+> **Kompatibilitas versi**: WA Gateway `v1.0` ini adalah pasangan
+> yang dibutuhkan **AuliaPos `v3.0`** (module Shared WhatsApp Inbox).
+> AuliaPos `v2.x` tidak membutuhkan/tidak terhubung ke Gateway ini
+> sama sekali.
+>
+> **Catatan**: paragraf "Tujuan POC" & "POC ini TIDAK berisi" di
+> bawah ini adalah deskripsi AWAL sebelum integrasi ke AuliaPos
+> dikerjakan -- sudah **tidak akurat lagi** (integrasi shared inbox,
+> incoming/outgoing, dan media SUDAH dikerjakan, lihat
+> `docs/aturan-bisnis-CHAT.md` di sisi AuliaPos v3.0 untuk dokumentasi
+> lengkap & terkini). Dibiarkan apa adanya di sini sebagai catatan
+> sejarah, bukan rujukan status terkini.
 
 Proof-of-concept WhatsApp Gateway berbasis [Baileys](https://github.com/WhiskeySockets/Baileys), berjalan di Windows, dengan Test Dashboard sederhana.
 
