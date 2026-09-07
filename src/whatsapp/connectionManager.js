@@ -1,0 +1,611 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const QRCode = require('qrcode');
+const { Boom } = require('@hapi/boom');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  makeCacheableSignalKeyStore,
+  downloadContentFromMessage,
+} = require('baileys');
+
+const config = require('../config');
+const logger = require('../logging');
+const messageStore = require('./messageStore');
+const incomingBuffer = require('../store/incomingBuffer');
+const { jidToPhone } = require('./normalize');
+const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
+
+const VALID_STATUSES = [
+  'disconnected',
+  'connecting',
+  'connected',
+  'reconnecting',
+  'logged_out',
+  'error',
+];
+
+/**
+ * ConnectionManager bertanggung jawab penuh atas lifecycle koneksi WhatsApp:
+ * - membuat/menutup socket Baileys
+ * - menyimpan & memuat auth state
+ * - mengelola status, QR terbaru, dan metadata koneksi
+ * - reconnect dengan backoff
+ * - memastikan tidak ada duplicate socket/listener yang aktif bersamaan
+ */
+class ConnectionManager {
+  constructor() {
+    this.sock = null;
+    this.status = 'disconnected';
+    this.qr = null; // raw QR string terbaru (null jika tidak ada/expired)
+    this.qrDataUrl = null; // versi data:image untuk ditampilkan di dashboard
+    this.connectedNumber = null;
+    this.lastConnectedAt = null;
+    this.lastDisconnectedAt = null;
+    this.lastDisconnectReason = null;
+
+    this.saveCreds = null;
+
+    // Generation counter untuk mencegah event handler dari socket lama
+    // memengaruhi state setelah socket baru dibuat (mencegah duplicate listener effect).
+    this.generation = 0;
+
+    this.reconnectAttempts = 0;
+    this.reconnectTimer = null;
+    this.isShuttingDown = false;
+    this.isStarting = false; // mencegah start() dipanggil bersamaan (double start)
+  }
+
+  getStatusSnapshot() {
+    return {
+      status: this.status,
+      connectedNumber: this.connectedNumber,
+      lastConnectedAt: this.lastConnectedAt,
+      lastDisconnectedAt: this.lastDisconnectedAt,
+      lastDisconnectReason: this.lastDisconnectReason,
+      hasQr: Boolean(this.qr),
+    };
+  }
+
+  getQr() {
+    if (!this.qr) return null;
+    return { qr: this.qr, qrDataUrl: this.qrDataUrl };
+  }
+
+  setStatus(newStatus, extra = {}) {
+    if (!VALID_STATUSES.includes(newStatus)) {
+      logger.warn(`Status tidak dikenal diabaikan: ${newStatus}`);
+      return;
+    }
+    this.status = newStatus;
+    logger.info(`Status koneksi berubah menjadi: ${newStatus}`, extra);
+  }
+
+  async start() {
+    if (this.isStarting) {
+      logger.warn('start() dipanggil saat proses start lain sedang berjalan, diabaikan.');
+      return;
+    }
+    this.isStarting = true;
+    try {
+      await this._connect();
+    } finally {
+      this.isStarting = false;
+    }
+  }
+
+  async _connect() {
+    // Naikkan generation SEBELUM membuat socket baru.
+    // Semua event handler socket lama akan mengecek generation ini dan
+    // tidak melakukan apa-apa jika sudah bukan generation aktif.
+    this.generation += 1;
+    const myGeneration = this.generation;
+
+    // Tutup socket lama jika masih ada, untuk mencegah duplicate socket.
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners();
+        this.sock.end(undefined);
+      } catch (err) {
+        logger.warn('Gagal menutup socket lama dengan bersih', { error: err.message });
+      }
+      this.sock = null;
+    }
+
+    fs.mkdirSync(config.authFolder, { recursive: true });
+
+    this.setStatus('connecting');
+    this.qr = null;
+    this.qrDataUrl = null;
+
+    const { state, saveCreds } = await useMultiFileAuthState(config.authFolder);
+    this.saveCreds = saveCreds;
+
+    let version;
+    try {
+      const versionInfo = await fetchLatestBaileysVersion();
+      version = versionInfo.version;
+      logger.info(`Menggunakan versi WhatsApp Web: ${version.join('.')} (isLatest: ${versionInfo.isLatest})`);
+    } catch (err) {
+      logger.warn('Gagal mengambil versi WA terbaru, menggunakan versi default Baileys', {
+        error: err.message,
+      });
+    }
+
+    const sock = makeWASocket({
+      version,
+      logger: logger.raw.child({ module: 'baileys' }),
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger.raw.child({ module: 'baileys-keys' })),
+      },
+      printQRInTerminal: false,
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+    });
+
+    this.sock = sock;
+
+    sock.ev.on('creds.update', this.saveCreds);
+
+    sock.ev.on('connection.update', (update) => this._onConnectionUpdate(update, myGeneration));
+
+    sock.ev.on('messages.upsert', (payload) => this._onMessagesUpsert(payload, myGeneration));
+  }
+
+  async _onConnectionUpdate(update, myGeneration) {
+    if (myGeneration !== this.generation) {
+      // Event ini berasal dari socket generasi lama, abaikan agar tidak
+      // menyebabkan efek ganda (mis. reconnect dobel).
+      return;
+    }
+
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      this.qr = qr;
+      try {
+        this.qrDataUrl = await QRCode.toDataURL(qr);
+      } catch (err) {
+        logger.error('Gagal membuat QR data URL', { error: err.message });
+      }
+      logger.info('QR code baru dihasilkan, silakan scan dari dashboard.');
+    }
+
+    if (connection === 'connecting') {
+      this.setStatus('connecting');
+    }
+
+    if (connection === 'open') {
+      this.reconnectAttempts = 0;
+      this.qr = null;
+      this.qrDataUrl = null;
+      this.connectedNumber = jidToPhone(this.sock?.user?.id) || null;
+      this.lastConnectedAt = new Date().toISOString();
+      this.lastDisconnectReason = null;
+      this.setStatus('connected', { number: this.connectedNumber });
+    }
+
+    if (connection === 'close') {
+      this.lastDisconnectedAt = new Date().toISOString();
+
+      const statusCode = lastDisconnect?.error instanceof Boom
+        ? lastDisconnect.error.output?.statusCode
+        : lastDisconnect?.error?.output?.statusCode;
+
+      const reasonText = lastDisconnect?.error?.message || 'unknown';
+      this.lastDisconnectReason = `${statusCode || 'no-code'}: ${reasonText}`;
+
+      logger.warn('Koneksi WhatsApp terputus', {
+        statusCode,
+        reason: reasonText,
+      });
+
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+      if (isLoggedOut) {
+        this.setStatus('logged_out');
+        this.connectedNumber = null;
+        logger.error('WhatsApp logout terdeteksi. Session tidak valid, perlu scan QR ulang.');
+        // Tidak auto-reconnect setelah logout: harus reset session dulu via /api/logout
+        // supaya operator sadar dan melakukan scan QR baru secara sengaja.
+        return;
+      }
+
+      if (this.isShuttingDown) {
+        this.setStatus('disconnected');
+        return;
+      }
+
+      this._scheduleReconnect();
+    }
+  }
+
+  _scheduleReconnect() {
+    this.setStatus('reconnecting');
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+
+    const { initialDelayMs, maxDelayMs, backoffFactor } = config.reconnect;
+    const delay = Math.min(
+      initialDelayMs * Math.pow(backoffFactor, this.reconnectAttempts),
+      maxDelayMs
+    );
+    this.reconnectAttempts += 1;
+
+    logger.info(`Menjadwalkan reconnect percobaan ke-${this.reconnectAttempts} dalam ${delay}ms`);
+
+    this.reconnectTimer = setTimeout(() => {
+      if (this.isShuttingDown) return;
+      this._connect().catch((err) => {
+        logger.error('Gagal melakukan reconnect', { error: err.message });
+        this.setStatus('error');
+        this._scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  /**
+   * Reconnect manual dipicu dari dashboard/API (mis. tombol "Reconnect").
+   * Membatalkan jadwal reconnect otomatis yang sedang berjalan lalu connect ulang segera.
+   */
+  async manualReconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
+    logger.info('Reconnect manual dipicu dari dashboard/API.');
+    await this._connect();
+  }
+
+  /**
+   * Logout dari WhatsApp dan hapus folder session, sehingga QR baru
+   * akan diminta pada koneksi berikutnya. Dipakai untuk kebutuhan testing.
+   */
+  async logout() {
+    logger.info('Logout/reset session diminta.');
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    this.generation += 1; // pastikan socket lama tidak lagi memicu apa pun
+
+    if (this.sock) {
+      try {
+        await this.sock.logout();
+      } catch (err) {
+        logger.warn('sock.logout() gagal (mungkin memang sudah tidak connected)', {
+          error: err.message,
+        });
+      }
+      try {
+        this.sock.ev.removeAllListeners();
+        this.sock.end(undefined);
+      } catch (err) {
+        // abaikan
+      }
+      this.sock = null;
+    }
+
+    try {
+      if (fs.existsSync(config.authFolder)) {
+        fs.rmSync(config.authFolder, { recursive: true, force: true });
+      }
+    } catch (err) {
+      logger.error('Gagal menghapus folder auth saat logout', { error: err.message });
+    }
+
+    this.connectedNumber = null;
+    this.qr = null;
+    this.qrDataUrl = null;
+    this.lastDisconnectReason = 'manual logout';
+    this.lastDisconnectedAt = new Date().toISOString();
+    this.reconnectAttempts = 0;
+    this.setStatus('disconnected');
+
+    // Langsung mulai koneksi baru supaya QR baru muncul di dashboard tanpa restart aplikasi.
+    await this._connect();
+  }
+
+  async _onMessagesUpsert({ messages, type }, myGeneration) {
+    if (myGeneration !== this.generation) return;
+    if (type !== 'notify') return; // hanya proses pesan baru real-time
+
+    for (const msg of messages) {
+      try {
+        this._handleIncomingMessage(msg);
+      } catch (err) {
+        // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
+        logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
+      }
+    }
+  }
+
+  _handleIncomingMessage(msg) {
+    if (!msg.message) return; // pesan protokol/kosong (mis. reaction, receipt), abaikan untuk POC
+
+    // "Status" WhatsApp (Stories) bukan chat sama sekali -- JID-nya selalu
+    // literal "status@broadcast". Difilter di titik PALING AWAL, sebelum
+    // diproses/di-log sama sekali, supaya tidak pernah nyasar jadi
+    // conversation/pesan di Inbox POS.
+    if (msg.key?.remoteJid === 'status@broadcast') {
+      return;
+    }
+
+    let messageType = 'text';
+    let text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      null;
+    let media = null;
+
+    if (text === null) {
+      // Bukan pesan teks biasa -- cek apakah gambar/dokumen (didukung),
+      // selain itu (audio/video/sticker/lokasi/dst) di luar scope untuk
+      // sekarang, cukup di-log & dilewati.
+      const imageMsg = msg.message.imageMessage;
+      const documentMsg = msg.message.documentMessage;
+
+      if (imageMsg) {
+        messageType = 'image';
+        text = imageMsg.caption || null;
+        media = buildMediaRef(imageMsg, 'image', null);
+      } else if (documentMsg) {
+        messageType = 'document';
+        text = documentMsg.caption || null;
+        media = buildMediaRef(documentMsg, 'document', documentMsg.fileName || null);
+      } else {
+        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen)', {
+          messageId: msg.key?.id,
+          type: Object.keys(msg.message)[0],
+        });
+        return;
+      }
+
+      if (!media) {
+        // directPath/mediaKey tidak lengkap -- pesan media ini tidak
+        // bisa didekripsi nanti, tidak ada gunanya diteruskan.
+        logger.warn('Pesan media diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
+          messageId: msg.key?.id,
+          messageType,
+        });
+        return;
+      }
+    }
+
+    // chatId = JID ASLI dari WhatsApp, apa adanya. Ini identitas conversation,
+    // BUKAN nomor telepon -- terutama penting untuk kasus @lid.
+    const remoteJid = msg.key?.remoteJid || null;
+    const fromMe = Boolean(msg.key?.fromMe);
+    const senderName = msg.pushName || null;
+    const jidType = classifyJid(remoteJid);
+
+    // PRINSIP IDENTITAS: nomor telepon hanya diisi jika JID memang benar-benar
+    // personal number (@s.whatsapp.net). Untuk @lid/@g.us/lainnya, phone = null.
+    // Angka di depan "@lid" TIDAK PERNAH diperlakukan sebagai nomor telepon.
+    const phone = extractPhoneIfAvailable(remoteJid);
+
+    const normalized = {
+      messageId: msg.key?.id || null,
+      chatId: remoteJid,
+      jidType,
+      sender: {
+        jid: remoteJid,
+        phone,
+        name: senderName,
+      },
+      text,
+      messageType,
+      media,
+      timestamp: msg.messageTimestamp
+        ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
+        : new Date().toISOString(),
+      fromMe,
+    };
+
+    messageStore.add(normalized);
+
+    // Diteruskan ke CI4 untuk KEDUA arah:
+    // - fromMe=false (pesan asli dari customer) -> direction='incoming'
+    // - fromMe=true (staff balas langsung dari WA Web/HP, di luar POS)
+    //   -> direction='outgoing', TANPA identitas staff (Baileys tidak
+    //   tahu staff mana yang balas dari HP-nya sendiri) -- CI4 akan
+    //   simpan dengan sent_by_user_id NULL. Ini supaya Inbox POS tetap
+    //   merefleksikan kenyataan percakapan walau balasannya tidak
+    //   lewat POS, mencegah kasir lain mengira belum dibalas dan
+    //   balas dobel.
+    try {
+      incomingBuffer.enqueue({
+        ...normalized,
+        direction: fromMe ? 'outgoing' : 'incoming',
+      });
+    } catch (err) {
+      // Gagal simpan ke SQLite tidak boleh menjatuhkan proses penerimaan
+      // pesan WhatsApp itu sendiri -- cukup log sekeras mungkin karena ini
+      // berarti pesan BERISIKO tidak sampai ke POS.
+      logger.error('[DELIVERY] GAGAL menyimpan pesan ke SQLite buffer -- pesan ini berisiko tidak sampai ke POS', {
+        messageId: normalized.messageId,
+        direction: fromMe ? 'outgoing' : 'incoming',
+        error: err.message,
+      });
+    }
+
+    logger.info('[CHAT] pesan masuk diterima', {
+      chatId: normalized.chatId,
+      jidType,
+    });
+    logger.info(`Pesan ${fromMe ? 'keluar (sinkron dari device lain)' : 'masuk'} diterima`, {
+      messageId: normalized.messageId,
+      chatId: normalized.chatId,
+      jidType,
+      phone: normalized.sender.phone,
+    });
+  }
+
+  isConnected() {
+    return this.status === 'connected' && Boolean(this.sock);
+  }
+
+  /**
+   * Kirim pesan teks ke SEBUAH JID, apa adanya, tanpa normalisasi/tebakan apa pun.
+   * `jid` di sini boleh berupa @s.whatsapp.net, @lid, atau @g.us -- fungsi ini
+   * hanya meneruskan ke sock.sendMessage() milik Baileys, yang memang mendukung
+   * ketiga jenis JID tersebut secara resmi (lihat relayMessage di Baileys, yang
+   * punya cabang eksplisit untuk server === 'lid').
+   *
+   * Melempar Error dengan pesan yang jelas jika gagal.
+   */
+  async sendTextMessage(jid, text) {
+    if (!this.isConnected()) {
+      const err = new Error('WhatsApp belum connected, tidak bisa mengirim pesan');
+      err.code = 'NOT_CONNECTED';
+      throw err;
+    }
+
+    const jidType = classifyJid(jid);
+    logger.info('[SEND] mengirim pesan keluar', { targetJid: jid, jidType });
+
+    try {
+      const result = await this.sock.sendMessage(jid, { text });
+      logger.info('[SEND] pesan berhasil dikirim', {
+        targetJid: jid,
+        jidType,
+        messageId: result?.key?.id,
+      });
+      return {
+        messageId: result?.key?.id || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (err) {
+      logger.error('[SEND] gagal mengirim pesan', { targetJid: jid, jidType, error: err.message });
+      const wrapped = new Error(`Gagal mengirim pesan: ${err.message}`);
+      wrapped.code = 'SEND_FAILED';
+      throw wrapped;
+    }
+  }
+
+  /**
+   * Balas SATU conversation berdasarkan chatId (JID asli conversation tersebut,
+   * bisa @s.whatsapp.net ATAU @lid ATAU @g.us). Ini jalur khusus untuk fitur
+   * "Balas" di dashboard -- BERBEDA dari endpoint /api/messages/send lama yang
+   * menerima input nomor telepon bebas dan menormalisasinya sendiri.
+   *
+   * ATURAN KERAS: chatId di sini TIDAK PERNAH melalui normalizeToJid()/jidToPhone()
+   * untuk menentukan tujuan pengiriman. chatId dikirim persis apa adanya ke Baileys.
+   */
+  async sendReply(chatId, text) {
+    if (!isDecodableJid(chatId)) {
+      const err = new Error(`chatId tidak valid/tidak dapat didecode sebagai JID: ${chatId}`);
+      err.code = 'INVALID_CHAT_ID';
+      throw err;
+    }
+
+    const jidType = classifyJid(chatId);
+    logger.info('[CHAT] balasan diminta untuk conversation', { chatId, jidType });
+
+    const result = await this.sendTextMessage(chatId, text);
+
+    // Simpan pesan keluar ke conversation yang SAMA (berdasarkan chatId persis sama),
+    // supaya langsung terlihat di history chat yang sedang dibuka di dashboard.
+    messageStore.add({
+      messageId: result.messageId,
+      chatId,
+      jidType,
+      sender: {
+        jid: this.sock?.user?.id || null,
+        phone: jidToPhone(this.sock?.user?.id) || null,
+        name: 'Gateway (akun sendiri)',
+      },
+      text,
+      timestamp: result.timestamp,
+      fromMe: true,
+    });
+
+    return result;
+  }
+
+  /**
+   * Ambil & dekripsi ulang 1 file media (gambar/dokumen) dari server
+   * WhatsApp, ON-DEMAND, berdasarkan referensi yang tersimpan (bukan
+   * file yang sudah diunduh sebelumnya -- kita memang tidak pernah
+   * menyimpan file-nya, cuma referensi ini, sesuai keputusan desain).
+   *
+   * Bisa gagal (throw) kalau media sudah "basi"/kadaluarsa di server
+   * WhatsApp (biasa terjadi untuk pesan yang cukup lama) -- pemanggil
+   * (ci4Routes.js) yang menerjemahkan ini jadi respons error yang
+   * jelas ke CI4/browser.
+   *
+   * @param {{mediaType: 'image'|'document', directPath: string, mediaKeyBase64: string}} mediaRef
+   * @returns {Promise<Buffer>}
+   */
+  async downloadMediaByRef(mediaRef) {
+    const mediaKey = Buffer.from(mediaRef.mediaKeyBase64, 'base64');
+
+    const stream = await downloadContentFromMessage(
+      { directPath: mediaRef.directPath, mediaKey },
+      mediaRef.mediaType
+    );
+
+    const chunks = [];
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+    }
+
+    return Buffer.concat(chunks);
+  }
+
+  async shutdown() {
+    this.isShuttingDown = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners();
+        this.sock.end(undefined);
+      } catch (err) {
+        // abaikan saat shutdown
+      }
+    }
+    logger.info('Gateway shutting down.');
+  }
+}
+
+/**
+ * Ekstrak REFERENSI media (bukan file-nya) dari sebuah imageMessage/
+ * documentMessage Baileys -- directPath + mediaKey (base64) + info
+ * lain yang cukup untuk mendekripsi ulang NANTI, on-demand, saat
+ * kasir benar-benar membuka pesan itu di Inbox POS. File aslinya
+ * TIDAK diunduh/didekripsi di sini sama sekali (sesuai keputusan:
+ * "cukup simpan referensi, file tetap di WhatsApp").
+ *
+ * Mengembalikan null kalau directPath/mediaKey tidak ada -- berarti
+ * referensinya tidak lengkap, tidak ada gunanya diteruskan (nanti
+ * juga tidak akan bisa didekripsi ulang).
+ */
+function buildMediaRef(mediaMessage, mediaType, fileName) {
+  if (!mediaMessage?.directPath || !mediaMessage?.mediaKey) {
+    return null;
+  }
+
+  return {
+    mediaType, // 'image' | 'document' -- dipakai persis sebagai `type` di downloadContentFromMessage() Baileys
+    directPath: mediaMessage.directPath,
+    mediaKeyBase64: Buffer.from(mediaMessage.mediaKey).toString('base64'),
+    mimetype: mediaMessage.mimetype || null,
+    fileLength: mediaMessage.fileLength ? Number(mediaMessage.fileLength) : null,
+    fileSha256Base64: mediaMessage.fileSha256 ? Buffer.from(mediaMessage.fileSha256).toString('base64') : null,
+    fileName,
+  };
+}
+
+module.exports = new ConnectionManager();

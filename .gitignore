@@ -1,0 +1,23 @@
+# === Dependency (di-install ulang lewat npm install) ===
+node_modules/
+
+# === Environment & credential -- JANGAN PERNAH ter-commit ===
+.env
+.env.*
+!.env.example
+
+# === Session WhatsApp (Baileys auth state) -- SANGAT SENSITIF ===
+# Kalau folder ini bocor, siapa pun bisa mengambil alih sesi WhatsApp
+# yang sudah login tanpa perlu scan QR lagi. Tidak pernah boleh masuk
+# git, apalagi ke repo yang mungkin di-push ke remote.
+/auth/
+
+# === Runtime (SQLite buffer, log file) ===
+/data/
+/logs/
+
+# === OS/editor ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

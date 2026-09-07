@@ -1,0 +1,23 @@
+{
+  "name": "wa-gateway-poc",
+  "version": "0.1.0",
+  "description": "POC WhatsApp Gateway (Baileys) untuk shared inbox toko - hanya membuktikan koneksi Gateway <-> WhatsApp",
+  "main": "src/app/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/app/index.js",
+    "dev": "node --watch src/app/index.js"
+  },
+  "dependencies": {
+    "baileys": "6.7.24",
+    "@hapi/boom": "^9.1.3",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4",
+    "pino": "^9.6.0",
+    "dotenv": "^16.4.5",
+    "better-sqlite3": "^11.3.0"
+  }
+}

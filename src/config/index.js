@@ -1,0 +1,75 @@
+'use strict';
+
+const path = require('path');
+const dotenv = require('dotenv');
+
+dotenv.config();
+
+function toInt(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+const config = {
+  host: process.env.HOST || '127.0.0.1',
+  port: toInt(process.env.PORT, 3000),
+
+  authFolder: path.resolve(process.cwd(), process.env.AUTH_FOLDER || './auth'),
+
+  logLevel: process.env.LOG_LEVEL || 'info',
+  logFolder: process.env.LOG_FOLDER
+    ? path.resolve(process.cwd(), process.env.LOG_FOLDER)
+    : null,
+
+  maxMessagesInMemory: toInt(process.env.MAX_MESSAGES_IN_MEMORY, 200),
+
+  reconnect: {
+    initialDelayMs: toInt(process.env.RECONNECT_INITIAL_DELAY_MS, 2000),
+    maxDelayMs: toInt(process.env.RECONNECT_MAX_DELAY_MS, 60000),
+    backoffFactor: parseFloat(process.env.RECONNECT_BACKOFF_FACTOR || '2') || 2,
+  },
+
+  // =============================================================
+  // Phase 2: integrasi ke AuliaPos CI4 (Shared WhatsApp Inbox)
+  // =============================================================
+  ci4: {
+    // Base URL AuliaPos CI4, TANPA trailing slash. Contoh:
+    // http://192.168.1.10/aulia
+    baseUrl: (process.env.CI4_BASE_URL || '').replace(/\/+$/, ''),
+
+    // Shared secret -- HARUS SAMA PERSIS dengan app/Config/Inbox.php
+    // (env inbox.gatewayToken) di sisi CI4. Dikirim sebagai
+    // "Authorization: Bearer <token>" di setiap request ke CI4.
+    gatewayToken: process.env.CI4_GATEWAY_TOKEN || '',
+
+    // Timeout per request HTTP ke CI4 (ms).
+    requestTimeoutMs: toInt(process.env.CI4_REQUEST_TIMEOUT_MS, 8000),
+  },
+
+  // Path file database SQLite (reliability buffer untuk incoming
+  // message). Ini BUKAN source of truth -- cuma buffer retry supaya
+  // pesan tidak hilang kalau CI4 sedang mati/tidak bisa dihubungi.
+  sqlitePath: path.resolve(process.cwd(), process.env.SQLITE_PATH || './data/gateway.sqlite'),
+
+  // Seberapa sering worker mencoba mengirim ulang event yang masih
+  // pending di SQLite ke CI4 (ms).
+  deliveryIntervalMs: toInt(process.env.DELIVERY_INTERVAL_MS, 5000),
+
+  // Backoff untuk retry pengiriman SATU event yang gagal (pola sama
+  // seperti reconnect di atas): delay makin lama tiap gagal
+  // berturut-turut untuk event yang SAMA, supaya tidak spam CI4
+  // yang sedang down.
+  deliveryRetry: {
+    initialDelayMs: toInt(process.env.DELIVERY_RETRY_INITIAL_DELAY_MS, 3000),
+    maxDelayMs: toInt(process.env.DELIVERY_RETRY_MAX_DELAY_MS, 120000),
+    backoffFactor: parseFloat(process.env.DELIVERY_RETRY_BACKOFF_FACTOR || '2') || 2,
+  },
+
+  // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
+  heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
+};
+
+// Peringatan keras jika HOST dibuka ke LAN tanpa authentication.
+config.isBoundToLan = config.host === '0.0.0.0' || config.host !== '127.0.0.1' && config.host !== 'localhost';
+
+module.exports = config;

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WA Gateway POC - Test Dashboard</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <h1>WA Gateway POC &mdash; Test Dashboard</h1>
+    <p class="subtitle">Hanya untuk pengujian internal. Bukan aplikasi kasir/inbox.</p>
+  </header>
+
+  <main>
+    <section class="card" id="connection-card">
+      <h2>1. Connection Status</h2>
+      <div class="status-row">
+        <span class="label">Status:</span>
+        <span id="status-badge" class="badge badge-unknown">memuat...</span>
+      </div>
+      <div class="status-row"><span class="label">Nomor WhatsApp:</span> <span id="status-number">-</span></div>
+      <div class="status-row"><span class="label">Terakhir connect:</span> <span id="status-connected-at">-</span></div>
+      <div class="status-row"><span class="label">Terakhir disconnect:</span> <span id="status-disconnected-at">-</span></div>
+      <div class="status-row"><span class="label">Error/alasan disconnect terakhir:</span> <span id="status-reason">-</span></div>
+
+      <div class="button-row">
+        <button id="btn-reconnect">Reconnect</button>
+        <button id="btn-logout" class="danger">Logout / Reset Session</button>
+      </div>
+
+      <div id="qr-container" class="qr-container hidden">
+        <p>Belum login. Scan QR berikut menggunakan WhatsApp di HP (Linked Devices):</p>
+        <img id="qr-image" alt="QR Code WhatsApp" />
+      </div>
+
+      <p id="action-feedback" class="feedback"></p>
+    </section>
+
+    <section class="card">
+      <h2>2. Send Test Message</h2>
+      <p class="hint">Kirim ke NOMOR TELEPON bebas (fitur lama, untuk test kirim cepat). Untuk membalas chat yang sudah masuk, gunakan panel "Conversations" di bawah.</p>
+      <form id="send-form">
+        <label for="to">Nomor tujuan</label>
+        <input type="text" id="to" name="to" placeholder="628xxxxxxxxxx" required />
+
+        <label for="text">Pesan</label>
+        <textarea id="text" name="text" rows="3" placeholder="Halo, ini pesan test" required></textarea>
+
+        <button type="submit">KIRIM</button>
+      </form>
+      <p id="send-feedback" class="feedback"></p>
+    </section>
+
+    <section class="card">
+      <h2>3. Conversations</h2>
+      <p class="hint">Setiap chat diidentifikasi berdasarkan JID asli WhatsApp (bisa <code>@s.whatsapp.net</code> atau <code>@lid</code>) &mdash; bukan berdasarkan nomor telepon. Klik "Buka Chat" untuk melihat percakapan dan membalas.</p>
+
+      <div id="chat-list" class="scroll-list">
+        <p class="empty-state">Belum ada conversation.</p>
+      </div>
+
+      <div id="conversation-view" class="conversation-view hidden">
+        <button id="btn-close-conversation" class="secondary">&larr; Kembali ke daftar chat</button>
+        <div class="conversation-header">
+          <div><span class="label">chatId:</span> <code id="conv-chat-id">-</code></div>
+          <div><span class="label">jidType:</span> <span id="conv-jid-type" class="badge badge-unknown">-</span></div>
+          <div><span class="label">Nama:</span> <span id="conv-name">-</span></div>
+          <div><span class="label">Phone:</span> <span id="conv-phone">-</span></div>
+        </div>
+
+        <div id="conversation-messages" class="scroll-list conversation-messages"></div>
+
+        <form id="reply-form">
+          <label for="reply-text">Balas</label>
+          <textarea id="reply-text" name="reply-text" rows="2" placeholder="Halo, ada yang bisa saya bantu?" required></textarea>
+          <button type="submit">BALAS</button>
+        </form>
+        <p id="reply-feedback" class="feedback"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. Incoming Messages (raw, semua chat)</h2>
+      <div id="messages-list" class="scroll-list">
+        <p class="empty-state">Belum ada pesan masuk.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>5. Event / Log</h2>
+      <div id="events-list" class="scroll-list events-list">
+        <p class="empty-state">Belum ada event.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>POC Gateway WhatsApp &middot; Tidak untuk production &middot; Data pesan disimpan sementara (in-memory)</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

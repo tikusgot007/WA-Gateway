@@ -1,0 +1,343 @@
+# WA Gateway POC
+
+Proof-of-concept WhatsApp Gateway berbasis [Baileys](https://github.com/WhiskeySockets/Baileys), berjalan di Windows, dengan Test Dashboard sederhana.
+
+**Tujuan POC ini HANYA membuktikan**: Gateway bisa login ke WhatsApp, session persisten, menerima pesan, mengirim pesan, reconnect otomatis, dan status dapat dipantau — semuanya lewat dashboard web sederhana.
+
+**POC ini TIDAK berisi**: shared inbox kasir, assignment chat, login kasir, database pelanggan/transaksi, integrasi AuliaPos, CRM, chatbot/AI, broadcast/bulk messaging. Fitur-fitur itu sengaja belum dibangun — akan menjadi bagian dari Server Inbox terpisah di tahap berikutnya.
+
+---
+
+## 1. Struktur Project
+
+```
+gateway/
+├── src/
+│   ├── whatsapp/
+│   │   ├── connectionManager.js   # Lifecycle koneksi Baileys: connect, QR, reconnect, logout
+│   │   ├── messageStore.js        # Penyimpanan pesan masuk sementara (in-memory)
+│   │   └── normalize.js           # Normalisasi nomor -> JID, ekstrak nomor dari JID
+│   ├── api/
+│   │   ├── server.js              # Setup Express (static dashboard + API + error handler)
+│   │   └── routes.js              # Semua endpoint /api/*
+│   ├── config/
+│   │   └── index.js               # Baca konfigurasi dari .env
+│   ├── logging/
+│   │   └── index.js               # Logger (pino) + ring buffer event untuk dashboard
+│   └── app/
+│       └── index.js               # Entry point aplikasi
+├── public/                        # Test Dashboard (HTML/CSS/JS statis, tanpa build step)
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+├── auth/                          # Session WhatsApp tersimpan di sini (dibuat otomatis, JANGAN di-commit/share)
+├── .env.example
+├── package.json
+└── README.md
+```
+
+Catatan: folder `src/dashboard` yang disebut di brief awal digabung menjadi folder `public/` di root, karena dashboard ini adalah static file (HTML/CSS/JS) yang di-serve langsung oleh Express — tidak perlu build step tambahan untuk POC.
+
+---
+
+## 2. Teknologi & Dependency
+
+| Package  | Versi   | Fungsi |
+|----------|---------|--------|
+| `baileys` | 6.7.24 | Library WhatsApp Web API (dipakai versi stabil terbaru, BUKAN versi `7.0.0-rc*` yang masih rilis kandidat/belum stabil) |
+| `express` | ^4.19.x | HTTP API + static file server untuk dashboard |
+| `qrcode`  | ^1.5.x | Konversi QR string dari Baileys menjadi gambar (data URL) untuk ditampilkan di dashboard |
+| `pino`    | ^9.6.x | Logging terstruktur (dipakai juga oleh Baileys secara internal) |
+| `@hapi/boom` | ^9.1.x | Untuk membaca kode error disconnect dari Baileys |
+| `dotenv`  | ^16.4.x | Baca konfigurasi dari file `.env` |
+
+Node.js minimum: **v20** (persyaratan dari `baileys`). Sudah diuji dengan Node v22.
+
+**Keputusan teknis: kenapa Baileys 6.7.24, bukan versi terbaru?**
+Saat POC ini dibuat, versi terbaru yang terpublikasi di npm adalah `7.0.0-rc14` (release candidate, belum stabil/final). Karena tujuan POC adalah pembuktian yang bisa diandalkan untuk uji coba nyata, dipilih versi stabil terakhir (`6.7.24`) agar tidak terpengaruh potensi bug dari rilis kandidat yang belum matang. Jika nanti versi 7.x sudah rilis stabil, upgrade cukup mengubah versi di `package.json` — arsitektur Gateway ini tidak bergantung pada API internal yang sifatnya sementara.
+
+---
+
+## 3. Cara Menjalankan di Windows
+
+### 3.1 Prerequisite
+
+1. Install **Node.js versi 20 LTS atau lebih baru** dari https://nodejs.org (pilih installer Windows, jalankan, next-next selesai).
+2. Pastikan komputer terhubung ke **LAN toko** dan **internet** (WhatsApp Web butuh koneksi internet aktif).
+3. Siapkan HP dengan WhatsApp aktif untuk proses scan QR.
+
+Cek instalasi Node.js dengan membuka **Command Prompt** atau **PowerShell**, lalu ketik:
+
+```
+node -v
+npm -v
+```
+
+Jika muncul versi Node (contoh `v20.x.x`) dan npm, instalasi berhasil.
+
+### 3.2 Install Dependency
+
+1. Ekstrak/salin folder `gateway` ke komputer Windows, misalnya ke `C:\wa-gateway`.
+2. Buka Command Prompt/PowerShell, masuk ke folder tersebut:
+   ```
+   cd C:\wa-gateway
+   ```
+3. Install dependency:
+   ```
+   npm install
+   ```
+
+### 3.3 Konfigurasi Environment
+
+1. Salin file `.env.example` menjadi `.env`:
+   ```
+   copy .env.example .env
+   ```
+2. Buka `.env` dengan text editor (Notepad cukup), sesuaikan bila perlu. Untuk mulai, nilai default sudah aman (`HOST=127.0.0.1`, hanya bisa diakses dari komputer itu sendiri).
+
+### 3.4 Menjalankan Gateway
+
+```
+npm start
+```
+
+Jika berhasil, akan muncul log seperti:
+```
+Gateway starting
+HTTP API + Dashboard berjalan di http://127.0.0.1:3000
+```
+
+Biarkan jendela terminal ini tetap terbuka selama Gateway digunakan. Untuk menghentikan, tekan `Ctrl + C`.
+
+### 3.5 Membuka Dashboard
+
+Buka browser di komputer yang sama, akses:
+
+```
+http://127.0.0.1:3000
+```
+
+---
+
+## 4. First Login (Scan QR)
+
+1. Jalankan Gateway (`npm start`) dan buka dashboard.
+2. Karena belum pernah login, dashboard akan menampilkan **QR Code** di bagian "Connection Status" (muncul dalam beberapa detik setelah status `connecting`).
+3. Di HP, buka WhatsApp → **Setelan/Settings** → **Perangkat Tertaut/Linked Devices** → **Tautkan Perangkat/Link a Device**.
+4. Scan QR yang tampil di dashboard.
+5. Setelah berhasil, status di dashboard akan berubah menjadi `connected` dan nomor WhatsApp yang terhubung akan ditampilkan.
+6. Session tersimpan otomatis di folder `auth/`. Selama folder ini tidak dihapus dan belum logout dari HP, Gateway **tidak perlu scan QR lagi** meski aplikasi direstart.
+
+---
+
+## 5. Endpoint API
+
+Semua response berbentuk JSON dengan format `{ ok: boolean, data?: ..., error?: string }`.
+
+| Method | Endpoint | Fungsi |
+|--------|----------|--------|
+| GET  | `/api/status` | Status koneksi saat ini (status, nomor, waktu connect/disconnect, alasan disconnect terakhir) |
+| GET  | `/api/qr` | QR code terbaru (sebagai data URL gambar), jika sedang tersedia |
+| GET  | `/api/messages?limit=50` | Daftar pesan masuk terbaru (dari memory, default 50) |
+| POST | `/api/messages/send` | Kirim pesan teks. Body: `{ "to": "628xxxxxxxxxx", "text": "..." }` |
+| POST | `/api/reconnect` | Memicu reconnect manual |
+| POST | `/api/logout` | Logout dari WhatsApp + hapus session, sehingga QR baru diminta |
+| GET  | `/api/events` | Log event terbaru (dipakai dashboard untuk panel Event/Log) — endpoint tambahan di luar daftar minimal, dibuat sesederhana mungkin untuk kebutuhan panel log realtime |
+| GET  | `/api/chats` | Daftar conversation, dikelompokkan berdasarkan `chatId` (JID asli — bisa `@s.whatsapp.net` atau `@lid`). Lihat §12. |
+| GET  | `/api/chats/:chatId/messages` | Pesan milik satu conversation saja. `chatId` harus di-`encodeURIComponent()` oleh client (mis. `255490491736112%40lid`). |
+| POST | `/api/chats/:chatId/reply` | Balas satu conversation. `chatId` dari URL dipakai **langsung** sebagai target kirim ke Baileys — tidak pernah dikonversi ke nomor telepon. Body: `{ "text": "..." }` |
+
+Contoh kirim pesan dengan `curl`:
+
+```
+curl -X POST http://127.0.0.1:3000/api/messages/send ^
+  -H "Content-Type: application/json" ^
+  -d "{\"to\":\"628123456789\",\"text\":\"Pesan test\"}"
+```
+
+### Peringatan Security jika API dibuka ke LAN
+
+Secara default, `HOST=127.0.0.1` sehingga API **hanya bisa diakses dari komputer itu sendiri**. Jika diubah menjadi `HOST=0.0.0.0` agar bisa diakses dari komputer lain di LAN toko (mis. untuk keperluan pengembangan Server Inbox berikutnya):
+
+- **API ini belum memiliki authentication apa pun.** Siapa pun yang terhubung ke jaringan LAN yang sama dapat membaca pesan masuk, mengirim pesan atas nama nomor toko, memicu reconnect, atau melakukan logout/reset session.
+- Jangan pernah expose ke internet (jangan forward port ini di router/firewall).
+- Untuk penggunaan lebih dari sekadar POC internal, tambahkan authentication (API key sederhana atau JWT) sebelum membuka ke LAN secara luas.
+
+---
+
+## 6. Dashboard
+
+Dashboard (`http://127.0.0.1:3000`) memiliki 4 bagian:
+
+1. **Connection Status** — status realtime (polling tiap 2 detik), nomor WhatsApp terhubung, waktu connect/disconnect terakhir, alasan disconnect terakhir, tombol **Reconnect** dan **Logout/Reset Session**. QR code otomatis tampil di sini ketika belum login.
+2. **Send Test Message** — form nomor tujuan + teks pesan, tombol KIRIM. Menampilkan hasil sukses (dengan message ID) atau pesan error.
+3. **Incoming Messages** — daftar pesan masuk terbaru (nama pengirim, nomor, isi pesan, waktu, message ID), diperbarui otomatis tanpa reload halaman (polling tiap 3 detik).
+4. **Event / Log** — daftar event penting (startup, connecting, QR generated, connected, incoming/outgoing message, disconnect, reconnect, dst).
+
+Dashboard menggunakan polling sederhana (bukan WebSocket) sesuai instruksi POC — cukup untuk kebutuhan pembuktian, tanpa kompleksitas tambahan.
+
+---
+
+## 7. Testing Checklist
+
+| # | Test | Langkah | Kriteria Sukses |
+|---|------|---------|------------------|
+| 1 | First Login | Start Gateway → buka dashboard → scan QR | Status berubah menjadi `connected`, nomor WhatsApp tampil |
+| 2 | Incoming Message | Kirim WhatsApp dari nomor lain ke nomor Gateway | Pesan muncul di panel "Incoming Messages" tanpa reload |
+| 3 | Outgoing Message | Isi form Send Test Message → KIRIM | Pesan sampai ke WhatsApp tujuan, dashboard menampilkan message ID |
+| 4 | Restart | Gateway connected → stop (`Ctrl+C`) → `npm start` lagi | Status kembali `connected` tanpa perlu scan QR ulang |
+| 5 | Reconnect | Putuskan koneksi internet komputer sebentar → sambungkan lagi | Status berubah `reconnecting` lalu kembali `connected` otomatis |
+| 6 | Logout | Klik tombol Logout/Reset Session di dashboard | Status `disconnected` lalu QR baru muncul kembali |
+| 7 | Gateway Mati (Reconciliation) | Matikan Gateway → kirim pesan dari nomor lain → nyalakan Gateway lagi | Lihat bagian §9 "Keterbatasan" — hasil test ini **tidak bisa dijamin**, lihat penjelasan |
+
+Jalankan checklist ini di lingkungan Windows nyata dengan koneksi internet dan nomor WhatsApp aktif, karena Test 1–7 semuanya bergantung pada koneksi nyata ke server WhatsApp.
+
+---
+
+## 8. Hasil Test yang Sudah Dilakukan di Lingkungan Development
+
+Implementasi ini dikembangkan dan diverifikasi sebagian di lingkungan sandbox Linux (bukan Windows) yang **tidak memiliki akses jaringan ke server WhatsApp** (`web.whatsapp.com` dan sejenisnya diblokir oleh firewall sandbox). Berikut yang **sudah** dan **belum** bisa diverifikasi di lingkungan tersebut:
+
+**Sudah diverifikasi (tidak butuh koneksi ke WhatsApp):**
+- Aplikasi start tanpa error, HTTP server berjalan di host/port sesuai `.env`.
+- Endpoint `/api/status`, `/api/qr`, `/api/messages`, `/api/events` merespons format JSON yang benar.
+- Validasi input `/api/messages/send`: nomor tidak valid, teks kosong, dan teks terlalu panjang ditolak dengan pesan error yang jelas.
+- Mengirim pesan ketika status belum `connected` ditolak dengan error `WhatsApp belum connected` (tidak mencoba mengirim ke Baileys).
+- Folder `auth/` (session) **tidak dapat diakses lewat HTTP** (hanya folder `public/` yang di-serve sebagai static file) — dicoba akses langsung dan mengembalikan `404`.
+- Graceful shutdown (`SIGTERM`/`SIGINT`) menutup socket Baileys dan HTTP server dengan bersih, log shutdown tercatat.
+- Proses fetch versi WhatsApp Web terbaru (`fetchLatestBaileysVersion`) berhasil dijalankan tanpa error.
+- Dashboard (HTML/CSS/JS) ter-load dan bisa memanggil semua endpoint di atas.
+
+**BELUM bisa diverifikasi di lingkungan development** (butuh koneksi nyata ke WhatsApp + nomor HP aktif untuk scan QR), **harus diuji ulang di Windows oleh Anda sebelum dianggap "lulus POC"**:
+- Test 1 (First Login / scan QR sungguhan)
+- Test 2 (Incoming Message sungguhan)
+- Test 3 (Outgoing Message sungguhan ke nomor tujuan asli)
+- Test 4 (Restart + validasi session tetap valid dari sisi WhatsApp)
+- Test 5 (Reconnect sungguhan setelah internet terputus)
+- Test 6 (Logout sungguhan dari sisi WhatsApp)
+- Test 7 (Reconciliation pesan saat Gateway mati)
+
+Silakan jalankan checklist di §7 langsung di Windows dengan nomor WhatsApp uji coba, dan laporkan hasilnya — kode ini siap diuji tetapi **klaim "berhasil" untuk ketujuh test di atas belum bisa saya buktikan sendiri** karena keterbatasan jaringan di lingkungan tempat saya membangun POC ini.
+
+---
+
+## 9. Keterbatasan POC
+
+1. **Reconciliation pesan saat Gateway mati (Test 7) tidak dapat dijamin.** Baileys/WhatsApp Web multi-device pada dasarnya adalah *client* yang menerima pesan secara real-time melalui koneksi socket yang aktif. Ketika Gateway (dan socket-nya) mati, tidak ada mekanisme resmi dan terdokumentasi di Baileys untuk "menarik ulang" seluruh pesan yang terlewat dari server WhatsApp persis seperti membaca inbox email. Yang mungkin terjadi (tergantung durasi mati dan perilaku WhatsApp multi-device saat ini):
+   - Sebagian pesan bisa muncul kembali sesaat setelah reconnect jika WhatsApp mengirim ulang event yang belum di-ack, **atau**
+   - Pesan tersebut tetap tersimpan di riwayat chat HP utama (karena WhatsApp multi-device menyinkronkan dari HP), tetapi tidak otomatis "didorong ulang" sebagai event baru ke Gateway.
+   - Ini harus diuji langsung (Test 7) dan hasilnya harus didokumentasikan apa adanya — **jangan mengasumsikan pesan yang terlewat pasti bisa diambil ulang**. Jika toko butuh jaminan tidak ada pesan yang hilang, Gateway idealnya dijalankan tanpa henti selama jam operasional, bukan mengandalkan reconciliation setelah mati.
+2. **Pesan hanya disimpan di memory**, akan hilang setiap Gateway direstart. Ini sesuai instruksi POC (tidak perlu database bisnis).
+3. **Hanya mendukung pesan teks** untuk pesan masuk maupun keluar. Gambar, dokumen, media lain belum ditangani (di luar scope POC).
+4. **API belum memiliki authentication.** Aman selama `HOST=127.0.0.1` (default). Jika dibuka ke LAN, lihat peringatan security di §5.
+5. **Bukan Windows Service.** Untuk POC, Gateway dijalankan manual dari terminal. Struktur kode (pemisahan `config`, `logging`, `whatsapp`, `api`, `app`) sudah dirancang agar mudah dibungkus menjadi Windows Service/autostart nantinya (mis. dengan `node-windows` atau `pm2-windows-service`), tapi itu belum diimplementasikan di POC ini.
+6. **Satu nomor WhatsApp per Gateway.** POC ini tidak mendukung multi-akun WhatsApp dalam satu instance.
+7. **Belum diuji di Windows sungguhan** oleh proses otomatis ini — lihat §8. Kode sudah diverifikasi berjalan tanpa error di Node.js v20+ di Linux; perilaku Windows (path folder, `npm install`, dsb.) mengikuti konvensi Node.js standar yang sama di kedua OS, tetapi tetap perlu dikonfirmasi langsung.
+
+---
+
+## 10. Logout / Reset Session (untuk kebutuhan testing)
+
+Dua cara:
+
+- **Dari dashboard**: klik tombol "Logout / Reset Session" di panel Connection Status.
+- **Manual via API**: `POST /api/logout`
+- **Manual via filesystem** (jika Gateway sedang tidak berjalan): hentikan aplikasi, hapus folder `auth/` secara manual, lalu jalankan `npm start` lagi — QR baru akan diminta.
+
+---
+
+## 11. Troubleshooting Umum
+
+| Gejala | Kemungkinan Penyebab | Solusi |
+|--------|----------------------|--------|
+| QR tidak muncul-muncul | Tidak ada koneksi internet, atau firewall Windows/antivirus memblokir koneksi keluar Node.js | Pastikan internet aktif; izinkan Node.js pada firewall/antivirus |
+| Status stuck di `connecting` | Koneksi ke server WhatsApp lambat/terblokir | Tunggu beberapa saat; jika lebih dari 1-2 menit, klik Reconnect atau restart Gateway |
+| Setelah restart, diminta scan QR lagi padahal sebelumnya sudah login | Folder `auth/` terhapus/berpindah, atau sudah logout dari HP (Linked Devices) | Cek folder `auth/` ada dan tidak kosong; cek di HP apakah device masih tertaut |
+| Status `logged_out` terus, tidak auto-reconnect | Ini disengaja — setelah logout dari sisi WhatsApp, Gateway tidak auto-reconnect agar tidak loop error. Perlu reset session | Klik "Logout / Reset Session" di dashboard, lalu scan QR baru |
+| Error `EADDRINUSE` saat start | Port 3000 sudah dipakai aplikasi lain | Ubah `PORT` di `.env`, atau hentikan aplikasi lain yang memakai port tersebut |
+| Pesan keluar gagal terkirim | WhatsApp belum `connected`, atau nomor tujuan format salah | Cek status di dashboard; pastikan nomor tujuan format `628xxxxxxxxxx` |
+| Dashboard tidak bisa dibuka dari komputer lain di LAN | `HOST` masih `127.0.0.1` (default, sengaja hanya localhost) | Ubah `HOST=0.0.0.0` di `.env` — **baca peringatan security di §5 dulu** |
+| `npm install` gagal di Windows karena native build tool | Beberapa dependency transititif kadang butuh build tools | Install "Visual Studio Build Tools" (opsional) atau gunakan Node.js versi LTS terbaru yang biasanya sudah menyediakan prebuilt binary |
+
+---
+
+## 12. Validasi Identitas Chat (`@lid`) — Update
+
+Tahap ini menambahkan validasi bahwa chat dengan `remoteJid` berformat `xxx@lid` (LID/Linked Identity — lihat penjelasan di bawah) tetap dapat diperlakukan sebagai satu conversation yang konsisten, **tanpa pernah memaksa angka LID menjadi nomor telepon**.
+
+### 12.1 File yang diubah/ditambahkan
+
+| File | Perubahan |
+|------|-----------|
+| `src/whatsapp/jidUtils.js` (baru) | Wrapper tipis di atas util resmi Baileys (`isJidUser`, `isLidUser`, `isJidGroup`, `jidDecode`) untuk klasifikasi JID (`pn`/`lid`/`group`/`unknown`) dan ekstraksi nomor telepon **hanya** jika JID memang `@s.whatsapp.net`. |
+| `src/whatsapp/messageStore.js` | Ditambahkan `getByChatId(chatId)` (filter exact-match berdasarkan chatId) dan `listConversations()` (kelompokkan pesan jadi daftar chat). Tidak menghapus method lama. |
+| `src/whatsapp/connectionManager.js` | `_handleIncomingMessage` sekarang menghitung `jidType` dan **tidak lagi** mengisi `sender.phone` dari angka LID (dulu bug ini yang menyebabkan `255490491736112@lid` tampil seperti nomor Tanzania). Ditambahkan method baru `sendReply(chatId, text)` yang mengirim **langsung** ke `chatId` apa adanya (tanpa normalisasi), plus log diagnostik `[CHAT]`/`[SEND]`. |
+| `src/api/routes.js` | Endpoint baru: `GET /api/chats`, `GET /api/chats/:chatId/messages`, `POST /api/chats/:chatId/reply`. Endpoint lama (`/api/messages`, `/api/messages/send`, dll) **tidak diubah/dihapus**. |
+| `public/index.html`, `public/app.js`, `public/style.css` | Panel dashboard baru "Conversations": daftar chat, tampilan per-conversation, tombol "Balas". Panel lama tetap ada. |
+| `test/simulate-lid-conversation.js` (baru) | Skrip simulasi in-process (bukan test end-to-end nyata) untuk validasi logika klasifikasi JID, isolasi antar-chat, dan penolakan `sendReply` pada input tidak valid. |
+
+### 12.2 Bagaimana identity conversation ditentukan
+
+`chatId` = `remoteJid` **asli** dari event Baileys, disimpan string-for-string tanpa modifikasi. Dua pesan dianggap satu conversation jika dan hanya jika `chatId`-nya identik secara exact-string-match. Tidak ada normalisasi, tidak ada mapping LID→nomor telepon di jalur ini.
+
+`jidType` (`pn` / `lid` / `group` / `unknown`) dihitung dari akhiran domain JID (`@s.whatsapp.net`, `@lid`, `@g.us`) menggunakan fungsi resmi Baileys (`isJidUser`, `isLidUser`, `isJidGroup`) — bukan implementasi tebak-tebakan sendiri.
+
+### 12.3 Bagaimana mekanisme reply menentukan target
+
+`POST /api/chats/:chatId/reply` mengambil `chatId` langsung dari URL (JID asli conversation yang sedang dibuka di dashboard) dan meneruskannya **tanpa perubahan** ke `connectionManager.sendReply(chatId, text)`, yang pada akhirnya memanggil `sock.sendMessage(chatId, { text })` milik Baileys. Tidak ada pemanggilan `normalizeToJid()` atau `jidToPhone()` di jalur pengiriman ini. Endpoint lama `/api/messages/send` (untuk kirim ke nomor telepon bebas) tetap memakai `normalizeToJid()` seperti sebelumnya — jalur ini sengaja dipisah dan tidak digabung.
+
+### 12.4 Apakah `@lid` berhasil dibalas secara teknis?
+
+**Ditemukan dukungan resmi di Baileys 6.7.24**: pada `node_modules/baileys/lib/Socket/messages-send.js`, fungsi `relayMessage` memiliki cabang eksplisit `const isLid = server === 'lid'` dan membentuk `destinationJid` dengan mempertahankan server `lid` apa adanya — ini bukan side-effect, melainkan jalur resmi yang memang disediakan Baileys untuk mengirim ke JID ber-server `lid`. `sock.sendMessage(lidJid, { text })` karena itu adalah mekanisme resmi, bukan workaround buatan sendiri.
+
+**Namun** — ini penting — dukungan di level kode Baileys hanya membuktikan bahwa *jalur pengirimannya ada dan valid secara desain*. Apakah pesan **benar-benar sampai** ke pelanggan saat dikirim ke `@lid` sungguhan, itu baru bisa dibuktikan lewat **TEST B** dengan koneksi WhatsApp nyata (lihat §12.6) — dan itu **belum bisa saya lakukan sendiri** karena lingkungan tempat saya membangun ini tidak punya akses jaringan ke server WhatsApp (lihat §8 dokumen sebelumnya). Silakan jalankan TEST B di Windows dan laporkan hasilnya.
+
+### 12.5 Yang sudah diverifikasi lewat simulasi (`node test/simulate-lid-conversation.js`)
+
+Simulasi ini menjalankan kode asli `connectionManager._handleIncomingMessage`, `messageStore`, dan `jidUtils` secara in-process (tanpa socket WhatsApp sungguhan) dengan payload event palsu yang meniru struktur asli Baileys. Hasilnya — **semua PASS**:
+
+1. `classifyJid` mengklasifikasikan `@s.whatsapp.net` → `pn`, `@lid` → `lid`, `@g.us` → `group`, string sembarang → `unknown`.
+2. `extractPhoneIfAvailable('255490491736112@lid')` mengembalikan `null` (bukan `255490491736112`) — bug yang Anda temukan sebelumnya sudah tidak terjadi lagi.
+3. Simulasi 1 pesan PN + 2 pesan dari LID yang sama + 1 pesan dari LID lain → menghasilkan **3 conversation terpisah** yang benar (bukan 4 pesan tercampur jadi satu, bukan juga PN dan LID pertama tertukar).
+4. `getByChatId()` untuk dua LID berbeda (`A` dan `B`) mengembalikan pesan yang benar-benar terpisah — tidak ada kebocoran pesan A ke B atau sebaliknya (memvalidasi logika TEST C).
+5. Conversation dengan `phone: null` (kasus LID tanpa mapping nomor) tetap bisa dibaca dan berisi pesan (memvalidasi logika TEST D).
+6. `isDecodableJid()` menolak string yang bukan JID valid.
+7. `sendReply()` menolak dengan `NOT_CONNECTED` saat belum ada koneksi WhatsApp aktif, dan menolak dengan `INVALID_CHAT_ID` saat `chatId` tidak valid — **sebelum** sempat mencoba mengirim apa pun.
+
+Endpoint HTTP baru juga sudah dicoba langsung dengan `curl` terhadap server yang benar-benar berjalan (`GET /api/chats`, `GET /api/chats/:chatId/messages`, `POST /api/chats/:chatId/reply`) dan merespons sesuai desain.
+
+### 12.6 TEST A/B/C/D — status: BELUM DIJALANKAN dengan koneksi WhatsApp nyata
+
+Sama seperti pada tahap POC sebelumnya, lingkungan development saya **tidak memiliki akses jaringan ke server WhatsApp**, sehingga saya tidak bisa membuktikan sendiri bahwa pesan benar-benar terkirim/diterima oleh HP asli. Yang bisa saya laporkan hanya hasil simulasi logika di atas (§12.5), bukan pengiriman nyata. Status keempat test wajib:
+
+| Test | Status | Catatan |
+|------|--------|---------|
+| TEST A — PN | **Belum dijalankan dengan WhatsApp nyata** | Logika penyimpanan & isolasi sudah diverifikasi lewat simulasi; pengiriman/penerimaan nyata perlu diuji di Windows. |
+| TEST B — LID | **Belum dijalankan dengan WhatsApp nyata** | Dukungan resmi di Baileys sudah dikonfirmasi dari source code (§12.4); apakah benar-benar sampai ke HP pelanggan **wajib** diuji langsung. |
+| TEST C — Isolasi Chat | **Logika PASS lewat simulasi**, belum lewat WhatsApp nyata | Lihat §12.5 poin 4. |
+| TEST D — No Phone | **Logika PASS lewat simulasi**, belum lewat WhatsApp nyata | Lihat §12.5 poin 5. |
+
+**Mohon jalankan keempat test ini di Windows** dengan minimal 2 nomor/akun WhatsApp berbeda (satu di antaranya idealnya akun yang memang bermigrasi ke `@lid` — lihat catatan di §12.7 soal cara memicu kondisi ini), lalu amati:
+- Apakah field `chatId` yang tersimpan benar-benar `xxx@lid` (cek lewat `GET /api/chats`).
+- Apakah setelah klik "Balas", pelanggan benar-benar menerima pesan di HP-nya.
+- Apakah balasan pelanggan berikutnya masuk ke conversation yang sama (bukan bikin entry baru di `GET /api/chats`).
+
+Jika ada langkah yang gagal, laporkan **pesan error asli** dari panel "Event / Log" di dashboard (atau `logs/gateway.log`) — jangan hanya "gagal", karena error asli dari Baileys/WhatsApp akan menentukan apakah ini keterbatasan protokol atau bug di kode.
+
+### 12.7 Catatan tentang kapan `@lid` muncul
+
+`@lid` bukan sesuatu yang bisa dipicu manual dari sisi Gateway — itu keputusan WhatsApp per-akun/per-kontak sebagai bagian dari migrasi bertahap ke sistem "Linked Identity" untuk privasi (nomor telepon disembunyikan dari pihak lain). Berdasarkan riset komunitas Baileys (banyak dilaporkan di [issue tracker resminya](https://github.com/WhiskeySockets/Baileys/issues/1718)), migrasi ini berjalan bertahap dan tidak seragam — sebagian kontak Anda mungkin sudah `@lid`, sebagian masih `@s.whatsapp.net`. Untuk TEST B, gunakan nomor pelanggan yang saat ini memang muncul sebagai `@lid` di dashboard (seperti pada screenshot yang Anda kirim sebelumnya) — jangan mencoba memaksa/mensimulasikan LID secara manual.
+
+### 12.8 Yang masih perlu divalidasi sebelum jadi backend shared inbox
+
+1. **Pemetaan LID ↔ riwayat chat lama.** Jika toko sudah punya riwayat percakapan dengan pelanggan sebelum migrasi ke LID, WhatsApp/Baileys **tidak menjamin** bisa menyambungkan riwayat lama (`@s.whatsapp.net`) dengan identitas baru (`@lid`) milik kontak yang sama — ini dikonfirmasi sebagai keterbatasan terbuka di Baileys ([issue #2551](https://github.com/WhiskeySockets/Baileys/discussions/2551)), bukan sesuatu yang bisa diperbaiki dari sisi Gateway ini.
+2. **Konsistensi `@lid` vs `@s.whatsapp.net` untuk satu kontak yang sama** dari sisi Gateway vs sisi HP utama pemilik akun — pernah dilaporkan Baileys menerima pesan masuk sebagai `@lid` tapi pesan keluar dari HP (device lain yang tertaut) tercatat sebagai `@s.whatsapp.net` untuk kontak yang identik ([issue #1832](https://github.com/WhiskeySockets/Baileys/issues/1832)). Ini berarti *dua chatId berbeda* bisa merujuk ke *satu pelanggan yang sama* — sebelum dipakai sebagai backend shared inbox sungguhan, ini perlu ditelusuri lebih jauh apakah terjadi juga di akun toko Anda.
+3. **Grup (`@g.us`)** belum diuji sama sekali di tahap ini (fokus POC ini sengaja hanya PN vs LID untuk chat personal).
+4. **Volume/skala**: `messageStore` masih in-memory tanpa batas per-chat (hanya batas total pesan lewat `MAX_MESSAGES_IN_MEMORY`) — untuk shared inbox sungguhan, dengan banyak conversation aktif sekaligus, pesan lama di satu chat bisa "terdesak keluar" oleh pesan baru di chat lain. Ini perlu didesain ulang (bukan sekadar dinaikkan angkanya) sebelum production.
+5. Semua keterbatasan yang sudah didokumentasikan di §9 (dokumen sebelumnya) — reconciliation pesan saat Gateway mati, hanya pesan teks, tanpa authentication API, dll — masih berlaku dan belum berubah.
+
+---
+
+## 13. Yang Sengaja TIDAK Dibangun di POC Ini
+
+Sesuai batasan scope yang diminta, POC ini **tidak** memiliki: shared inbox kasir, sistem assignment/"ambil chat", user/login kasir, database pelanggan, integrasi AuliaPos, database transaksi, CRM, chatbot/AI chatbot, broadcast/bulk messaging, atau fitur marketing. Semua itu berada di luar scope dan akan menjadi bagian dari Server Inbox terpisah pada tahap berikutnya, setelah POC Gateway ini terbukti berjalan baik.
