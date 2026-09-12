@@ -349,34 +349,62 @@ class ConnectionManager {
     let media = null;
 
     if (text === null) {
-      // Bukan pesan teks biasa -- cek apakah gambar/dokumen (didukung),
-      // selain itu (audio/video/sticker/lokasi/dst) di luar scope untuk
-      // sekarang, cukup di-log & dilewati.
+      // Bukan pesan teks biasa -- cek apakah gambar/dokumen/audio/video
+      // (didukung), selain itu (sticker/lokasi/kontak/dst) di luar scope
+      // untuk sekarang, cukup di-log & dilewati.
       const imageMsg = msg.message.imageMessage;
       const documentMsg = msg.message.documentMessage;
+      const audioMsg = msg.message.audioMessage;
+      const videoMsg = msg.message.videoMessage;
 
       if (imageMsg) {
         messageType = 'image';
         text = imageMsg.caption || null;
         media = buildMediaRef(imageMsg, 'image', null);
+
+        if (!media) {
+          // directPath/mediaKey tidak lengkap -- pesan media ini tidak
+          // bisa didekripsi nanti, tidak ada gunanya diteruskan.
+          logger.warn('Pesan media diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
+            messageId: msg.key?.id,
+            messageType,
+          });
+          return;
+        }
       } else if (documentMsg) {
         messageType = 'document';
         text = documentMsg.caption || null;
         media = buildMediaRef(documentMsg, 'document', documentMsg.fileName || null);
+
+        if (!media) {
+          logger.warn('Pesan media diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
+            messageId: msg.key?.id,
+            messageType,
+          });
+          return;
+        }
+      } else if (audioMsg || videoMsg) {
+        // Audio (termasuk voice note/PTT -- dianggap audio biasa, TIDAK
+        // ada tipe/business logic terpisah) dan video: BEDA PRINSIP dari
+        // image/document -- binary-nya TIDAK PERNAH diambil sama sekali
+        // (bukan cuma "tidak disimpan", tapi memang tidak pernah
+        // didownload/didekripsi baik di Gateway maupun di AuliaPos), jadi
+        // TIDAK PERLU directPath/mediaKey/buildMediaRef() sama sekali --
+        // cukup metadata ringan (mimetype + ukuran) buat ditampilkan di
+        // Inbox POS sebagai placeholder ("cek WhatsApp Web").
+        const mediaMsg = audioMsg || videoMsg;
+        messageType = audioMsg ? 'audio' : 'video';
+        // audioMessage tidak punya caption (WhatsApp tidak mengizinkan
+        // caption pada voice note/audio); videoMessage punya.
+        text = mediaMsg.caption || null;
+        media = {
+          mimetype: mediaMsg.mimetype || null,
+          fileLength: mediaMsg.fileLength ? Number(mediaMsg.fileLength) : null,
+        };
       } else {
-        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen)', {
+        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/audio/video)', {
           messageId: msg.key?.id,
           type: Object.keys(msg.message)[0],
-        });
-        return;
-      }
-
-      if (!media) {
-        // directPath/mediaKey tidak lengkap -- pesan media ini tidak
-        // bisa didekripsi nanti, tidak ada gunanya diteruskan.
-        logger.warn('Pesan media diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
-          messageId: msg.key?.id,
-          messageType,
         });
         return;
       }

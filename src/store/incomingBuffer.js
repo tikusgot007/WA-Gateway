@@ -130,9 +130,14 @@ class IncomingBuffer {
    * atau 'outgoing' (balasan staff dari WA Web/HP langsung, di luar
    * POS -- fromMe=true di Baileys).
    *
-   * event.messageType: 'text' (default) | 'image' | 'document'.
-   * event.media: object referensi media (lihat buildMediaRef() di
-   * connectionManager.js) untuk 'image'/'document', null untuk teks.
+   * event.messageType: 'text' (default) | 'image' | 'document' |
+   * 'audio' | 'video'.
+   * event.media: untuk 'image'/'document', object referensi lengkap
+   * (lihat buildMediaRef() di connectionManager.js, dipakai untuk
+   * download ulang on-demand). Untuk 'audio'/'video', cuma metadata
+   * ringan ({mimetype, fileLength}, TANPA referensi download -- binary-
+   * nya tidak pernah diambil sama sekali, lihat _handleIncomingMessage()).
+   * null untuk teks.
    */
   enqueue(event) {
     const now = new Date().toISOString();
