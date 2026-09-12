@@ -56,6 +56,13 @@ function spawnGateway() {
     state = STATES.STARTING;
     intentionalStop = false;
 
+    // Spawn "node src/app/index.js" apa adanya -- SAMA PERSIS dengan cara
+    // Gateway dijalankan manual (lihat package.json "start"). Ini tetap
+    // berlaku sama baik dijalankan lewat `npm run supervisor` (node.exe
+    // sistem) maupun lewat "AuliaPos Gateway.exe" (node.exe portable yang
+    // ikut didistribusikan di folder yang sama -- lihat supervisor/README
+    // build proses) -- process.execPath di kedua kasus tetap node.exe asli
+    // yang paham cara menjalankan file .js biasa.
     const c = spawn(process_.execPath, [config.gateway.entry], {
       cwd: config.gateway.cwd,
       env: process_.env,

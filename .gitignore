@@ -16,6 +16,10 @@ node_modules/
 /data/
 /logs/
 
+# === Build output standalone exe (scripts/build-exe.ps1) -- dibuat ulang
+# dari source, jangan commit binary + node.exe + node_modules copy-nya ===
+/dist/
+
 # === OS/editor ===
 .DS_Store
 Thumbs.db
