@@ -189,12 +189,23 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       chatId,
       mediaType,
       waMessageId: result.messageId,
+      mediaRefTersedia: Boolean(result.mediaRef),
     });
 
+    // media_ref (kalau ada) memakai nama field YANG SAMA dengan payload
+    // referensi media MASUK (direct_path/media_key_base64) supaya CI4 bisa
+    // menyimpan & memakainya lewat alur POST /media/download yang sudah ada,
+    // tanpa endpoint/logic baru -- media KELUAR jadi bisa dibuka ulang nanti
+    // persis seperti media MASUK. Kalau Baileys tidak mengembalikan
+    // referensi lengkap (mediaRef null), field ini cukup diabaikan CI4.
     return res.json({
       success: true,
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
+      media_ref: result.mediaRef ? {
+        direct_path: result.mediaRef.directPath,
+        media_key_base64: result.mediaRef.mediaKeyBase64,
+      } : null,
     });
   } catch (err) {
     logger.error('[SEND-MEDIA-CI4] gagal mengirim media dari POS', { chatId, mediaType, error: err.message });

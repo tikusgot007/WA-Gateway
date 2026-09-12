@@ -583,15 +583,30 @@ class ConnectionManager {
 
     try {
       const result = await this.sock.sendMessage(jid, content);
+
+      // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
+      // directPath/mediaKey asli dari server WhatsApp untuk file yang baru
+      // saja diunggah -- sama persis strukturnya dengan imageMessage/
+      // documentMessage pada pesan MASUK. Diekstrak dengan buildMediaRef()
+      // yang sama supaya media KELUAR ini juga bisa diambil ulang nanti
+      // (mis. dibuka lagi dari Inbox POS) lewat alur downloadMediaByRef()
+      // yang sudah ada, TANPA perlu menyimpan file apa pun di sini.
+      const sentMediaMessage = mediaType === 'image'
+        ? result?.message?.imageMessage
+        : result?.message?.documentMessage;
+      const mediaRef = buildMediaRef(sentMediaMessage, mediaType, fileName || null);
+
       logger.info('[SEND] pesan media berhasil dikirim', {
         targetJid: jid,
         jidType,
         mediaType,
         messageId: result?.key?.id,
+        mediaRefTersedia: Boolean(mediaRef),
       });
       return {
         messageId: result?.key?.id || null,
         timestamp: new Date().toISOString(),
+        mediaRef,
       };
     } catch (err) {
       logger.error('[SEND] gagal mengirim pesan media', {
@@ -652,6 +667,12 @@ class ConnectionManager {
       fromMe: true,
     });
 
+    // mediaRef (di dalam result) diteruskan apa adanya ke pemanggil
+    // (ci4Routes.js) supaya CI4 bisa menyimpannya persis seperti referensi
+    // media MASUK -- kalau null (mis. Baileys tidak mengembalikan
+    // directPath/mediaKey untuk kasus tertentu), CI4 cukup tidak menyimpan
+    // media_metadata untuk pesan ini (bukan error fatal, cuma berarti tidak
+    // bisa dibuka ulang nanti).
     return result;
   }
 
