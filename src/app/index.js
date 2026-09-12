@@ -47,6 +47,19 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  // Dipanggil oleh Supervisor (supervisor/processManager.js) lewat IPC saat
+  // proses ini di-spawn sebagai child process (stdio 'ipc') -- jalur graceful
+  // shutdown yang sama dipakai baik dijalankan manual (SIGINT/SIGTERM) maupun
+  // dikontrol dari Control Panel. Aman dijalankan standalone (process.send
+  // undefined bila tidak ada channel IPC, listener ini cuma tidak pernah terpanggil).
+  if (typeof process.send === 'function') {
+    process.on('message', (msg) => {
+      if (msg === 'shutdown') {
+        shutdown('supervisor-ipc');
+      }
+    });
+  }
+
   // Jangan biarkan gateway crash total karena satu error tak tertangani di
   // suatu tempat (mis. dari library pihak ketiga). Cukup log, karena
   // instruksi POC: "Gateway tidak boleh crash hanya karena satu pesan/request gagal".

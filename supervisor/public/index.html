@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<title>AuliaPos Gateway - Control Panel</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header><h1>AuliaPos Gateway - Control Panel</h1></header>
+
+<div class="tokenbar">
+  <span>Supervisor Token:</span>
+  <input id="tokenInput" type="password" placeholder="tempel SUPERVISOR_TOKEN di sini" />
+  <button id="saveTokenBtn">Simpan</button>
+  <span class="hint">disimpan lokal di browser ini saja (localStorage)</span>
+</div>
+
+<main>
+  <div class="card">
+    <h2>WhatsApp Gateway</h2>
+    <div class="row">
+      <span>Status:</span>
+      <span id="stateBadge" class="badge UNKNOWN">UNKNOWN</span>
+    </div>
+    <div class="row"><span>PID:</span><span id="pidVal">-</span></div>
+    <div class="row"><span>Uptime:</span><span id="uptimeVal">-</span></div>
+    <div class="row">
+      <button id="startBtn" class="primary">Start</button>
+      <button id="stopBtn" class="danger">Stop</button>
+      <button id="restartBtn">Restart</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>WhatsApp Connection</h2>
+    <div class="row"><span>Status:</span><span id="waStatus">-</span></div>
+    <div class="row"><span>Number:</span><span id="waNumber">-</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Connection Info</h2>
+    <div class="field">
+      <label>Gateway URL</label>
+      <input id="gwUrl" type="text" readonly value="" />
+      <button data-copy="gwUrl">Copy</button>
+    </div>
+    <div class="field">
+      <label>Gateway API Token</label>
+      <input id="gwToken" type="password" readonly value="" />
+      <button id="toggleTokenBtn">Show</button>
+      <button data-copy="gwToken">Copy</button>
+    </div>
+    <div class="hint">Copy nilai di atas ke konfigurasi AuliaPos (CI4). Tidak ada sinkronisasi otomatis.</div>
+  </div>
+
+  <div class="card">
+    <h2>Logs</h2>
+    <div id="logs">(memuat...)</div>
+  </div>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

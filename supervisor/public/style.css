@@ -1,0 +1,88 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Segoe UI, Tahoma, Arial, sans-serif;
+  background: #f2f4f7;
+  color: #1f2430;
+}
+header {
+  background: #22304a;
+  color: #fff;
+  padding: 14px 20px;
+}
+header h1 { margin: 0; font-size: 18px; }
+main {
+  max-width: 760px;
+  margin: 20px auto;
+  padding: 0 16px 40px;
+}
+.card {
+  background: #fff;
+  border: 1px solid #dfe3ea;
+  border-radius: 8px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: #22304a;
+}
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+.badge.RUNNING { background: #1f8a4c; }
+.badge.STOPPED { background: #6b7280; }
+.badge.STARTING, .badge.STOPPING { background: #b8860b; }
+.badge.CRASHED { background: #c0392b; }
+.badge.UNKNOWN { background: #6b7280; }
+button {
+  border: 1px solid #c7cdd6;
+  background: #fff;
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: #22304a; color: #fff; border-color: #22304a; }
+button.danger { background: #c0392b; color: #fff; border-color: #c0392b; }
+.field { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.field label { width: 130px; font-size: 12px; color: #555; flex-shrink: 0; }
+.field input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #c7cdd6;
+  border-radius: 5px;
+  font-family: monospace;
+  font-size: 12px;
+}
+.field button { flex-shrink: 0; }
+#logs {
+  background: #12161f;
+  color: #d8dee9;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  padding: 10px;
+  border-radius: 6px;
+  height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.hint { font-size: 12px; color: #7a8090; }
+.tokenbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 16px;
+  background: #fff8e1;
+  border-bottom: 1px solid #eadfa0;
+  font-size: 12px;
+}
+.tokenbar input { flex: 1; max-width: 320px; }

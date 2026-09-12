@@ -9,7 +9,10 @@
   },
   "scripts": {
     "start": "node src/app/index.js",
-    "dev": "node --watch src/app/index.js"
+    "dev": "node --watch src/app/index.js",
+    "supervisor": "node supervisor/server.js",
+    "supervisor:install-service": "node supervisor/service.js install",
+    "supervisor:uninstall-service": "node supervisor/service.js uninstall"
   },
   "dependencies": {
     "baileys": "6.7.24",
