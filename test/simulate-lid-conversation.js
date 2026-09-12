@@ -14,14 +14,21 @@ const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('../src
 const messageStore = require('../src/whatsapp/messageStore');
 const connectionManager = require('../src/whatsapp/connectionManager');
 
-function simulateIncoming({ remoteJid, pushName, text, messageTimestamp, fromMe = false }) {
-  connectionManager._handleIncomingMessage({
+// _handleIncomingMessage() SEKARANG async (Task Group 1.5, revisi
+// LID-FIRST -> PN-LATER -- lihat _resolveLidForPhoneJid()) -- helper ini
+// HARUS di-await oleh pemanggil, kalau tidak urutan messageStore.add()
+// tidak terjamin untuk pesan jid_type='pn' (await SELALU menunda minimal
+// 1 microtask walau tidak ada operasi async nyata yang tereksekusi).
+async function simulateIncoming({ remoteJid, pushName, text, messageTimestamp, fromMe = false }) {
+  await connectionManager._handleIncomingMessage({
     key: { remoteJid, fromMe, id: 'SIM-' + Math.random().toString(36).slice(2, 10).toUpperCase() },
     pushName,
     message: { conversation: text },
     messageTimestamp,
   });
 }
+
+(async () => {
 
 console.log('--- 1. classifyJid & extractPhoneIfAvailable ---');
 assert.strictEqual(classifyJid('6281234567890@s.whatsapp.net'), 'pn');
@@ -34,10 +41,10 @@ console.log('OK: klasifikasi JID benar, LID tidak pernah dianggap nomor telepon.
 
 console.log('\n--- 2. Simulasi pesan masuk: PN + LID + group ---');
 const now = Math.floor(Date.now() / 1000);
-simulateIncoming({ remoteJid: '6281234567890@s.whatsapp.net', pushName: 'Budi (PN)', text: 'Halo dari PN', messageTimestamp: now });
-simulateIncoming({ remoteJid: '255490491736112@lid', pushName: 'Muhammad Anshar', text: 'Halo', messageTimestamp: now + 1 });
-simulateIncoming({ remoteJid: '255490491736112@lid', pushName: 'Muhammad Anshar', text: 'Wow', messageTimestamp: now + 2 });
-simulateIncoming({ remoteJid: '999888777666@lid', pushName: 'Pelanggan Lain', text: 'Pesan dari chat B', messageTimestamp: now + 3 });
+await simulateIncoming({ remoteJid: '6281234567890@s.whatsapp.net', pushName: 'Budi (PN)', text: 'Halo dari PN', messageTimestamp: now });
+await simulateIncoming({ remoteJid: '255490491736112@lid', pushName: 'Muhammad Anshar', text: 'Halo', messageTimestamp: now + 1 });
+await simulateIncoming({ remoteJid: '255490491736112@lid', pushName: 'Muhammad Anshar', text: 'Wow', messageTimestamp: now + 2 });
+await simulateIncoming({ remoteJid: '999888777666@lid', pushName: 'Pelanggan Lain', text: 'Pesan dari chat B', messageTimestamp: now + 3 });
 
 const chats = messageStore.listConversations();
 console.log(JSON.stringify(chats, null, 2));
@@ -76,7 +83,6 @@ assert.strictEqual(isDecodableJid(null), false);
 console.log('OK: isDecodableJid menolak string yang bukan JID.');
 
 console.log('\n--- 6. sendReply harus ditolak saat belum connected (tanpa koneksi nyata) ---');
-(async () => {
   try {
     await connectionManager.sendReply('255490491736112@lid', 'test balasan');
     console.log('GAGAL: seharusnya melempar error karena belum connected');
@@ -95,6 +101,7 @@ console.log('\n--- 6. sendReply harus ditolak saat belum connected (tanpa koneks
     console.log('OK: sendReply menolak chatId yang tidak valid sebelum sempat mencoba mengirim.');
   }
 
-  console.log('\n=== SEMUA SIMULASI LOGIKA LULUS ===');
-  console.log('CATATAN: ini simulasi in-process, BUKAN pengiriman nyata ke WhatsApp.');
+console.log('\n=== SEMUA SIMULASI LOGIKA LULUS ===');
+console.log('CATATAN: ini simulasi in-process, BUKAN pengiriman nyata ke WhatsApp.');
+
 })();

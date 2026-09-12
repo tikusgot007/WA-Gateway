@@ -37,12 +37,12 @@ class IncomingBuffer {
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO incoming_queue
         (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid,
-         message_type, text, media_json, message_timestamp, direction, status,
-         attempts, next_attempt_at, created_at, updated_at)
+         message_type, text, media_json, identity_hint_json, message_timestamp,
+         direction, status, attempts, next_attempt_at, created_at, updated_at)
       VALUES
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid,
-         @message_type, @text, @media_json, @message_timestamp, @direction, 'pending',
-         0, @next_attempt_at, @now, @now)
+         @message_type, @text, @media_json, @identity_hint_json, @message_timestamp,
+         @direction, 'pending', 0, @next_attempt_at, @now, @now)
     `);
 
     this.getDueStmt = this.db.prepare(`
@@ -119,6 +119,16 @@ class IncomingBuffer {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN media_json TEXT`);
       logger.info('[MIGRASI] kolom media_json ditambahkan ke incoming_queue (database SQLite lama).');
     }
+
+    if (!columnNames.includes('identity_hint_json')) {
+      // TEXT, nullable -- Task Group 1.5 (revisi LID-FIRST -> PN-LATER).
+      // JSON string berisi {lid: "<jid>@lid"} kalau berhasil di-resolve
+      // dari onWhatsApp() untuk pesan jid_type='pn' (lihat
+      // connectionManager.js _resolveLidForPhoneJid()). NULL untuk
+      // pesan lid/group, atau kalau resolusi gagal/tidak tersedia.
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN identity_hint_json TEXT`);
+      logger.info('[MIGRASI] kolom identity_hint_json ditambahkan ke incoming_queue (database SQLite lama).');
+    }
   }
 
   /**
@@ -151,6 +161,7 @@ class IncomingBuffer {
       message_type: event.messageType || 'text',
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
+      identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
       message_timestamp: event.timestamp,
       direction: event.direction === 'outgoing' ? 'outgoing' : 'incoming',
       next_attempt_at: now, // langsung boleh dicoba kirim saat itu juga

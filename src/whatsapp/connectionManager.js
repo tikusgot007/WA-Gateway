@@ -58,6 +58,14 @@ class ConnectionManager {
     this.reconnectTimer = null;
     this.isShuttingDown = false;
     this.isStarting = false; // mencegah start() dipanggil bersamaan (double start)
+
+    // Cache in-memory (hilang saat restart, sengaja -- bukan sumber
+    // kebenaran, cuma menghindari query onWhatsApp() berulang-ulang ke
+    // server WhatsApp untuk nomor yang sama) untuk hasil resolusi LID
+    // dari sebuah PN JID -- lihat _resolveLidForPhoneJid(). Key: JID PN
+    // (string), Value: JID LID hasil resolve (string) ATAU null kalau
+    // tidak ada/gagal.
+    this._lidResolutionCache = new Map();
   }
 
   getStatusSnapshot() {
@@ -322,7 +330,12 @@ class ConnectionManager {
 
     for (const msg of messages) {
       try {
-        this._handleIncomingMessage(msg);
+        // await SATU per SATU (bukan Promise.all) -- _handleIncomingMessage
+        // sekarang bisa melakukan 1 query jaringan (onWhatsApp(), lihat
+        // _resolveLidForPhoneJid()) untuk pesan PN pertama dari sebuah
+        // nomor. Diproses berurutan supaya tidak membanjiri koneksi
+        // WhatsApp dengan query paralel kalau banyak pesan masuk sekaligus.
+        await this._handleIncomingMessage(msg);
       } catch (err) {
         // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
         logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
@@ -330,7 +343,68 @@ class ConnectionManager {
     }
   }
 
-  _handleIncomingMessage(msg) {
+  /**
+   * Task Group 1.5 (revisi LID-FIRST -> PN-LATER): minta WhatsApp SENDIRI
+   * (lewat USync query resmi `sock.onWhatsApp()`, BUKAN tebakan client)
+   * memberi tahu JID @lid yang berkaitan dengan sebuah nomor PN asli.
+   * Query ini SATU ARAH SAJA (PN -> LID) -- library yang dipakai (Baileys
+   * versi terinstall) TIDAK punya mekanisme sebaliknya (LID -> PN), jadi
+   * fungsi ini TIDAK PERNAH dipanggil dengan JID @lid sebagai input (lihat
+   * pemanggil di _handleIncomingMessage -- hanya untuk pesan jid_type='pn').
+   *
+   * BEST-EFFORT & NON-FATAL: kalau belum connected, query gagal/timeout,
+   * atau server tidak mengembalikan LID (banyak akun tidak punya LID sama
+   * sekali), fungsi ini cukup mengembalikan null -- TIDAK PERNAH melempar
+   * ke pemanggil, TIDAK PERNAH menahan/menggagalkan pemrosesan pesan itu
+   * sendiri.
+   *
+   * Di-cache in-memory per JID PN supaya tidak query berulang-ulang ke
+   * server WhatsApp untuk nomor yang sama setiap kali dia kirim pesan.
+   *
+   * CATATAN KEJUJURAN: signature/perilaku `sock.onWhatsApp()` diverifikasi
+   * LANGSUNG dari source code Baileys yang ter-install (lib/Socket/chats.js
+   * + lib/WAUSync/Protocols/UsyncLIDProtocol.js) -- BUKAN ditebak dari
+   * dokumentasi/memori. TAPI belum pernah dipanggil terhadap koneksi
+   * WhatsApp SUNGGUHAN di lingkungan pengembangan ini (tidak ada akses
+   * jaringan ke server WhatsApp) -- format PERSIS nilai `lid` yang
+   * dikembalikan server BELUM diverifikasi live, karena itu hasilnya
+   * dinormalisasi defensif (ditambahkan "@lid" kalau belum ada) dan WAJIB
+   * diverifikasi ulang begitu ada koneksi nyata (lihat
+   * docs/aturan-bisnis-CHAT.md Section 12).
+   *
+   * @param {string} phoneJid JID PN asli (@s.whatsapp.net), BUKAN @lid.
+   * @returns {Promise<string|null>} JID @lid yang berkaitan, atau null.
+   */
+  async _resolveLidForPhoneJid(phoneJid) {
+    if (this._lidResolutionCache.has(phoneJid)) {
+      return this._lidResolutionCache.get(phoneJid);
+    }
+
+    let resolvedLid = null;
+
+    if (this.isConnected()) {
+      try {
+        const results = await this.sock.onWhatsApp(phoneJid);
+        const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
+
+        if (match?.lid) {
+          const rawLid = String(match.lid);
+          // Normalisasi defensif -- lihat catatan kejujuran di atas.
+          resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
+        }
+      } catch (err) {
+        logger.debug('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp() (non-fatal, dilewati)', {
+          phoneJid,
+          error: err.message,
+        });
+      }
+    }
+
+    this._lidResolutionCache.set(phoneJid, resolvedLid);
+    return resolvedLid;
+  }
+
+  async _handleIncomingMessage(msg) {
     if (!msg.message) return; // pesan protokol/kosong (mis. reaction, receipt), abaikan untuk POC
 
     // "Status" WhatsApp (Stories) bukan chat sama sekali -- JID-nya selalu
@@ -422,6 +496,19 @@ class ConnectionManager {
     // Angka di depan "@lid" TIDAK PERNAH diperlakukan sebagai nomor telepon.
     const phone = extractPhoneIfAvailable(remoteJid);
 
+    // Task Group 1.5 (revisi LID-FIRST -> PN-LATER): kalau pesan ini dari
+    // JID PN asli, tanya WhatsApp (lewat onWhatsApp(), lihat
+    // _resolveLidForPhoneJid()) apakah nomor ini punya JID @lid yang
+    // berkaitan. HANYA untuk jidType==='pn' -- TIDAK PERNAH dipanggil
+    // untuk @lid/@g.us (tidak ada gunanya/tidak didukung library, lihat
+    // docblock _resolveLidForPhoneJid()). identityHint dikirim ke CI4
+    // sebagai metadata TAMBAHAN saja -- AuliaPos yang memutuskan mau
+    // dipakai untuk apa (business logic tetap di AuliaPos, Gateway cuma
+    // transport+metadata).
+    const identityHint = jidType === 'pn'
+      ? { lid: await this._resolveLidForPhoneJid(remoteJid) }
+      : null;
+
     const normalized = {
       messageId: msg.key?.id || null,
       chatId: remoteJid,
@@ -434,6 +521,7 @@ class ConnectionManager {
       text,
       messageType,
       media,
+      identityHint: identityHint?.lid ? identityHint : null,
       timestamp: msg.messageTimestamp
         ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
         : new Date().toISOString(),

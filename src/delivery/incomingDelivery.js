@@ -39,6 +39,10 @@ async function deliverOne(event) {
     message_timestamp: event.message_timestamp,
     direction: event.direction, // 'incoming' atau 'outgoing' (sinkron dari device lain)
     media: event.media_json ? JSON.parse(event.media_json) : null,
+    // Task Group 1.5 (revisi LID-FIRST -> PN-LATER) -- metadata TAMBAHAN
+    // saja (murni transport, Gateway tidak memutuskan apa pun dari ini),
+    // lihat connectionManager.js _resolveLidForPhoneJid().
+    identity_hint: event.identity_hint_json ? JSON.parse(event.identity_hint_json) : null,
   };
 
   const result = await postToCI4('/api/inbox/gateway/messages', body);
