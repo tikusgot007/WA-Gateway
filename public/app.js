@@ -35,6 +35,12 @@
     conversationMessages: document.getElementById('conversation-messages'),
     replyForm: document.getElementById('reply-form'),
     replyFeedback: document.getElementById('reply-feedback'),
+    replyMediaForm: document.getElementById('reply-media-form'),
+    replyMediaType: document.getElementById('reply-media-type'),
+    replyMediaFile: document.getElementById('reply-media-file'),
+    replyMediaFilename: document.getElementById('reply-media-filename'),
+    replyMediaCaption: document.getElementById('reply-media-caption'),
+    replyMediaFeedback: document.getElementById('reply-media-feedback'),
   };
 
   function fmtTime(iso) {
@@ -116,7 +122,7 @@
           const jidType = m.jidType || 'unknown';
           return `
             <div class="message-item ${cls}">
-              <div>${escapeHtml(m.text)} <span class="badge badge-${escapeHtml(jidType)}">${escapeHtml(jidType)}</span></div>
+              <div>${mediaLabel(m)}${escapeHtml(m.text)} <span class="badge badge-${escapeHtml(jidType)}">${escapeHtml(jidType)}</span></div>
               <div class="meta">
                 ${m.fromMe ? 'Dari akun sendiri' : 'Dari: ' + name}
                 &middot; ${fmtTime(m.timestamp)}
@@ -232,7 +238,7 @@
           const cls = m.fromMe ? 'from-me' : 'from-customer';
           return `
             <div class="message-item ${cls}">
-              <div>${m.fromMe ? '[outgoing] ' : '[incoming] '}${escapeHtml(m.text)}</div>
+              <div>${m.fromMe ? '[outgoing] ' : '[incoming] '}${mediaLabel(m)}${escapeHtml(m.text)}</div>
               <div class="meta">${fmtTime(m.timestamp)} &middot; ID: ${escapeHtml(m.messageId || '-')}</div>
             </div>`;
         })
@@ -267,6 +273,85 @@
       submitBtn.disabled = false;
     }
   });
+
+  // Tampilkan/wajibkan input nama file hanya untuk mediaType "document"
+  // (gambar tidak butuh nama file).
+  el.replyMediaType.addEventListener('change', () => {
+    const isDocument = el.replyMediaType.value === 'document';
+    el.replyMediaFilename.classList.toggle('hidden', !isDocument);
+  });
+
+  // Baca file terpilih sebagai base64 (di sisi browser) -- Gateway tidak
+  // pernah menerima file lewat multipart, semua lewat JSON base64 supaya
+  // konsisten dengan kontrak endpoint yang dipakai CI4 (/send-media).
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result || '';
+        const commaIdx = result.indexOf(',');
+        resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+      };
+      reader.onerror = () => reject(new Error('Gagal membaca file dari browser'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  el.replyMediaForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!openChatId) return;
+
+    const file = el.replyMediaFile.files[0];
+    const mediaType = el.replyMediaType.value;
+    const caption = el.replyMediaCaption.value.trim();
+    const fileName = el.replyMediaFilename.value.trim();
+
+    if (!file) {
+      setFeedback(el.replyMediaFeedback, 'Pilih file terlebih dahulu', 'error');
+      return;
+    }
+    if (mediaType === 'document' && !fileName) {
+      setFeedback(el.replyMediaFeedback, 'Nama file wajib diisi untuk dokumen', 'error');
+      return;
+    }
+
+    const submitBtn = el.replyMediaForm.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    try {
+      const mediaBase64 = await fileToBase64(file);
+      const data = await api('/chats/' + encodeURIComponent(openChatId) + '/reply-media', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaType,
+          mediaBase64,
+          mimetype: file.type || undefined,
+          fileName: mediaType === 'document' ? fileName : undefined,
+          caption: caption || undefined,
+        }),
+      });
+      setFeedback(el.replyMediaFeedback, `Media terkirim. Message ID: ${data.messageId || '-'}`, 'success');
+      el.replyMediaForm.reset();
+      el.replyMediaFilename.classList.add('hidden');
+      refreshConversationMessages();
+      refreshChatList();
+    } catch (err) {
+      setFeedback(el.replyMediaFeedback, err.message, 'error');
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  // Label kecil "[gambar]"/"[dokumen]" untuk pesan bertipe media di daftar
+  // pesan -- caption (kalau ada) tetap ditampilkan setelah label ini.
+  function mediaLabel(m) {
+    if (m.messageType === 'image') return '[gambar] ';
+    if (m.messageType === 'document') {
+      const name = m.media && m.media.fileName ? ` (${escapeHtml(m.media.fileName)})` : '';
+      return `[dokumen${name}] `;
+    }
+    return '';
+  }
 
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';

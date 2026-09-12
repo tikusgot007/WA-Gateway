@@ -534,6 +534,128 @@ class ConnectionManager {
   }
 
   /**
+   * Kirim SATU pesan media (gambar/dokumen) ke sebuah JID, apa adanya, tanpa
+   * normalisasi/tebakan -- versi media dari sendTextMessage(). `jid` di sini
+   * boleh berupa @s.whatsapp.net, @lid, atau @g.us, sama seperti sendTextMessage().
+   *
+   * PRINSIP SAMA seperti media MASUK: Gateway TIDAK PERNAH menyimpan file media
+   * ke disk. `buffer` yang diterima di sini hanya dipegang di memory selama
+   * pemanggilan function ini (diteruskan langsung ke Baileys), tidak pernah
+   * disimpan ke property instance mana pun.
+   *
+   * @param {string} jid
+   * @param {'image'|'document'} mediaType
+   * @param {Buffer} buffer
+   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   */
+  async sendMediaMessage(jid, mediaType, buffer, options = {}) {
+    if (!this.isConnected()) {
+      const err = new Error('WhatsApp belum connected, tidak bisa mengirim pesan');
+      err.code = 'NOT_CONNECTED';
+      throw err;
+    }
+
+    const jidType = classifyJid(jid);
+    const { caption, mimetype, fileName } = options;
+
+    let content;
+    if (mediaType === 'image') {
+      content = { image: buffer, caption: caption || undefined, mimetype: mimetype || 'image/jpeg' };
+    } else if (mediaType === 'document') {
+      content = {
+        document: buffer,
+        mimetype: mimetype || 'application/octet-stream',
+        fileName: fileName || 'file',
+        caption: caption || undefined,
+      };
+    } else {
+      const err = new Error(`mediaType tidak dikenal: ${mediaType}`);
+      err.code = 'INVALID_MEDIA_TYPE';
+      throw err;
+    }
+
+    logger.info('[SEND] mengirim pesan media keluar', {
+      targetJid: jid,
+      jidType,
+      mediaType,
+      ukuranByte: buffer.length,
+    });
+
+    try {
+      const result = await this.sock.sendMessage(jid, content);
+      logger.info('[SEND] pesan media berhasil dikirim', {
+        targetJid: jid,
+        jidType,
+        mediaType,
+        messageId: result?.key?.id,
+      });
+      return {
+        messageId: result?.key?.id || null,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (err) {
+      logger.error('[SEND] gagal mengirim pesan media', {
+        targetJid: jid,
+        jidType,
+        mediaType,
+        error: err.message,
+      });
+      const wrapped = new Error(`Gagal mengirim media: ${err.message}`);
+      wrapped.code = 'SEND_FAILED';
+      throw wrapped;
+    }
+  }
+
+  /**
+   * Balas SATU conversation dengan media (gambar/dokumen) -- versi media dari
+   * sendReply(). chatId di sini SAMA PRINSIPNYA dengan sendReply(): JID asli
+   * apa adanya, TIDAK PERNAH melalui normalizeToJid()/jidToPhone().
+   *
+   * @param {string} chatId
+   * @param {'image'|'document'} mediaType
+   * @param {Buffer} buffer
+   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   */
+  async sendMediaReply(chatId, mediaType, buffer, options = {}) {
+    if (!isDecodableJid(chatId)) {
+      const err = new Error(`chatId tidak valid/tidak dapat didecode sebagai JID: ${chatId}`);
+      err.code = 'INVALID_CHAT_ID';
+      throw err;
+    }
+
+    const jidType = classifyJid(chatId);
+    logger.info('[CHAT] balasan media diminta untuk conversation', { chatId, jidType, mediaType });
+
+    const result = await this.sendMediaMessage(chatId, mediaType, buffer, options);
+
+    // Simpan ke messageStore SEPERTI sendReply(), tapi TANPA menyimpan file
+    // media itu sendiri -- cuma metadata (mimetype/fileName/ukuran). Konsisten
+    // dengan prinsip "tidak pernah simpan file" yang juga dipakai untuk media
+    // MASUK (lihat buildMediaRef(), yang juga cuma menyimpan referensi/metadata).
+    messageStore.add({
+      messageId: result.messageId,
+      chatId,
+      jidType,
+      sender: {
+        jid: this.sock?.user?.id || null,
+        phone: jidToPhone(this.sock?.user?.id) || null,
+        name: 'Gateway (akun sendiri)',
+      },
+      text: options.caption || null,
+      messageType: mediaType,
+      media: {
+        mimetype: options.mimetype || null,
+        fileName: options.fileName || null,
+        fileLength: buffer.length,
+      },
+      timestamp: result.timestamp,
+      fromMe: true,
+    });
+
+    return result;
+  }
+
+  /**
    * Ambil & dekripsi ulang 1 file media (gambar/dokumen) dari server
    * WhatsApp, ON-DEMAND, berdasarkan referensi yang tersimpan (bukan
    * file yang sudah diunduh sebelumnya -- kita memang tidak pernah

@@ -67,9 +67,27 @@ const config = {
 
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
+
+  // =============================================================
+  // Kirim media (gambar/dokumen) KELUAR -- baik dari dashboard test
+  // (/api/chats/:chatId/reply-media) maupun dari CI4 (/send-media).
+  // File media di sini HANYA dipegang di memory selama proses kirim,
+  // TIDAK PERNAH disimpan ke disk Gateway, konsisten dengan prinsip
+  // yang sama dipakai untuk media MASUK (lihat downloadMediaByRef()).
+  // =============================================================
+  maxMediaUploadBytes: toInt(process.env.MAX_MEDIA_UPLOAD_MB, 20) * 1024 * 1024,
+
+  // Timeout mengunduh media dari URL (khusus mediaUrl di dashboard test).
+  mediaFetchTimeoutMs: toInt(process.env.MEDIA_FETCH_TIMEOUT_MS, 15000),
 };
 
 // Peringatan keras jika HOST dibuka ke LAN tanpa authentication.
 config.isBoundToLan = config.host === '0.0.0.0' || config.host !== '127.0.0.1' && config.host !== 'localhost';
+
+// Body request berisi media base64 selalu lebih besar ~33% dari file aslinya
+// (overhead encoding base64), ditambah sedikit headroom untuk field JSON lain
+// (chat_id, caption, dst) -- dipakai sebagai limit body-parser JSON khusus
+// endpoint kirim media (bukan limit default 256kb yang dipakai endpoint lain).
+config.mediaJsonBodyLimitBytes = Math.ceil(config.maxMediaUploadBytes * 4 / 3) + 8192;
 
 module.exports = config;

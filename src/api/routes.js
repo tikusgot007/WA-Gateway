@@ -4,10 +4,19 @@ const express = require('express');
 const connectionManager = require('../whatsapp/connectionManager');
 const messageStore = require('../whatsapp/messageStore');
 const logger = require('../logging');
+const config = require('../config');
 const { normalizeToJid } = require('../whatsapp/normalize');
 const { isDecodableJid } = require('../whatsapp/jidUtils');
+const { VALID_MEDIA_TYPES, decodeBase64Media, fetchMediaFromUrl } = require('../whatsapp/mediaPayload');
 
 const router = express.Router();
+
+// Body-parser JSON default (256kb, cukup untuk teks) dan versi khusus untuk
+// endpoint kirim media (base64 file jauh lebih besar dari teks biasa) --
+// dipasang PER ROUTE di bawah, bukan global, supaya endpoint lain tetap
+// terlindungi limit kecil seperti semula.
+const jsonSmall = express.json({ limit: '256kb' });
+const jsonMedia = express.json({ limit: config.mediaJsonBodyLimitBytes });
 
 // --- GET /api/status ---------------------------------------------------
 router.get('/status', (req, res) => {
@@ -43,7 +52,7 @@ router.get('/messages', (req, res) => {
 });
 
 // --- POST /api/messages/send ------------------------------------------------
-router.post('/messages/send', async (req, res) => {
+router.post('/messages/send', jsonSmall, async (req, res) => {
   const { to, text } = req.body || {};
 
   if (typeof to !== 'string' || to.trim().length === 0) {
@@ -138,7 +147,7 @@ router.get('/chats/:chatId/messages', (req, res) => {
 // --- POST /api/chats/:chatId/reply --------------------------------------------
 // Balas SATU conversation. chatId dari URL dipakai LANGSUNG sebagai target
 // pengiriman ke Baileys -- TIDAK pernah dikonversi ke nomor telepon terlebih dahulu.
-router.post('/chats/:chatId/reply', async (req, res) => {
+router.post('/chats/:chatId/reply', jsonSmall, async (req, res) => {
   const { chatId } = req.params;
   const { text } = req.body || {};
 
@@ -160,6 +169,68 @@ router.post('/chats/:chatId/reply', async (req, res) => {
     return res.json({ ok: true, data: result });
   } catch (err) {
     logger.error('Endpoint reply gagal', { chatId, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// --- POST /api/chats/:chatId/reply-media --------------------------------------
+// Balas SATU conversation dengan media (gambar/dokumen). Sumber file boleh
+// SALAH SATU: `mediaBase64` (konten langsung, base64) ATAU `mediaUrl` (Gateway
+// mengunduhnya sendiri). `mediaUrl` HANYA untuk kemudahan uji manual dari
+// dashboard test ini (tempel link gambar/dokumen) -- endpoint machine-to-machine
+// untuk CI4 (POST /send-media, lihat ci4Routes.js) SENGAJA hanya menerima base64.
+router.post('/chats/:chatId/reply-media', jsonMedia, async (req, res) => {
+  const { chatId } = req.params;
+  const { mediaType, mediaBase64, mediaUrl, caption, fileName, mimetype } = req.body || {};
+
+  if (!isDecodableJid(chatId)) {
+    return res.status(400).json({ ok: false, error: `chatId tidak valid: ${chatId}` });
+  }
+  if (!VALID_MEDIA_TYPES.includes(mediaType)) {
+    return res.status(400).json({ ok: false, error: `mediaType harus salah satu dari: ${VALID_MEDIA_TYPES.join(', ')}` });
+  }
+  if (mediaType === 'document' && (typeof fileName !== 'string' || fileName.trim().length === 0)) {
+    return res.status(400).json({ ok: false, error: 'Field "fileName" wajib diisi untuk mediaType "document"' });
+  }
+  if (typeof caption !== 'undefined' && typeof caption !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Field "caption" harus berupa string jika diisi' });
+  }
+  if (caption && caption.length > 1024) {
+    return res.status(400).json({ ok: false, error: 'Caption terlalu panjang (maks 1024 karakter)' });
+  }
+  if (!connectionManager.isConnected()) {
+    return res.status(409).json({ ok: false, error: 'WhatsApp belum connected' });
+  }
+
+  let buffer;
+  let resolvedMimetype = mimetype;
+
+  if (typeof mediaBase64 === 'string' && mediaBase64.trim().length > 0) {
+    const decoded = decodeBase64Media(mediaBase64);
+    if (!decoded.ok) {
+      return res.status(400).json({ ok: false, error: decoded.reason });
+    }
+    buffer = decoded.buffer;
+  } else if (typeof mediaUrl === 'string' && mediaUrl.trim().length > 0) {
+    const fetched = await fetchMediaFromUrl(mediaUrl.trim());
+    if (!fetched.ok) {
+      return res.status(400).json({ ok: false, error: fetched.reason });
+    }
+    buffer = fetched.buffer;
+    resolvedMimetype = resolvedMimetype || fetched.mimetype || undefined;
+  } else {
+    return res.status(400).json({ ok: false, error: 'Wajib isi salah satu: "mediaBase64" atau "mediaUrl"' });
+  }
+
+  try {
+    const result = await connectionManager.sendMediaReply(chatId, mediaType, buffer, {
+      caption: caption || undefined,
+      mimetype: resolvedMimetype || undefined,
+      fileName: fileName || undefined,
+    });
+    return res.json({ ok: true, data: result });
+  } catch (err) {
+    logger.error('Endpoint reply media gagal', { chatId, mediaType, error: err.message });
     return res.status(500).json({ ok: false, error: err.message });
   }
 });

@@ -11,7 +11,14 @@ function createServer() {
   const app = express();
 
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '256kb' }));
+
+  // Body-parser JSON TIDAK dipasang global di sini -- setiap router (routes.js,
+  // ci4Routes.js) memasang parser-nya sendiri PER ROUTE, dengan limit berbeda
+  // untuk endpoint teks biasa (256kb) vs endpoint kirim media (base64 file,
+  // limit lebih besar sesuai MAX_MEDIA_UPLOAD_MB). Ini SENGAJA, bukan
+  // kelalaian -- limit body harus ditentukan SEBELUM stream request dibaca,
+  // jadi tidak bisa "dicoba kecil dulu, gagal baru dicoba besar" pakai parser
+  // global tunggal.
 
   // Hanya serve folder public (dashboard). Folder auth/session TIDAK PERNAH
   // di-mount sebagai static folder, supaya credential tidak bisa diakses lewat HTTP.
@@ -33,6 +40,15 @@ function createServer() {
   // dan jangan bocorkan stack trace/detail internal ke client.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
+    // Body request kelewat besar (dilempar body-parser express.json() milik
+    // masing-masing router SEBELUM handler route-nya sendiri jalan) -- kasus
+    // ini WAJAR terjadi (terutama di endpoint kirim media) dan bukan bug,
+    // jadi jangan disamarkan jadi "Internal server error" generik.
+    if (err.status === 413 || err.type === 'entity.too.large') {
+      logger.warn('Request ditolak: body request terlalu besar', { path: req.path });
+      return res.status(413).json({ ok: false, error: 'Body request terlalu besar' });
+    }
+
     logger.error('Unhandled error pada HTTP request', { error: err.message, path: req.path });
     res.status(500).json({ ok: false, error: 'Internal server error' });
   });

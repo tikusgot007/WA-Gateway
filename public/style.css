@@ -92,7 +92,7 @@ button.small { padding: 5px 12px; font-size: 0.8rem; }
 
 form { display: flex; flex-direction: column; gap: 8px; }
 label { font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
-input, textarea {
+input, textarea, select {
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;

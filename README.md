@@ -159,6 +159,7 @@ Semua response berbentuk JSON dengan format `{ ok: boolean, data?: ..., error?: 
 | GET  | `/api/chats` | Daftar conversation, dikelompokkan berdasarkan `chatId` (JID asli — bisa `@s.whatsapp.net` atau `@lid`). Lihat §12. |
 | GET  | `/api/chats/:chatId/messages` | Pesan milik satu conversation saja. `chatId` harus di-`encodeURIComponent()` oleh client (mis. `255490491736112%40lid`). |
 | POST | `/api/chats/:chatId/reply` | Balas satu conversation. `chatId` dari URL dipakai **langsung** sebagai target kirim ke Baileys — tidak pernah dikonversi ke nomor telepon. Body: `{ "text": "..." }` |
+| POST | `/api/chats/:chatId/reply-media` | Balas satu conversation dengan **media** (gambar/dokumen). Body: `{ "mediaType": "image"|"document", "mediaBase64": "...", "mediaUrl": "...", "caption": "...", "fileName": "...", "mimetype": "..." }` — isi salah satu dari `mediaBase64` (konten file, base64) atau `mediaUrl` (Gateway mengunduh sendiri; **hanya untuk kemudahan uji manual**, lihat §5.1). `fileName` wajib untuk `mediaType: "document"`. Lihat §14. |
 
 Contoh kirim pesan dengan `curl`:
 
@@ -167,6 +168,23 @@ curl -X POST http://127.0.0.1:3000/api/messages/send ^
   -H "Content-Type: application/json" ^
   -d "{\"to\":\"628123456789\",\"text\":\"Pesan test\"}"
 ```
+
+### 5.1 Endpoint machine-to-machine untuk CI4 (AuliaPos)
+
+Endpoint di bawah ini dipasang di path **root** (bukan `/api/*`) dan **wajib**
+header `Authorization: Bearer <CI4_GATEWAY_TOKEN>` (lihat `.env`). Dipakai
+oleh AuliaPos CI4 (modul Shared WhatsApp Inbox), bukan oleh dashboard test.
+Response berbentuk `{ success: boolean, ... }`, berbeda dari format `/api/*`.
+
+| Method | Endpoint | Fungsi |
+|--------|----------|--------|
+| POST | `/send` | Kirim balasan teks dari POS. Body: `{ "chat_id": "...", "text": "..." }` |
+| POST | `/send-media` | Kirim balasan **media** (gambar/dokumen) dari POS. Body: `{ "chat_id": "...", "media_type": "image"|"document", "media_base64": "...", "mimetype": "...", "file_name": "...", "caption": "..." }`. **Hanya menerima base64** (bukan URL) — kasir upload file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa dipakai ulang seperti `/media/download`. `file_name` wajib untuk `media_type: "document"`. Lihat §14. |
+| POST | `/media/download` | Ambil+dekripsi 1 file media **masuk** dari server WhatsApp, berdasarkan referensi (`direct_path` + `media_key_base64`) yang tersimpan CI4. Mengembalikan file BINARY langsung (bukan JSON) jika sukses. |
+
+Prinsip yang sama untuk seluruh endpoint media (masuk maupun keluar): Gateway
+**tidak pernah** menyimpan file media ke disk — hanya dipegang di memory
+selama proses kirim/ambil, lalu dibuang.
 
 ### Peringatan Security jika API dibuka ke LAN
 
@@ -241,7 +259,7 @@ Silakan jalankan checklist di §7 langsung di Windows dengan nomor WhatsApp uji 
    - Pesan tersebut tetap tersimpan di riwayat chat HP utama (karena WhatsApp multi-device menyinkronkan dari HP), tetapi tidak otomatis "didorong ulang" sebagai event baru ke Gateway.
    - Ini harus diuji langsung (Test 7) dan hasilnya harus didokumentasikan apa adanya — **jangan mengasumsikan pesan yang terlewat pasti bisa diambil ulang**. Jika toko butuh jaminan tidak ada pesan yang hilang, Gateway idealnya dijalankan tanpa henti selama jam operasional, bukan mengandalkan reconciliation setelah mati.
 2. **Pesan hanya disimpan di memory**, akan hilang setiap Gateway direstart. Ini sesuai instruksi POC (tidak perlu database bisnis).
-3. **Hanya mendukung pesan teks** untuk pesan masuk maupun keluar. Gambar, dokumen, media lain belum ditangani (di luar scope POC).
+3. **Mendukung teks, gambar, dan dokumen** untuk pesan masuk maupun keluar (lihat §14). Jenis media lain (audio, video, sticker, lokasi, kontak) belum ditangani — dilewati & di-log debug saat masuk, dan tidak bisa dikirim keluar (di luar scope POC).
 4. **API belum memiliki authentication.** Aman selama `HOST=127.0.0.1` (default). Jika dibuka ke LAN, lihat peringatan security di §5.
 5. **Bukan Windows Service.** Untuk POC, Gateway dijalankan manual dari terminal. Struktur kode (pemisahan `config`, `logging`, `whatsapp`, `api`, `app`) sudah dirancang agar mudah dibungkus menjadi Windows Service/autostart nantinya (mis. dengan `node-windows` atau `pm2-windows-service`), tapi itu belum diimplementasikan di POC ini.
 6. **Satu nomor WhatsApp per Gateway.** POC ini tidak mendukung multi-akun WhatsApp dalam satu instance.
@@ -347,10 +365,82 @@ Jika ada langkah yang gagal, laporkan **pesan error asli** dari panel "Event / L
 2. **Konsistensi `@lid` vs `@s.whatsapp.net` untuk satu kontak yang sama** dari sisi Gateway vs sisi HP utama pemilik akun — pernah dilaporkan Baileys menerima pesan masuk sebagai `@lid` tapi pesan keluar dari HP (device lain yang tertaut) tercatat sebagai `@s.whatsapp.net` untuk kontak yang identik ([issue #1832](https://github.com/WhiskeySockets/Baileys/issues/1832)). Ini berarti *dua chatId berbeda* bisa merujuk ke *satu pelanggan yang sama* — sebelum dipakai sebagai backend shared inbox sungguhan, ini perlu ditelusuri lebih jauh apakah terjadi juga di akun toko Anda.
 3. **Grup (`@g.us`)** belum diuji sama sekali di tahap ini (fokus POC ini sengaja hanya PN vs LID untuk chat personal).
 4. **Volume/skala**: `messageStore` masih in-memory tanpa batas per-chat (hanya batas total pesan lewat `MAX_MESSAGES_IN_MEMORY`) — untuk shared inbox sungguhan, dengan banyak conversation aktif sekaligus, pesan lama di satu chat bisa "terdesak keluar" oleh pesan baru di chat lain. Ini perlu didesain ulang (bukan sekadar dinaikkan angkanya) sebelum production.
-5. Semua keterbatasan yang sudah didokumentasikan di §9 (dokumen sebelumnya) — reconciliation pesan saat Gateway mati, hanya pesan teks, tanpa authentication API, dll — masih berlaku dan belum berubah.
+5. Semua keterbatasan yang sudah didokumentasikan di §9 — reconciliation pesan saat Gateway mati, tanpa authentication pada endpoint `/api/*`, satu nomor per Gateway, dll — masih berlaku dan belum berubah.
 
 ---
 
 ## 13. Yang Sengaja TIDAK Dibangun di POC Ini
 
 Sesuai batasan scope yang diminta, POC ini **tidak** memiliki: shared inbox kasir, sistem assignment/"ambil chat", user/login kasir, database pelanggan, integrasi AuliaPos, database transaksi, CRM, chatbot/AI chatbot, broadcast/bulk messaging, atau fitur marketing. Semua itu berada di luar scope dan akan menjadi bagian dari Server Inbox terpisah pada tahap berikutnya, setelah POC Gateway ini terbukti berjalan baik.
+
+---
+
+## 14. Kirim Media (Gambar/Dokumen) Keluar
+
+Sebelumnya, arah **keluar** (kasir/POS kirim gambar/dokumen) belum dibangun —
+hanya arah masuk (customer kirim gambar/dokumen ke toko) yang sudah didukung.
+Bagian ini menutup gap tersebut: kasir/POS sekarang juga bisa **mengirim**
+gambar/dokumen, bukan cuma menerima.
+
+### 14.1 Keputusan desain
+
+- **Konsisten dengan prinsip media masuk**: Gateway **tidak pernah** menyimpan
+  file media ke disk untuk arah manapun. Untuk media keluar, `buffer` file
+  hanya dipegang di memory selama proses kirim ke Baileys (`sock.sendMessage()`),
+  lalu dibuang begitu request selesai.
+- **Sumber file berbeda dari media masuk**: media masuk cukup disimpan sebagai
+  *referensi* WhatsApp (`direct_path` + `media_key`) karena filenya memang
+  sudah ada di server WhatsApp. Media keluar **tidak punya referensi seperti
+  itu** — ini file baru yang diupload kasir dari komputernya sendiri — jadi
+  Gateway harus menerima **konten filenya langsung**, bukan referensi.
+- **Endpoint CI4 (`POST /send-media`) hanya menerima base64**, bukan URL.
+  CI4 sudah punya bytes file (dari upload kasir) di memory PHP-nya sendiri,
+  jadi tidak ada alasan Gateway perlu mempercayai/mengambil URL sembarangan
+  dari sistem lain. Endpoint dashboard test (`POST /api/chats/:chatId/reply-media`)
+  juga menerima `mediaUrl` sebagai tambahan — **khusus untuk kemudahan uji
+  manual** (tinggal tempel link gambar tanpa perlu encode base64 manual),
+  bukan pola yang dipakai integrasi CI4.
+- **Jenis media yang didukung**: `image` dan `document`, sama seperti media
+  masuk. Jenis lain (audio/video/sticker/lokasi/kontak) di luar scope.
+- **Ukuran maksimum**: dikontrol lewat env `MAX_MEDIA_UPLOAD_MB` (default
+  20MB). Body request JSON untuk endpoint media memakai body-parser dengan
+  limit lebih besar dari endpoint lain (dihitung otomatis dari
+  `MAX_MEDIA_UPLOAD_MB`, memperhitungkan overhead ~33% dari encoding base64)
+  — endpoint teks biasa (`/send`, `/api/messages/send`, dst) tetap memakai
+  limit kecil (256kb) seperti sebelumnya, tidak ikut diperbesar.
+
+### 14.2 File yang diubah/ditambahkan
+
+| File | Perubahan |
+|------|-----------|
+| `src/whatsapp/mediaPayload.js` | **Baru.** `decodeBase64Media()` (validasi format + batas ukuran SEBELUM alokasi buffer penuh) dan `fetchMediaFromUrl()` (khusus dashboard test, dengan batas ukuran & timeout). |
+| `src/whatsapp/connectionManager.js` | Method baru `sendMediaMessage(jid, mediaType, buffer, options)` (versi media dari `sendTextMessage()`) dan `sendMediaReply(chatId, mediaType, buffer, options)` (versi media dari `sendReply()`, termasuk catat ke `messageStore` tanpa menyimpan file-nya). |
+| `src/api/routes.js` | Endpoint baru `POST /api/chats/:chatId/reply-media` (tanpa auth, untuk dashboard test). Body-parser JSON kini dipasang per-route (`jsonSmall`/`jsonMedia`), bukan lagi satu parser global. |
+| `src/api/ci4Routes.js` | Endpoint baru `POST /send-media` (Bearer token, sama seperti `/send`). |
+| `src/api/server.js` | Body-parser JSON global dihapus (dipindah ke masing-masing router agar limit ukuran bisa berbeda per endpoint) + error handler kini membalas `413` yang benar untuk body yang kelewat besar (sebelumnya selalu dibalas sebagai `500` generik). |
+| `src/config/index.js` | `maxMediaUploadBytes`, `mediaFetchTimeoutMs`, `mediaJsonBodyLimitBytes` (env baru: `MAX_MEDIA_UPLOAD_MB`, `MEDIA_FETCH_TIMEOUT_MS`). |
+| `public/index.html`, `public/app.js`, `public/style.css` | Form "Balas dengan media" di panel Conversations — pilih gambar/dokumen, pilih file dari komputer (dibaca sebagai base64 di browser), caption opsional. Daftar pesan juga menampilkan label `[gambar]`/`[dokumen]` untuk pesan bertipe media. |
+| `test/simulate-send-media.js` | **Baru.** Simulasi logika (bukan pengiriman nyata): validasi `decodeBase64Media` (base64 tidak valid, batas ukuran), penolakan `sendMediaReply` saat `chatId` tidak valid/belum connected, penolakan `sendMediaMessage` untuk `mediaType` yang tidak dikenal. |
+
+### 14.3 Yang sudah diverifikasi sendiri
+
+- `node --check` pada seluruh file yang diubah/ditambahkan — tidak ada syntax error.
+- `node test/simulate-send-media.js` dan `node test/simulate-lid-conversation.js` — sama-sama lulus, fitur baru tidak merusak logika `@lid` yang sudah ada sebelumnya.
+- Server benar-benar dijalankan (`startServer()`) dan diuji dengan `curl` sungguhan (bukan cuma dibaca kodenya):
+  - `POST /send-media` tanpa token → `401`.
+  - `POST /send-media` dengan `media_type` tidak dikenal → `400 INVALID_MEDIA_TYPE`.
+  - `POST /send-media` dengan `media_type: "document"` tanpa `file_name` → `400 MISSING_FILE_NAME`.
+  - `POST /send-media` valid tapi belum connected ke WhatsApp → `409 NOT_CONNECTED`.
+  - `POST /api/chats/:chatId/reply-media` tanpa `mediaType` → `400`.
+  - Body `> 256kb` ke `/send` (endpoint teks) → `413` (bukan lagi `500`).
+  - Body media ~25MB (raw, jadi ~33MB setelah base64) ke `/send-media`, di atas limit `MAX_MEDIA_UPLOAD_MB=20` default → `413`.
+  - Body media 5MB (raw, ~6.7MB setelah base64), di bawah limit → **lolos** body-parser, lanjut ke validasi bisnis (`409 NOT_CONNECTED`, sesuai ekspektasi karena tidak ada koneksi WhatsApp nyata di sandbox ini).
+- Signature `image`/`document` di `AnyMediaMessageContent` dicek langsung dari `node_modules/baileys/lib/Types/Message.d.ts` yang ter-install (bukan ditebak dari memori), untuk memastikan `Buffer` memang diterima langsung sebagai `WAMediaUpload` dan field mana yang wajib (`document.mimetype`) vs opsional.
+
+### 14.4 Yang PERLU kamu jalankan/verifikasi sendiri
+
+1. **Kirim gambar sungguhan** lewat dashboard (`Balas dengan media` di panel Conversations) ke nomor HP asli, pastikan benar-benar muncul sebagai gambar (bukan dokumen/corrupt) di WhatsApp penerima.
+2. **Kirim dokumen sungguhan** (PDF misalnya), pastikan nama file & isinya benar saat dibuka penerima.
+3. **Kirim dari sisi CI4** lewat `POST /send-media` — endpoint ini sudah dibangun di sisi Gateway, tapi **sisi CI4 (AuliaPos v3.0) belum punya UI upload/panggilan ke endpoint ini** (lihat `docs/aturan-bisnis-CHAT.md` §7.8 di repo AuliaPos — outgoing media memang ditandai "belum dikerjakan" di sana). Pembuatan UI upload di POS + pemanggilan `POST /send-media` dari CI4 adalah pekerjaan **terpisah** di sisi AuliaPos, di luar scope perubahan Gateway ini.
+4. **Uji file besar mendekati/di atas `MAX_MEDIA_UPLOAD_MB`** dari dashboard sungguhan (bukan cuma `curl`), pastikan pesan error di UI cukup jelas untuk kasir (bukan cuma `413` mentah).
+5. Tidak bisa saya test di sandbox ini: pengiriman **sungguhan** ke server WhatsApp (perlu koneksi Baileys nyata + akun WhatsApp aktif, tidak tersedia di environment saya).
