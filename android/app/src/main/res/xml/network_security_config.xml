@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Server Gateway (Express) yang di-embed di app ini disajikan lewat HTTP
+  biasa (bukan HTTPS) di 127.0.0.1 & LAN toko -- konsisten dengan versi
+  desktop-nya (lihat README.md bagian keamanan: "API POC ini belum
+  memiliki authentication, jangan expose ke internet"). cleartextTrafficPermitted
+  di sini HANYA mengizinkan koneksi HTTP KELUAR/MASUK app-ke-app di LAN,
+  BUKAN membuat koneksi Baileys ke server WhatsApp jadi tidak terenkripsi
+  (itu proses terpisah, sudah terenkripsi end-to-end oleh Baileys sendiri).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

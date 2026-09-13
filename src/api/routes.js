@@ -83,6 +83,24 @@ router.post('/messages/send', jsonSmall, async (req, res) => {
   }
 });
 
+// --- POST /api/pairing-code -----------------------------------------------
+// Alternatif login selain scan QR (lihat requestPairingCode() di
+// connectionManager.js) -- terutama untuk kasus Gateway dijalankan di HP
+// yang sama dengan HP pemilik nomor WhatsApp, di mana scan QR ke layar
+// sendiri tidak praktis. Body: { "phone": "62812xxxxxxx" } (format
+// internasional, tanpa '+'/spasi/0 di depan).
+router.post('/pairing-code', jsonSmall, async (req, res) => {
+  const { phone } = req.body || {};
+
+  try {
+    const code = await connectionManager.requestPairingCode(phone);
+    res.json({ ok: true, data: { pairingCode: code, phone } });
+  } catch (err) {
+    logger.warn('Gagal meminta pairing code', { phone, error: err.message });
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 // --- POST /api/reconnect -----------------------------------------------------
 router.post('/reconnect', async (req, res) => {
   try {

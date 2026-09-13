@@ -151,6 +151,7 @@ Semua response berbentuk JSON dengan format `{ ok: boolean, data?: ..., error?: 
 |--------|----------|--------|
 | GET  | `/api/status` | Status koneksi saat ini (status, nomor, waktu connect/disconnect, alasan disconnect terakhir) |
 | GET  | `/api/qr` | QR code terbaru (sebagai data URL gambar), jika sedang tersedia |
+| POST | `/api/pairing-code` | Alternatif login selain scan QR (lihat §15/Android) — minta pairing code untuk sebuah nomor. Body: `{ "phone": "62812xxxxxxx" }` (format internasional, tanpa `+`/spasi/0 di depan). Hanya bisa diminta SEBELUM device pernah login (belum `registered`) |
 | GET  | `/api/messages?limit=50` | Daftar pesan masuk terbaru (dari memory, default 50) |
 | POST | `/api/messages/send` | Kirim pesan teks. Body: `{ "to": "628xxxxxxxxxx", "text": "..." }` |
 | POST | `/api/reconnect` | Memicu reconnect manual |
@@ -444,3 +445,22 @@ gambar/dokumen, bukan cuma menerima.
 3. **Kirim dari sisi CI4** lewat `POST /send-media` — endpoint ini sudah dibangun di sisi Gateway, tapi **sisi CI4 (AuliaPos v3.0) belum punya UI upload/panggilan ke endpoint ini** (lihat `docs/aturan-bisnis-CHAT.md` §7.8 di repo AuliaPos — outgoing media memang ditandai "belum dikerjakan" di sana). Pembuatan UI upload di POS + pemanggilan `POST /send-media` dari CI4 adalah pekerjaan **terpisah** di sisi AuliaPos, di luar scope perubahan Gateway ini.
 4. **Uji file besar mendekati/di atas `MAX_MEDIA_UPLOAD_MB`** dari dashboard sungguhan (bukan cuma `curl`), pastikan pesan error di UI cukup jelas untuk kasir (bukan cuma `413` mentah).
 5. Tidak bisa saya test di sandbox ini: pengiriman **sungguhan** ke server WhatsApp (perlu koneksi Baileys nyata + akun WhatsApp aktif, tidak tersedia di environment saya).
+
+---
+
+## 15. Versi Android (Gateway jalan langsung di HP)
+
+Selain versi desktop (Windows) di atas, tersedia juga versi **Android**
+yang menjalankan Gateway ini langsung di HP (embed Node.js via
+[nodejs-mobile](https://github.com/nodejs-mobile/nodejs-mobile)) --
+tanpa PC/server terpisah, cocok untuk kasus HP yang sama juga memegang
+nomor WhatsApp toko. Login pakai **pairing code** (lihat endpoint baru
+`POST /api/pairing-code` di bagian 5) sebagai alternatif scan QR untuk
+skenario itu.
+
+Source code, cara build (APK), dan seluruh keterbatasan/risikonya ada di
+**[`android/README.md`](android/README.md)** -- termasuk catatan penting
+bahwa proyek Android ini belum di-build/dijalankan sungguhan di Android
+Studio oleh sesi yang menulisnya (sandbox pengembangannya tidak punya
+Android SDK/NDK), jadi anggap sebagai starting point yang solid, bukan
+produk jadi siap pakai.

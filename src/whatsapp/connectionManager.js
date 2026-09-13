@@ -43,6 +43,15 @@ class ConnectionManager {
     this.status = 'disconnected';
     this.qr = null; // raw QR string terbaru (null jika tidak ada/expired)
     this.qrDataUrl = null; // versi data:image untuk ditampilkan di dashboard
+
+    // Alternatif login selain scan QR: pairing code (dipakai terutama
+    // ketika Gateway dijalankan di HP YANG SAMA dengan HP yang punya
+    // WhatsApp aktif -- lihat requestPairingCode()). null kalau belum
+    // pernah diminta / sudah dipakai (connected) / expired karena
+    // reconnect baru.
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
+
     this.connectedNumber = null;
     this.lastConnectedAt = null;
     this.lastDisconnectedAt = null;
@@ -76,6 +85,7 @@ class ConnectionManager {
       lastDisconnectedAt: this.lastDisconnectedAt,
       lastDisconnectReason: this.lastDisconnectReason,
       hasQr: Boolean(this.qr),
+      pairingCode: this.pairingCode,
     };
   }
 
@@ -129,6 +139,8 @@ class ConnectionManager {
     this.setStatus('connecting');
     this.qr = null;
     this.qrDataUrl = null;
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
 
     const { state, saveCreds } = await useMultiFileAuthState(config.authFolder);
     this.saveCreds = saveCreds;
@@ -192,6 +204,8 @@ class ConnectionManager {
       this.reconnectAttempts = 0;
       this.qr = null;
       this.qrDataUrl = null;
+      this.pairingCode = null;
+      this.pairingCodeRequestedFor = null;
       this.connectedNumber = jidToPhone(this.sock?.user?.id) || null;
       this.lastConnectedAt = new Date().toISOString();
       this.lastDisconnectReason = null;
@@ -274,6 +288,41 @@ class ConnectionManager {
   }
 
   /**
+   * Minta pairing code (alternatif login selain scan QR) untuk nomor
+   * tertentu. Dipakai terutama saat Gateway dijalankan di HP YANG SAMA
+   * dengan HP yang memegang WhatsApp aktif (app Android) -- scan QR ke
+   * layar HP itu sendiri tidak praktis, sedangkan pairing code cukup
+   * diketik manual di WhatsApp: Setelan > Perangkat Tertaut > Tautkan
+   * dengan nomor telepon.
+   *
+   * Pembatasan dari Baileys sendiri: hanya bisa diminta SEBELUM device
+   * berhasil registered (belum pernah/tidak sedang login), dan idealnya
+   * dipanggil sekali per siklus socket -- kalau socket keburu reconnect
+   * (mis. karena code sudah expired), operator perlu memicu ulang lewat
+   * endpoint ini (pairingCode lama otomatis di-reset di awal _connect()).
+   *
+   * phoneNumber: format internasional TANPA '+'/spasi/tanda lain,
+   * misalnya "62812xxxxxxx".
+   */
+  async requestPairingCode(phoneNumber) {
+    if (typeof phoneNumber !== 'string' || !/^\d{8,15}$/.test(phoneNumber)) {
+      throw new Error('Nomor telepon tidak valid. Gunakan format internasional tanpa "+"/spasi/0 di depan, contoh: 62812xxxxxxx.');
+    }
+    if (!this.sock) {
+      throw new Error('Koneksi belum siap. Tunggu status "connecting" muncul lalu coba lagi.');
+    }
+    if (this.sock.authState?.creds?.registered) {
+      throw new Error('WhatsApp sudah pernah login sebelumnya. Logout/reset session dulu sebelum meminta pairing code baru.');
+    }
+
+    const code = await this.sock.requestPairingCode(phoneNumber);
+    this.pairingCode = code;
+    this.pairingCodeRequestedFor = phoneNumber;
+    logger.info('Pairing code baru diminta, silakan masukkan di WhatsApp.', { phoneNumber });
+    return code;
+  }
+
+  /**
    * Logout dari WhatsApp dan hapus folder session, sehingga QR baru
    * akan diminta pada koneksi berikutnya. Dipakai untuk kebutuhan testing.
    */
@@ -315,6 +364,8 @@ class ConnectionManager {
     this.connectedNumber = null;
     this.qr = null;
     this.qrDataUrl = null;
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
     this.lastDisconnectReason = 'manual logout';
     this.lastDisconnectedAt = new Date().toISOString();
     this.reconnectAttempts = 0;
