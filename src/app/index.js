@@ -2,6 +2,7 @@
 
 const config = require('../config');
 const logger = require('../logging');
+const { ensureBaileysLoaded } = require('../whatsapp/baileysLoader');
 const connectionManager = require('../whatsapp/connectionManager');
 const { startServer } = require('../api/server');
 const incomingDelivery = require('../delivery/incomingDelivery');
@@ -13,6 +14,10 @@ async function main() {
     port: config.port,
     authFolder: config.authFolder,
   });
+
+  // Harus di-await SEBELUM apa pun lain yang menyentuh baileys (langsung
+  // ataupun lewat jidUtils.js) -- lihat penjelasan di baileysLoader.js.
+  await ensureBaileysLoaded();
 
   const server = startServer();
 

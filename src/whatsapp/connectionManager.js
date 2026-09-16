@@ -4,14 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 const { Boom } = require('@hapi/boom');
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  makeCacheableSignalKeyStore,
-  downloadContentFromMessage,
-} = require('baileys');
+// baileys di-load lewat baileysLoader.js (dynamic import di-cache), bukan
+// require() langsung -- lihat penjelasan lengkap di file itu. ensureBaileysLoaded()
+// SUDAH di-await di src/app/index.js sebelum ConnectionManager dipakai, jadi
+// getBaileys() di sini aman dipanggil sinkron.
+const { getBaileys } = require('./baileysLoader');
 
 const config = require('../config');
 const logger = require('../logging');
@@ -142,6 +139,13 @@ class ConnectionManager {
     this.pairingCode = null;
     this.pairingCodeRequestedFor = null;
 
+    const {
+      default: makeWASocket,
+      useMultiFileAuthState,
+      fetchLatestBaileysVersion,
+      makeCacheableSignalKeyStore,
+    } = getBaileys();
+
     const { state, saveCreds } = await useMultiFileAuthState(config.authFolder);
     this.saveCreds = saveCreds;
 
@@ -227,6 +231,7 @@ class ConnectionManager {
         reason: reasonText,
       });
 
+      const { DisconnectReason } = getBaileys();
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
       if (isLoggedOut) {
@@ -860,6 +865,7 @@ class ConnectionManager {
   async downloadMediaByRef(mediaRef) {
     const mediaKey = Buffer.from(mediaRef.mediaKeyBase64, 'base64');
 
+    const { downloadContentFromMessage } = getBaileys();
     const stream = await downloadContentFromMessage(
       { directPath: mediaRef.directPath, mediaKey },
       mediaRef.mediaType

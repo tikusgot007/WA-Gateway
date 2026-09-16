@@ -26,7 +26,9 @@ android {
         ndk {
             // Harus sinkron dengan arsitektur libnode.so yang ditaruh di
             // app/libnode/bin/<abi>/ -- lihat android/README.md.
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            // x86 dihapus: rilis nodejs-mobile v18.20.4 tidak menyediakan
+            // build untuk arsitektur ini (cuma arm64-v8a/armeabi-v7a/x86_64).
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
 
         externalNativeBuild {

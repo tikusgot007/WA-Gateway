@@ -9,7 +9,7 @@ import java.net.URL
 
 /**
  * Client HTTP kecil untuk memanggil API Gateway sendiri di
- * http://127.0.0.1:<port>/api/* dari sisi Kotlin (dipakai
+ * http://127.0.0.1:<port>/api/... dari sisi Kotlin (dipakai
  * GatewayForegroundService untuk update notifikasi status, dan
  * ui/PairingScreen.kt untuk memicu pairing code/QR). Sengaja tidak pakai
  * library HTTP tambahan (OkHttp dst) -- panggilan ini simple & jarang
