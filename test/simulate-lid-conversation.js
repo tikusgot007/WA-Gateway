@@ -10,6 +10,7 @@
  * (TEST A/B/C/D pada laporan) wajib dijalankan di Windows dengan koneksi asli.
  */
 const assert = require('assert');
+const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('../src/whatsapp/jidUtils');
 const messageStore = require('../src/whatsapp/messageStore');
 const connectionManager = require('../src/whatsapp/connectionManager');
@@ -29,6 +30,11 @@ async function simulateIncoming({ remoteJid, pushName, text, messageTimestamp, f
 }
 
 (async () => {
+
+// Sama seperti src/app/index.js -- baileys@6.7.24 ESM-only, harus di-load
+// SEKALI di awal sebelum jidUtils.js/connectionManager.js dipakai (lihat
+// baileysLoader.js untuk penjelasan lengkap).
+await ensureBaileysLoaded();
 
 console.log('--- 1. classifyJid & extractPhoneIfAvailable ---');
 assert.strictEqual(classifyJid('6281234567890@s.whatsapp.net'), 'pn');

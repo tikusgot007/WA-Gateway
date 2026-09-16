@@ -11,16 +11,16 @@ ulang** di sini -- app ini meng-embed Node.js runtime (proyek
 menjalankan salinan `src/app/index.js` yang sama persis dengan yang
 dipakai di Windows/desktop. Satu source code, dua target.
 
-> **Status**: proyek ini **belum pernah di-build/dijalankan di Android
-> Studio sungguhan** oleh sesi yang menulisnya -- sandbox yang dipakai
-> tidak punya Android SDK/NDK/emulator, dan akses ke `dl.google.com`
-> (Maven Google, wajib untuk resolve Android Gradle Plugin) diblokir
-> jaringan sandbox tersebut. Bagian JS/Node-nya SUDAH diuji jalan (lihat
-> "Yang sudah diverifikasi" di bawah), tapi bagian Kotlin/JNI-nya baru
-> divalidasi lewat pembacaan kode cermat, BUKAN compile sungguhan.
-> Anggap ini starting point yang solid, bukan produk jadi -- wajar kalau
-> ada penyesuaian kecil dibutuhkan saat build pertama kali (lihat
-> "Troubleshooting").
+> **Status**: proyek ini sudah **terbukti build & jalan sungguhan** di
+> Android Studio + HP fisik (lihat "Yang sudah diverifikasi" di bawah) --
+> bagian awal proyek ini ditulis oleh sesi tanpa Android SDK/NDK/emulator
+> (akses ke `dl.google.com` diblokir jaringan sandbox itu), jadi bagian
+> Kotlin/JNI-nya sempat cuma divalidasi lewat pembacaan kode cermat.
+> Setelah dicoba build sungguhan, ditemukan **satu masalah nyata**
+> (`baileys` ESM-only crash di Node 18 milik nodejs-mobile) yang sudah
+> diperbaiki (lihat `src/whatsapp/baileysLoader.js`). Kemungkinan masih
+> ada penyesuaian kecil lain tersisa (lihat "Troubleshooting"), tapi
+> arsitektur intinya sudah divalidasi end-to-end.
 
 ## Yang sudah diverifikasi (dijalankan sungguhan, bukan cuma dibaca)
 
@@ -35,11 +35,17 @@ dipakai di Windows/desktop. Satu source code, dua target.
   idempotent, retry backoff, mark completed -- hasilnya identik dengan
   versi SQLite.
 - Endpoint baru `POST /api/pairing-code` (lihat bagian arsitektur).
+- **Build APK sungguhan di Android Studio, jalan di HP fisik, dan
+  berhasil connect ke WhatsApp sungguhan** (status dashboard: `connected`)
+  -- memakai nodejs-mobile **v18.20.4** (`arm64-v8a`, `armeabi-v7a`,
+  `x86_64`; rilis ini tidak menyediakan `x86`, sudah disesuaikan di
+  `abiFilters`). Dashboard (WebView) tampil normal, heartbeat ke CI4
+  gagal sebagaimana mestinya kalau `CI4_BASE_URL`/token belum diisi
+  (bukan bug, lihat §arsitektur soal heartbeat non-fatal).
 
-Yang **belum** diverifikasi (butuh Android Studio + HP sungguhan):
-compile Kotlin, compile JNI/CMake terhadap `libnode.so` asli, App benar-
-benar connect ke WhatsApp dari dalam APK, foreground service bertahan di
-background HP sungguhan.
+Yang **belum** diverifikasi: kirim/terima pesan WhatsApp sungguhan lewat
+app ini, foreground service bertahan lama di background (layar mati,
+battery optimization aktif), auto-start setelah reboot HP.
 
 ---
 
@@ -112,21 +118,25 @@ ratusan MB per arsitektur dan bukan kode yang kami tulis.
 
 1. Buka [rilis nodejs-mobile](https://github.com/nodejs-mobile/nodejs-mobile/releases)
    (proyek ini community-maintained setelah tidak lagi aktif dikerjakan
-   Janea Systems -- pilih rilis stabil terbaru yang tersedia).
+   Janea Systems -- pilih rilis stabil terbaru yang tersedia). **Sudah
+   terbukti jalan dengan `nodejs-mobile-v18.20.4-android.zip`** -- kalau
+   ragu versi mana yang dipakai, ini pilihan yang aman.
 2. Unduh asset Android-nya (nama biasanya mengandung `android`, contoh
    pola `nodejs-mobile-vX.X.X-android.zip` -- **cek isi rilis yang
    tersedia saat kamu baca ini**, struktur nama bisa berbeda antar versi
    karena proyeknya sekarang dikelola komunitas, bukan lagi rilis resmi
    tunggal).
 3. Ekstrak, lalu salin:
-   - Folder `libnode/bin/<abi>/libnode.so` untuk **keempat** arsitektur
-     (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`) ke:
+   - Folder `libnode/bin/<abi>/libnode.so` ke:
      ```
      android/app/libnode/bin/arm64-v8a/libnode.so
      android/app/libnode/bin/armeabi-v7a/libnode.so
      android/app/libnode/bin/x86_64/libnode.so
-     android/app/libnode/bin/x86/libnode.so
      ```
+     (rilis v18.20.4 di atas **tidak menyediakan `x86`** -- `abiFilters`
+     di `app/build.gradle.kts` sudah disesuaikan cuma 3 arsitektur ini.
+     Kalau rilis yang kamu unduh beda dan justru menyediakan `x86` juga,
+     boleh ditambah lagi ke `abiFilters` + salin `libnode.so`-nya.)
    - Folder header Node.js (biasanya `include/node/`) ke:
      ```
      android/app/libnode/include/node/*.h
@@ -146,6 +156,15 @@ ratusan MB per arsitektur dan bukan kode yang kami tulis.
    pemanggilannya di `app/src/main/cpp/native-lib.cpp`. Pola di file ini
    mengikuti contoh resmi
    [nodejs-mobile-samples/android/native-gradle-node-folder](https://github.com/JaneaSystems/nodejs-mobile-samples/tree/master/android/native-gradle-node-folder).
+
+5. **Penting -- `baileys` ESM-only vs Node 18**: rilis nodejs-mobile di
+   atas berbasis Node 18, yang belum punya interop otomatis untuk
+   `require()` modul ESM (`baileys@6.7.24` adalah `"type": "module"`).
+   Ini sudah ditangani di `src/whatsapp/baileysLoader.js` (dynamic
+   `import()` di-cache, dipanggil sekali di awal `src/app/index.js`) --
+   **tidak perlu tindakan tambahan**, cuma perlu tahu kalau nanti upgrade
+   ke rilis nodejs-mobile yang berbasis Node lebih baru (20.19+/22+),
+   mekanisme ini jadi tidak wajib lagi tapi tetap aman dibiarkan.
 
 ### 3.2 Siapkan bundle Node (nodejs-project)
 
@@ -297,6 +316,21 @@ Kalau sebelumnya app ini PERNAH connect ke WhatsApp lalu logout tidak
 sempurna, folder `auth/` di storage app masih menyimpan credential lama.
 Hapus data app (Setelan > Aplikasi > WA Gateway > Hapus Data) untuk
 mulai dari nol, atau panggil `POST /api/logout` dulu dari dashboard.
+
+**`ERR_REQUIRE_ESM` di log Node (Logcat) pas startup**
+Ini seharusnya sudah tidak terjadi lagi (sudah diperbaiki lewat
+`src/whatsapp/baileysLoader.js`) -- kalau masih muncul, cek apakah
+`npm run android:prepare-assets` dijalankan ULANG setelah menarik
+perbaikan ini (bundle lama di `assets/nodejs-project/` bisa saja masih
+versi sebelum perbaikan).
+
+**Gradle CLI (`./gradlew`) tidak nemu JDK, tapi build lewat Android
+Studio biasa saja**
+Jangan tambahkan `org.gradle.java.home=...` ke `android/gradle.properties`
+(file itu di-commit bareng, path JDK beda-beda per mesin). Set di file
+`gradle.properties` level USER (`%USERPROFILE%\.gradle\gradle.properties`
+di Windows, `~/.gradle/gradle.properties` di Mac/Linux) -- lihat komentar
+di `android/gradle.properties` untuk detail.
 
 ---
 

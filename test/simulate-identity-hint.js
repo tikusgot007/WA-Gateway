@@ -17,6 +17,7 @@
  * docs/aturan-bisnis-CHAT.md Section 12 di repo AuliaPos).
  */
 const assert = require('assert');
+const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const connectionManager = require('../src/whatsapp/connectionManager');
 const incomingBuffer = require('../src/store/incomingBuffer');
 
@@ -30,6 +31,11 @@ function simulateIncoming(remoteJid, waMessageId, text) {
 }
 
 (async () => {
+  // Sama seperti src/app/index.js -- baileys@6.7.24 ESM-only, harus di-load
+  // SEKALI di awal sebelum connectionManager.js dipakai (lihat
+  // baileysLoader.js untuk penjelasan lengkap).
+  await ensureBaileysLoaded();
+
   const originalStatus = connectionManager.status;
   const originalSock = connectionManager.sock;
 
