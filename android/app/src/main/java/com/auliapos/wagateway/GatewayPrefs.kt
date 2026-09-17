@@ -16,15 +16,15 @@ class GatewayPrefs(context: Context) {
         get() = prefs.getInt(KEY_PORT, 3000)
         set(value) = prefs.edit().putInt(KEY_PORT, value).apply()
 
-    // Base URL server POS (AuliaPos CI4), TANPA trailing slash, contoh:
-    // http://192.168.1.10/aulia -- boleh kosong (Gateway tetap jalan
-    // untuk kirim/terima WA, cuma integrasi ke POS yang dilewati).
+    // Base URL server POS (AuliaPos CI4), TANPA trailing slash. Default
+    // diisi nilai umum yang dipakai di lokasi ini supaya tidak lupa isi --
+    // tetap bisa diedit bebas dari layar Setup kalau IP laptop beda.
     var ci4BaseUrl: String
-        get() = prefs.getString(KEY_CI4_BASE_URL, "") ?: ""
+        get() = prefs.getString(KEY_CI4_BASE_URL, DEFAULT_CI4_BASE_URL) ?: DEFAULT_CI4_BASE_URL
         set(value) = prefs.edit().putString(KEY_CI4_BASE_URL, value.trim()).apply()
 
     var ci4GatewayToken: String
-        get() = prefs.getString(KEY_CI4_TOKEN, "") ?: ""
+        get() = prefs.getString(KEY_CI4_TOKEN, DEFAULT_CI4_GATEWAY_TOKEN) ?: DEFAULT_CI4_GATEWAY_TOKEN
         set(value) = prefs.edit().putString(KEY_CI4_TOKEN, value.trim()).apply()
 
     // Auto-start Gateway (foreground service) setiap HP boot -- lihat
@@ -44,5 +44,8 @@ class GatewayPrefs(context: Context) {
         private const val KEY_CI4_TOKEN = "ci4_gateway_token"
         private const val KEY_AUTOSTART = "autostart_on_boot"
         private const val KEY_SETUP_DONE = "setup_completed"
+
+        private const val DEFAULT_CI4_BASE_URL = "http://192.168.10/aulia"
+        private const val DEFAULT_CI4_GATEWAY_TOKEN = "aulia-wa-local-20260912"
     }
 }

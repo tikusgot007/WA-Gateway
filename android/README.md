@@ -24,11 +24,11 @@ dipakai di Windows/desktop. Satu source code, dua target.
 > `native-lib.cpp`) TERBUKTI TIDAK CUKUP setelah dites sungguhan di HP
 > (runtime Node di nodejs-mobile tidak menghormati env var itu) --
 > percobaan kedua (override `os.tmpdir()` langsung di
-> `src/whatsapp/baileysLoader.js`) sudah diverifikasi berhasil di level
-> Node/Baileys (termasuk untuk sticker), TAPI **belum dikonfirmasi di HP
-> sungguhan** -- lihat §7 Troubleshooting. Kemungkinan masih ada
-> penyesuaian kecil lain tersisa, tapi arsitektur intinya sudah
-> divalidasi end-to-end.
+> `src/whatsapp/baileysLoader.js`) sudah diverifikasi berhasil, baik di
+> level Node/Baileys (simulasi) MAUPUN dites kirim sungguhan (image dan
+> sticker) dari HP fisik ke WhatsApp asli -- lihat "Yang sudah
+> diverifikasi" di bawah. Arsitektur intinya sudah divalidasi
+> end-to-end.
 
 ## Yang sudah diverifikasi (dijalankan sungguhan, bukan cuma dibaca)
 
@@ -77,17 +77,16 @@ dipakai di Windows/desktop. Satu source code, dua target.
     ke folder yang tidak ada -- lihat `test/simulate-tmpdir-override.js`.
     Di desktop (`APP_TMP_DIR` tidak pernah diisi), override ini TIDAK
     PERNAH aktif -- dipastikan TIDAK ADA perubahan behavior sama sekali.
-  - **BELUM diverifikasi**: compile Kotlin/JNI sungguhan (butuh Android
-    Studio) dan kirim JPEG/sticker sungguhan ke WhatsApp asli end-to-end
-    dengan fix #2 ini -- lihat §7 Troubleshooting untuk detail & langkah
-    tes yang perlu dijalankan.
+  - **Dikonfirmasi berhasil di HP sungguhan** (2026-09-17): kirim
+    sticker dan image lewat `/send-media` (POS -> WhatsApp asli) sukses
+    tanpa error ENOENT, dikonfirmasi dari Logcat (`[SEND] pesan media
+    berhasil dikirim` untuk keduanya, plus `[MEDIA] berhasil mengambil
+    & mendekripsi media on-demand`). Fix #2 terbukti bekerja end-to-end,
+    bukan cuma di level simulasi.
 
-Yang **belum** diverifikasi: kirim JPEG/gambar/sticker sungguhan ke
-WhatsApp asli setelah fix #2 di atas (ini WAJIB dites ulang, bukan
-opsional -- belum pernah ada satu pun percobaan outgoing image/sticker
-yang berhasil sampai laporan ini ditulis), foreground service bertahan
-lama di background (layar mati, battery optimization aktif), auto-start
-setelah reboot HP.
+Yang **belum** diverifikasi: foreground service bertahan lama di
+background (layar mati, battery optimization aktif), auto-start setelah
+reboot HP, dan menerima (bukan mengirim) sticker dari WhatsApp asli.
 
 ---
 
