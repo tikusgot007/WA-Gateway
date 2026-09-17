@@ -35,7 +35,18 @@ const config = {
   ci4: {
     // Base URL AuliaPos CI4, TANPA trailing slash. Contoh:
     // http://192.168.1.10/aulia
-    baseUrl: (process.env.CI4_BASE_URL || '').replace(/\/+$/, ''),
+    //
+    // Kalau operator lupa tulis skema (http://) -- kesalahan input yang
+    // ternyata gampang terjadi, terutama di layar Setup app Android --
+    // fetch() akan gagal keras dengan pesan "Failed to parse URL",
+    // sehingga heartbeat/delivery ke CI4 gagal TERUS tanpa penjelasan
+    // yang jelas di dashboard. Daripada gagal total, tambahkan http://
+    // secara defensif kalau skemanya belum ada.
+    baseUrl: (() => {
+      const raw = (process.env.CI4_BASE_URL || '').trim().replace(/\/+$/, '');
+      if (!raw) return '';
+      return /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    })(),
 
     // Shared secret -- HARUS SAMA PERSIS dengan app/Config/Inbox.php
     // (env inbox.gatewayToken) di sisi CI4. Dikirim sebagai
