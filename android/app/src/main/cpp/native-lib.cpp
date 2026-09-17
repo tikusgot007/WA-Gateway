@@ -3,11 +3,14 @@
 // "native-gradle-node-folder" dari nodejs-mobile-samples -- lihat
 // android/README.md untuk sumber & catatan kompatibilitas versi.
 //
-// Tanggung jawab file ini HANYA dua hal:
+// Tanggung jawab file ini:
 //   1. Redirect stdout/stderr proses Node ke Logcat (supaya log Gateway
 //      -- termasuk log pino yang dipakai src/logging/index.js -- kelihatan
 //      lewat `adb logcat`, karena app Android tidak attach ke terminal).
-//   2. Memanggil node::Start() dengan argumen yang dikirim dari Kotlin
+//   2. chdir() ke folder nodejs-project & set env var TMPDIR ke folder tmp
+//      privat app (lihat komentar di dalam fungsi -- dibutuhkan karena
+//      "/tmp" sistem tidak ada/tidak writable di sandbox app Android).
+//   3. Memanggil node::Start() dengan argumen yang dikirim dari Kotlin
 //      (lihat NodeBridge.startNodeWithArguments()).
 //
 // TIDAK ADA logic bisnis Gateway apa pun di sini -- itu semua tetap di
@@ -18,6 +21,7 @@
 #include <vector>
 #include <thread>
 #include <unistd.h>
+#include <cstdlib>
 #include <android/log.h>
 #include <node.h>
 
@@ -69,7 +73,7 @@ static void start_redirecting_stdout_stderr() {
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_auliapos_wagateway_NodeBridge_startNodeWithArguments(
-        JNIEnv* env, jobject /* this */, jstring workingDir, jobjectArray argsArray) {
+        JNIEnv* env, jobject /* this */, jstring workingDir, jstring tmpDir, jobjectArray argsArray) {
     static bool redirected = false;
     if (!redirected) {
         start_redirecting_stdout_stderr();
@@ -86,6 +90,26 @@ Java_com_auliapos_wagateway_NodeBridge_startNodeWithArguments(
         LOGI("Peringatan: gagal chdir ke %s", workingDirChars);
     }
     env->ReleaseStringUTFChars(workingDir, workingDirChars);
+
+    // FIX bug "ENOENT ... open '/tmp/image...-original'": os.tmpdir() Node
+    // fallback ke "/tmp" kalau env var TMPDIR tidak diset, dan "/tmp" TIDAK
+    // ADA/tidak writable di sandbox proses app Android biasa. Baileys
+    // (lib/Utils/messages-media.js) menulis file sementara ke os.tmpdir()
+    // setiap kali kirim gambar/video KELUAR untuk generate thumbnail
+    // otomatis -- tanpa TMPDIR yang valid, ini gagal keras. setenv() di
+    // sini (BUKAN putenv(), supaya string-nya di-copy oleh libc, aman
+    // walau tmpDirChars di-release setelah ini) WAJIB dipanggil SEBELUM
+    // node::Start(), karena os.tmpdir() Node membaca process.env (yang
+    // bersumber dari environ proses OS ini) saat itu juga -- lihat
+    // NodeBridge.tmpDir()/cleanTmpDir() di sisi Kotlin untuk penjelasan
+    // lengkap & pembersihan foldernya.
+    const char* tmpDirChars = env->GetStringUTFChars(tmpDir, nullptr);
+    if (setenv("TMPDIR", tmpDirChars, 1) != 0) {
+        LOGI("Peringatan: gagal set TMPDIR ke %s", tmpDirChars);
+    } else {
+        LOGI("TMPDIR diset ke %s", tmpDirChars);
+    }
+    env->ReleaseStringUTFChars(tmpDir, tmpDirChars);
 
     int argc = env->GetArrayLength(argsArray);
 

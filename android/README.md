@@ -16,11 +16,16 @@ dipakai di Windows/desktop. Satu source code, dua target.
 > bagian awal proyek ini ditulis oleh sesi tanpa Android SDK/NDK/emulator
 > (akses ke `dl.google.com` diblokir jaringan sandbox itu), jadi bagian
 > Kotlin/JNI-nya sempat cuma divalidasi lewat pembacaan kode cermat.
-> Setelah dicoba build sungguhan, ditemukan **satu masalah nyata**
-> (`baileys` ESM-only crash di Node 18 milik nodejs-mobile) yang sudah
-> diperbaiki (lihat `src/whatsapp/baileysLoader.js`). Kemungkinan masih
-> ada penyesuaian kecil lain tersisa (lihat "Troubleshooting"), tapi
-> arsitektur intinya sudah divalidasi end-to-end.
+> Setelah dicoba build sungguhan, ditemukan & diperbaiki **dua masalah
+> nyata**: (1) `baileys` ESM-only crash di Node 18 milik nodejs-mobile
+> (lihat `src/whatsapp/baileysLoader.js`), dan (2) kirim gambar keluar
+> gagal karena `/tmp` tidak ada di sandbox Android (lihat
+> `NodeBridge.kt`/`native-lib.cpp`, §7 Troubleshooting). Masalah (2)
+> **BELUM dikonfirmasi jalan di HP sungguhan** -- baru diverifikasi
+> logic-nya di level Node/Baileys, compile Kotlin/JNI-nya sendiri belum
+> pernah dicoba oleh sesi yang menulisnya. Kemungkinan masih ada
+> penyesuaian kecil lain tersisa, tapi arsitektur intinya sudah
+> divalidasi end-to-end.
 
 ## Yang sudah diverifikasi (dijalankan sungguhan, bukan cuma dibaca)
 
@@ -42,10 +47,29 @@ dipakai di Windows/desktop. Satu source code, dua target.
   `abiFilters`). Dashboard (WebView) tampil normal, heartbeat ke CI4
   gagal sebagaimana mestinya kalau `CI4_BASE_URL`/token belum diisi
   (bukan bug, lihat §arsitektur soal heartbeat non-fatal).
+- **Bug nyata ditemukan & diperbaiki dari testing sungguhan**: kirim
+  gambar keluar (`/send-media`, `mediaType: "image"`) gagal konsisten
+  dengan `ENOENT: no such file or directory, open '/tmp/image...-
+  original'`. Root cause: Baileys menulis file sementara ke
+  `os.tmpdir()` untuk generate thumbnail JPEG otomatis (dipicu karena
+  Gateway tidak pernah supply `jpegThumbnail` sendiri) -- dan `/tmp`
+  TIDAK ADA/tidak writable di sandbox proses app Android. **Diverifikasi
+  ulang persis di level Node/Baileys** (bukan cuma teori): direproduksi
+  dengan memaksa `TMPDIR` ke folder yang tidak ada (error identik
+  muncul), lalu dibuktikan **hilang** setelah `TMPDIR` diarahkan ke
+  folder valid. Fix: `NodeBridge.kt` menyiapkan+membersihkan folder
+  `filesDir/tmp` privat app setiap start, diteruskan ke
+  `native-lib.cpp` yang `setenv("TMPDIR", ...)` SEBELUM `node::Start()`.
+  **BELUM diverifikasi**: compile Kotlin/JNI sungguhan (butuh Android
+  Studio) dan kirim JPEG sungguhan ke WhatsApp asli end-to-end -- lihat
+  §7 Troubleshooting untuk detail & langkah tes yang perlu dijalankan.
 
-Yang **belum** diverifikasi: kirim/terima pesan WhatsApp sungguhan lewat
-app ini, foreground service bertahan lama di background (layar mati,
-battery optimization aktif), auto-start setelah reboot HP.
+Yang **belum** diverifikasi: kirim JPEG/gambar sungguhan ke WhatsApp asli
+setelah fix TMPDIR di atas (ini WAJIB dites ulang, bukan opsional --
+belum pernah ada percobaan outgoing image yang berhasil sampai sekarang),
+kirim/terima sticker sungguhan, foreground service bertahan lama di
+background (layar mati, battery optimization aktif), auto-start setelah
+reboot HP.
 
 ---
 
@@ -344,6 +368,30 @@ Jangan tambahkan `org.gradle.java.home=...` ke `android/gradle.properties`
 `gradle.properties` level USER (`%USERPROFILE%\.gradle\gradle.properties`
 di Windows, `~/.gradle/gradle.properties` di Mac/Linux) -- lihat komentar
 di `android/gradle.properties` untuk detail.
+
+**Kirim gambar (bukan sticker) gagal dengan `ENOENT ... open '/tmp/image...-original'`**
+Sudah diperbaiki (lihat entri "Bug nyata ditemukan & diperbaiki" di
+bagian "Yang sudah diverifikasi" di atas) -- root cause: `/tmp` sistem
+tidak ada/tidak writable di sandbox app Android, padahal Baileys butuh
+itu untuk generate thumbnail otomatis saat kirim gambar/video keluar.
+Fix-nya set `TMPDIR` ke folder privat app (`filesDir/tmp`, dibersihkan
+tiap start) sebelum `node::Start()`. Kalau **masih** muncul setelah
+`git pull` perbaikan ini:
+1. Pastikan APK di-build ULANG (bukan cuma `npm run android:prepare-assets`
+   -- fix ini ada di `NodeBridge.kt`/`native-lib.cpp`, kode Kotlin/native,
+   BUKAN di `src/` JavaScript, jadi harus lewat build APK baru di Android
+   Studio, tidak cukup regenerate assets saja).
+2. Cek Logcat (`adb logcat | grep WaGatewayNode`) untuk baris
+   `TMPDIR diset ke ...` saat app start -- kalau baris ini TIDAK muncul
+   sama sekali, kemungkinan APK yang ter-install masih versi lama.
+3. Kalau baris `TMPDIR diset ke ...` muncul TAPI error `/tmp/...` yang
+   sama masih terjadi -- kemungkinan ada jalur lain di Baileys yang
+   memanggil `os.tmpdir()` sebelum `setenv()` sempat jalan (race
+   kondisi start-up), atau folder `filesDir/tmp` gagal dibuat (cek
+   permission storage app). Laporkan log lengkapnya untuk didiagnosis
+   lebih lanjut -- **belum ada percobaan kirim gambar sungguhan yang
+   berhasil sampai laporan ini ditulis**, jadi fix ini masih perlu
+   dikonfirmasi jalan di HP sungguhan.
 
 ---
 

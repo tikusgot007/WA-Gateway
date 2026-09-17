@@ -21,11 +21,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      restart total, seluruh proses Android app-nya yang diminta selesai
  *      oleh GatewayForegroundService lalu Android/BootReceiver yang
  *      menghidupkan proses baru).
+ *   4. Menyiapkan (& membersihkan) folder tmp privat app sendiri untuk
+ *      dipakai sebagai TMPDIR proses Node -- lihat tmpDir()/cleanTmpDir(),
+ *      dibutuhkan karena `/tmp` sistem tidak ada/tidak writable di sandbox
+ *      app Android (beda dari Linux/Windows desktop), padahal Baileys
+ *      butuh direktori temp yang valid untuk generate thumbnail otomatis
+ *      saat kirim gambar/video keluar.
  */
 object NodeBridge {
     private const val TAG = "NodeBridge"
     private const val PROJECT_ASSET_DIR = "nodejs-project"
     private const val ENTRY_SCRIPT = "src/app/index.js"
+    private const val TMP_DIR_NAME = "tmp"
 
     init {
         System.loadLibrary("native-lib")
@@ -33,11 +40,29 @@ object NodeBridge {
     }
 
     @JvmStatic
-    external fun startNodeWithArguments(workingDir: String, arguments: Array<String>): Int
+    external fun startNodeWithArguments(workingDir: String, tmpDir: String, arguments: Array<String>): Int
 
     private val nodeStarted = AtomicBoolean(false)
 
     fun projectDir(context: Context): File = File(context.filesDir, PROJECT_ASSET_DIR)
+
+    /**
+     * Folder temp milik APP SENDIRI, dipakai sebagai `TMPDIR` untuk proses
+     * Node (lihat startIfNeeded() & native-lib.cpp) -- BUKAN `/tmp` sistem.
+     *
+     * LATAR BELAKANG BUG: Baileys (lib/Utils/messages-media.js) menulis
+     * file sementara ke `os.tmpdir()` setiap kali kirim gambar/video KELUAR
+     * tanpa `jpegThumbnail` yang sudah disiapkan sendiri (persis yang
+     * dilakukan sendMediaMessage() di sini) -- untuk generate thumbnail
+     * otomatis. `os.tmpdir()` default ke `/tmp` kalau env var `TMPDIR`
+     * tidak diset, dan `/tmp` TIDAK ADA/tidak writable di sandbox proses
+     * app Android biasa (beda dari Linux/Windows desktop) -- Node
+     * melempar `ENOENT: no such file or directory, open '/tmp/image...-
+     * original'` (atau `-enc`) begitu Baileys mencoba menulis/membacanya.
+     * Diverifikasi ulang gejala persis ini di sandbox pengembangan dengan
+     * memaksa `TMPDIR` ke folder yang tidak ada.
+     */
+    fun tmpDir(context: Context): File = File(context.filesDir, TMP_DIR_NAME)
 
     /** true kalau thread Node sudah pernah dimulai di proses (Android process) ini. */
     fun isNodeStarted(): Boolean = nodeStarted.get()
@@ -139,6 +164,32 @@ object NodeBridge {
     }
 
     /**
+     * Kosongkan ISI folder tmpDir() (folder itu sendiri TETAP ada setelahnya)
+     * -- WAJIB dipanggil setiap app start, SEBELUM node::Start(). Beda dari
+     * `/tmp` Linux biasa (yang dibersihkan OS saat reboot/berkala), folder
+     * privat app ini PERSISTEN antar-restart.
+     *
+     * CATATAN KEJUJURAN: Baileys SEBENARNYA sudah membersihkan sendiri file
+     * `*-enc`/`*-original`-nya lewat blok `.finally()` di
+     * `lib/Utils/messages.js` (jalan baik saat sukses MAUPUN gagal kirim),
+     * diverifikasi langsung dari source code-nya. Tapi itu TIDAK menjamin
+     * folder ini selalu kosong -- kalau proses app dimatikan paksa di
+     * tengah pengiriman media (di-force-stop, kehabisan memori/di-kill OS,
+     * crash), blok `.finally()` itu tidak sempat jalan sama sekali dan
+     * file sisa akan tertinggal PERMANEN (folder ini persisten, tidak
+     * seperti `/tmp` Linux). Pembersihan di sini adalah jaring pengaman
+     * untuk skenario itu, bukan pengganti cleanup Baileys.
+     */
+    private fun cleanTmpDir(context: Context) {
+        val dir = tmpDir(context)
+        val deletedOk = if (dir.exists()) dir.deleteRecursively() else true
+        dir.mkdirs()
+        if (!deletedOk) {
+            Log.w(TAG, "Sebagian isi $dir gagal dihapus saat start -- tidak fatal, akan dicoba lagi start berikutnya.")
+        }
+    }
+
+    /**
      * Mulai runtime Node di background thread (SEKALI per proses). Aman
      * dipanggil berkali-kali (mis. dari onStartCommand service yang
      * dipanggil ulang) -- panggilan kedua dst diabaikan.
@@ -151,11 +202,13 @@ object NodeBridge {
 
         ensureProjectFilesInstalled(context)
         writeEnvFile(context, prefs)
+        cleanTmpDir(context)
 
         val dir = projectDir(context)
+        val tmp = tmpDir(context)
         Thread({
-            Log.i(TAG, "Memulai Node.js runtime, entry: $ENTRY_SCRIPT, cwd: ${dir.absolutePath}")
-            startNodeWithArguments(dir.absolutePath, arrayOf("node", ENTRY_SCRIPT))
+            Log.i(TAG, "Memulai Node.js runtime, entry: $ENTRY_SCRIPT, cwd: ${dir.absolutePath}, TMPDIR: ${tmp.absolutePath}")
+            startNodeWithArguments(dir.absolutePath, tmp.absolutePath, arrayOf("node", ENTRY_SCRIPT))
             Log.w(TAG, "Node.js runtime BERHENTI (seharusnya jalan terus selama service hidup).")
         }, "node-runtime").apply {
             isDaemon = true
