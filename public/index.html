@@ -79,14 +79,15 @@
         <p id="reply-feedback" class="feedback"></p>
 
         <form id="reply-media-form">
-          <label for="reply-media-type">Balas dengan media (gambar/dokumen)</label>
+          <label for="reply-media-type">Balas dengan media (gambar/dokumen/sticker)</label>
           <select id="reply-media-type" name="reply-media-type">
             <option value="image">Gambar</option>
             <option value="document">Dokumen</option>
+            <option value="sticker">Sticker (WebP)</option>
           </select>
           <input type="file" id="reply-media-file" name="reply-media-file" required />
           <input type="text" id="reply-media-filename" class="hidden" placeholder="Nama file (wajib untuk dokumen)" />
-          <textarea id="reply-media-caption" rows="2" placeholder="Caption (opsional)"></textarea>
+          <textarea id="reply-media-caption" rows="2" placeholder="Caption (opsional -- diabaikan untuk sticker)"></textarea>
           <p class="hint">Ukuran maksimum sesuai konfigurasi server (env <code>MAX_MEDIA_UPLOAD_MB</code>, default 20MB).</p>
           <button type="submit">KIRIM MEDIA</button>
         </form>

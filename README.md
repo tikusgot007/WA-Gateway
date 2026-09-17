@@ -160,7 +160,7 @@ Semua response berbentuk JSON dengan format `{ ok: boolean, data?: ..., error?: 
 | GET  | `/api/chats` | Daftar conversation, dikelompokkan berdasarkan `chatId` (JID asli — bisa `@s.whatsapp.net` atau `@lid`). Lihat §12. |
 | GET  | `/api/chats/:chatId/messages` | Pesan milik satu conversation saja. `chatId` harus di-`encodeURIComponent()` oleh client (mis. `255490491736112%40lid`). |
 | POST | `/api/chats/:chatId/reply` | Balas satu conversation. `chatId` dari URL dipakai **langsung** sebagai target kirim ke Baileys — tidak pernah dikonversi ke nomor telepon. Body: `{ "text": "..." }` |
-| POST | `/api/chats/:chatId/reply-media` | Balas satu conversation dengan **media** (gambar/dokumen). Body: `{ "mediaType": "image"|"document", "mediaBase64": "...", "mediaUrl": "...", "caption": "...", "fileName": "...", "mimetype": "..." }` — isi salah satu dari `mediaBase64` (konten file, base64) atau `mediaUrl` (Gateway mengunduh sendiri; **hanya untuk kemudahan uji manual**, lihat §5.1). `fileName` wajib untuk `mediaType: "document"`. Lihat §14. |
+| POST | `/api/chats/:chatId/reply-media` | Balas satu conversation dengan **media** (gambar/dokumen/sticker). Body: `{ "mediaType": "image"|"document"|"sticker", "mediaBase64": "...", "mediaUrl": "...", "caption": "...", "fileName": "...", "mimetype": "...", "isAnimated": false }` — isi salah satu dari `mediaBase64` (konten file, base64) atau `mediaUrl` (Gateway mengunduh sendiri; **hanya untuk kemudahan uji manual**, lihat §5.1). `fileName` wajib untuk `mediaType: "document"`. Untuk `mediaType: "sticker"`, file **wajib WebP valid** (tidak ada konversi otomatis dari JPEG/PNG), `caption` diabaikan (WhatsApp tidak mengizinkan caption di sticker). Lihat §14/§16. |
 
 Contoh kirim pesan dengan `curl`:
 
@@ -180,8 +180,8 @@ Response berbentuk `{ success: boolean, ... }`, berbeda dari format `/api/*`.
 | Method | Endpoint | Fungsi |
 |--------|----------|--------|
 | POST | `/send` | Kirim balasan teks dari POS. Body: `{ "chat_id": "...", "text": "..." }` |
-| POST | `/send-media` | Kirim balasan **media** (gambar/dokumen) dari POS. Body: `{ "chat_id": "...", "media_type": "image"|"document", "media_base64": "...", "mimetype": "...", "file_name": "...", "caption": "..." }`. **Hanya menerima base64** (bukan URL) — kasir upload file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa dipakai ulang seperti `/media/download`. `file_name` wajib untuk `media_type: "document"`. Lihat §14. |
-| POST | `/media/download` | Ambil+dekripsi 1 file media **masuk** dari server WhatsApp, berdasarkan referensi (`direct_path` + `media_key_base64`) yang tersimpan CI4. Mengembalikan file BINARY langsung (bukan JSON) jika sukses. |
+| POST | `/send-media` | Kirim balasan **media** (gambar/dokumen/sticker) dari POS. Body: `{ "chat_id": "...", "media_type": "image"|"document"|"sticker", "media_base64": "...", "mimetype": "...", "file_name": "...", "caption": "...", "is_animated": false }`. **Hanya menerima base64** (bukan URL) — kasir upload file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa dipakai ulang seperti `/media/download`. `file_name` wajib untuk `media_type: "document"`. Untuk `media_type: "sticker"`, file **wajib WebP valid** (ditolak `400 INVALID_STICKER_FORMAT` kalau bukan), tidak ada konversi otomatis dari format lain, dan `caption` diabaikan. Lihat §14/§16. |
+| POST | `/media/download` | Ambil+dekripsi 1 file media **masuk** (gambar/dokumen/sticker) dari server WhatsApp, berdasarkan referensi (`direct_path` + `media_key_base64` + `media_type`) yang tersimpan CI4. Mengembalikan file BINARY langsung (bukan JSON) jika sukses. |
 
 Prinsip yang sama untuk seluruh endpoint media (masuk maupun keluar): Gateway
 **tidak pernah** menyimpan file media ke disk — hanya dipegang di memory
@@ -402,7 +402,8 @@ gambar/dokumen, bukan cuma menerima.
   manual** (tinggal tempel link gambar tanpa perlu encode base64 manual),
   bukan pola yang dipakai integrasi CI4.
 - **Jenis media yang didukung**: `image` dan `document`, sama seperti media
-  masuk. Jenis lain (audio/video/sticker/lokasi/kontak) di luar scope.
+  masuk. Jenis lain (audio/video/lokasi/kontak) di luar scope. (Update:
+  `sticker` ditambahkan belakangan, lihat §16.)
 - **Ukuran maksimum**: dikontrol lewat env `MAX_MEDIA_UPLOAD_MB` (default
   20MB). Body request JSON untuk endpoint media memakai body-parser dengan
   limit lebih besar dari endpoint lain (dihitung otomatis dari
@@ -464,3 +465,101 @@ bahwa proyek Android ini belum di-build/dijalankan sungguhan di Android
 Studio oleh sesi yang menulisnya (sandbox pengembangannya tidak punya
 Android SDK/NDK), jadi anggap sebagai starting point yang solid, bukan
 produk jadi siap pakai.
+
+---
+
+## 16. Dukungan Sticker (Kirim & Terima)
+
+Menambahkan sticker sebagai jenis media ketiga (setelah image/document),
+memakai **pola yang PERSIS sama** dengan image/document di §14 -- bukan
+pola baru. Baik masuk maupun keluar direview & diverifikasi langsung dari
+source code Baileys yang ter-install (`node_modules/baileys`), bukan
+ditebak dari dokumentasi/memori.
+
+### 16.1 Keputusan desain
+
+- **REUSE, bukan duplikasi**: `buildMediaRef()` di `connectionManager.js`
+  (ekstraksi `directPath`/`mediaKey`/`mimetype`/`fileLength`/`fileSha256`)
+  dipakai APA ADANYA untuk sticker, tanpa perubahan signature/logic --
+  fungsi ini sudah generik sejak awal untuk image/document, terbukti
+  langsung cocok untuk sticker karena proto `IStickerMessage` di Baileys
+  punya field yang identik (diverifikasi dari `WAProto/index.d.ts`).
+- **Sticker masuk mengikuti prinsip image/document** (BUKAN audio/video):
+  kalau `directPath`/`mediaKey` tidak lengkap, pesan **dibuang** (tidak
+  diteruskan ke CI4) -- beda dari audio/video yang tetap diteruskan
+  walau metadata kosong, karena binary audio/video memang tidak pernah
+  diambil sama sekali.
+- **Tidak ada caption untuk sticker**: diverifikasi dari proto Baileys
+  (`IStickerMessage` masuk, dan variant `sticker` di `AnyMediaMessageContent`
+  keluar) -- keduanya memang tidak punya field caption sama sekali. Ini
+  konsisten dengan perilaku asli WhatsApp (app resmi juga tidak
+  menyediakan UI kirim sticker dengan caption).
+- **Kontrak field ke CI4 identik dengan image/document**: object `media`
+  yang dikirim ke `POST /api/inbox/gateway/messages` untuk
+  `message_type: "sticker"` punya field **PERSIS SAMA** (nama & bentuk)
+  dengan image/document (`direct_path`, `media_key_base64`, `mimetype`,
+  `file_length`, `file_sha256_base64`, `file_name`) -- **TIDAK ada**
+  field tambahan seperti `is_animated` yang ikut terbawa ke payload ini,
+  supaya sisi AuliaPos bisa memproses sticker lewat cabang kode yang
+  sama persis dengan image/document, tanpa field asing yang tidak
+  dikenal. Flag `isAnimated` dari proto Baileys dibaca (memastikan tidak
+  crash), tapi sengaja tidak diteruskan ke payload CI4.
+- **`downloadContentFromMessage(ref, 'sticker')`**: diverifikasi langsung
+  dari `node_modules/baileys/lib/Defaults/index.js`
+  (`MEDIA_HKDF_KEY_MAPPING`) bahwa `'sticker'` adalah `MediaType` yang
+  valid (di-mapping ke kunci HKDF `'Image'`) -- endpoint
+  `POST /media/download` yang sudah ada otomatis bisa dipakai ulang,
+  cukup dengan mengirim `media_type: "sticker"` di body (validasi daftar
+  tipe di endpoint ini sebelumnya **hardcoded** `['image', 'document']`,
+  bukan pakai `VALID_MEDIA_TYPES` -- celah kecil yang ditemukan &
+  diperbaiki sekalian saat menambahkan sticker).
+- **Sticker keluar TIDAK dikonversi otomatis dari format lain** (JPEG/PNG/dst)
+  -- tidak ada dependency baru ditambahkan untuk ini. `sharp` yang
+  muncul di `node_modules/` HANYALAH *optional peer dependency* milik
+  `baileys` sendiri (`peerDependencies.sharp` di
+  `node_modules/baileys/package.json`, untuk kebutuhan internal Baileys),
+  **bukan** dependency project ini -- menambahkannya sebagai dependency
+  langsung untuk konversi sticker akan mengulang masalah yang sama
+  seperti `better-sqlite3` untuk build Android (native addon, lihat
+  `android/README.md`). Sebagai gantinya, `isValidWebp()` (baru, di
+  `mediaPayload.js`) memvalidasi **magic bytes** container WebP
+  (`RIFF....WEBP`) sebelum diteruskan ke Baileys -- validasi minimal,
+  bukan validasi struktur WebP penuh (dimensi/VP8 chunk/dst), cukup
+  untuk menyaring kesalahan paling umum (kasir lupa konversi, upload
+  JPEG/PNG mentah sebagai "sticker").
+- **`is_animated`** (opsional, boolean) bisa dikirim di `POST /send-media`/
+  `POST /api/chats/:chatId/reply-media` untuk sticker animasi -- diteruskan
+  ke Baileys sebagai `isAnimated` saat upload (`sock.sendMessage(jid,
+  { sticker, isAnimated })`), TIDAK muncul di `media_ref` response
+  (kontrak response tetap identik image/document: `direct_path` +
+  `media_key_base64` saja).
+
+### 16.2 File yang diubah/ditambahkan
+
+| File | Perubahan |
+|------|-----------|
+| `src/whatsapp/connectionManager.js` | Cabang baru `stickerMessage` di `_handleIncomingMessage()` (reuse `buildMediaRef()`). `sendMediaMessage()`/`sendMediaReply()` menerima `mediaType: 'sticker'` + opsi `isAnimated`. Docblock `buildMediaRef()`/`downloadMediaByRef()` diupdate menyebut sticker. |
+| `src/whatsapp/mediaPayload.js` | `VALID_MEDIA_TYPES` bertambah `'sticker'`. Fungsi baru `isValidWebp()` (validasi magic bytes, TANPA dependency baru). |
+| `src/api/ci4Routes.js` | `POST /send-media` menerima `media_type: "sticker"` + `is_animated` opsional, ditolak `400 INVALID_STICKER_FORMAT` kalau bukan WebP valid. `POST /media/download` diperbaiki memakai `VALID_MEDIA_TYPES` (sebelumnya hardcoded `['image','document']`, tidak otomatis dapat sticker). |
+| `src/api/routes.js` | `POST /api/chats/:chatId/reply-media` (dashboard test) menerima `mediaType: "sticker"` + `isAnimated`, validasi WebP sama seperti `/send-media`. |
+| `test/simulate-sticker.js` | **Baru.** Simulasi logika: sticker referensi lengkap diteruskan, referensi tidak lengkap dibuang, sticker animasi diproses identik dengan statis (tidak ada percabangan), idempotency `wa_message_id`, `isValidWebp()` menerima/menolak buffer, kirim sticker keluar (mock `sock.sendMessage()`) menghasilkan `media_ref` benar, regresi penolakan `mediaType` tidak dikenal. |
+| `test/simulate-send-media.js` | Assertion `VALID_MEDIA_TYPES` diupdate menyertakan `'sticker'`. |
+
+### 16.3 Yang sudah diverifikasi sendiri
+
+- `node --check` pada seluruh file yang diubah/ditambahkan -- tidak ada syntax error.
+- `node test/simulate-sticker.js` -- 8 skenario lulus (lihat §16.2), TERMASUK memverifikasi bahwa object `media` yang dikirim ke CI4 (`Object.keys(...)`) identik persis bentuknya dengan image/document, dan identik antara sticker statis vs animasi.
+- Seluruh test simulasi LAIN yang sudah ada (`simulate-lid-conversation.js`, `simulate-identity-hint.js`, `simulate-audio-video.js`, `simulate-send-media.js`) dijalankan ulang -- semua tetap lulus, tidak ada regresi ke image/document/audio/video/@lid.
+- Server benar-benar dijalankan (`startServer()`) dan diuji dengan `curl` sungguhan:
+  - `POST /send-media` dengan `media_type: "sticker"` + base64 BUKAN WebP → `400 INVALID_STICKER_FORMAT` (ditolak SEBELUM cek koneksi, sama seperti validasi `file_name` untuk document).
+  - `POST /send-media` dengan `media_type: "sticker"` + base64 WebP valid (magic bytes) tapi belum connected → `409 NOT_CONNECTED` (lolos validasi format, ditolak di tahap koneksi seperti mestinya).
+  - `POST /media/download` dengan `media_type: "sticker"` → tidak lagi ditolak `400 INVALID_MEDIA_TYPE` (celah `hardcoded ['image','document']` yang ditemukan sudah diperbaiki) -- lanjut ke proses download sungguhan (gagal di sandbox ini karena tidak ada akses jaringan ke server WhatsApp, error `MEDIA_UNAVAILABLE`, BUKAN karena `media_type` ditolak).
+- Fakta Baileys berikut diverifikasi LANGSUNG dari `node_modules/baileys` yang ter-install (bukan tebakan): field proto `IStickerMessage` (`WAProto/index.d.ts`), `MediaType` mencakup `'sticker'` (`Defaults/index.js`), dan variant `sticker` di `AnyMediaMessageContent` (`Types/Message.d.ts`) tidak punya field caption.
+
+### 16.4 Yang PERLU kamu jalankan/verifikasi sendiri (BELUM bisa diverifikasi di sandbox ini)
+
+1. **Terima sticker sungguhan** (statis) dari HP customer asli, pastikan tersimpan sebagai `message_type: "sticker"` dan bisa diambil ulang lewat `POST /media/download` (dibuka sebagai gambar WebP yang valid, bukan corrupt).
+2. **Terima sticker ANIMASI sungguhan**, pastikan tetap diteruskan dengan benar (flag `isAnimated` dari WhatsApp sungguhan belum pernah diverifikasi bentuknya persis seperti apa di sandbox ini -- kode mengasumsikan `boolean`, sesuai definisi proto).
+3. **Kirim sticker WebP valid sungguhan** lewat `POST /send-media` atau dashboard test, pastikan benar-benar tampil sebagai sticker (bukan gambar biasa) di WhatsApp penerima, dan `media_ref` yang dikembalikan bisa dipakai ulang lewat `POST /media/download`.
+4. **Kirim file WebP yang valid secara format tapi TIDAK memenuhi syarat sticker WhatsApp** (dimensi bukan 512x512, ukuran terlalu besar, dst) -- `isValidWebp()` SENGAJA cuma cek magic bytes container, jadi kemungkinan besar akan lolos validasi Gateway tapi ditolak oleh WhatsApp sendiri. Perlu dipastikan pesan error dari Baileys (kalau ada) diteruskan dengan jelas, bukan generic `500`.
+5. **Sisi CI4 (AuliaPos v3.0)**: seperti disebutkan di §14.4, endpoint `POST /send-media` sudah mendukung sticker di sisi Gateway, tapi UI upload sticker + pemanggilannya dari CI4 adalah pekerjaan terpisah di luar scope perubahan ini. Untuk arah masuk, cabang kode `image`/`document` yang akan direuse untuk `sticker` di `InboxGatewayApi::messages()` (sisi AuliaPos) BELUM diverifikasi menerima `message_type: "sticker"` dengan benar -- itu perubahan di repo AuliaPos, bukan Gateway ini.

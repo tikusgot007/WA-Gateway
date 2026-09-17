@@ -479,11 +479,12 @@ class ConnectionManager {
     let media = null;
 
     if (text === null) {
-      // Bukan pesan teks biasa -- cek apakah gambar/dokumen/audio/video
-      // (didukung), selain itu (sticker/lokasi/kontak/dst) di luar scope
-      // untuk sekarang, cukup di-log & dilewati.
+      // Bukan pesan teks biasa -- cek apakah gambar/dokumen/sticker/audio/video
+      // (didukung), selain itu (lokasi/kontak/dst) di luar scope untuk
+      // sekarang, cukup di-log & dilewati.
       const imageMsg = msg.message.imageMessage;
       const documentMsg = msg.message.documentMessage;
+      const stickerMsg = msg.message.stickerMessage;
       const audioMsg = msg.message.audioMessage;
       const videoMsg = msg.message.videoMessage;
 
@@ -513,6 +514,31 @@ class ConnectionManager {
           });
           return;
         }
+      } else if (stickerMsg) {
+        // SAMA PRINSIP dengan image/document (BUKAN audio/video): sticker
+        // wajib punya directPath/mediaKey lengkap, kalau tidak dibuang --
+        // lihat buildMediaRef(). WhatsApp TIDAK mengizinkan caption pada
+        // sticker (stickerMessage proto memang tidak punya field caption),
+        // jadi text selalu null di sini, konsisten dengan audioMessage.
+        //
+        // stickerMsg.isAnimated SENGAJA TIDAK ikut dimasukkan ke `media`
+        // di sini -- kontrak field `media` yang diteruskan ke CI4 (lihat
+        // normalized.media di bawah & incomingBuffer.js) WAJIB IDENTIK
+        // dengan image/document (direct_path/media_key_base64/mimetype/
+        // file_length/file_sha256_base64/file_name) supaya AuliaPos bisa
+        // memproses sticker lewat cabang kode yang sama dengan image/
+        // document, tanpa field tambahan yang tidak dikenal.
+        messageType = 'sticker';
+        text = null;
+        media = buildMediaRef(stickerMsg, 'sticker', null);
+
+        if (!media) {
+          logger.warn('Pesan sticker diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
+            messageId: msg.key?.id,
+            messageType,
+          });
+          return;
+        }
       } else if (audioMsg || videoMsg) {
         // Audio (termasuk voice note/PTT -- dianggap audio biasa, TIDAK
         // ada tipe/business logic terpisah) dan video: BEDA PRINSIP dari
@@ -532,7 +558,7 @@ class ConnectionManager {
           fileLength: mediaMsg.fileLength ? Number(mediaMsg.fileLength) : null,
         };
       } else {
-        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/audio/video)', {
+        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/sticker/audio/video)', {
           messageId: msg.key?.id,
           type: Object.keys(msg.message)[0],
         });
@@ -706,19 +732,28 @@ class ConnectionManager {
   }
 
   /**
-   * Kirim SATU pesan media (gambar/dokumen) ke sebuah JID, apa adanya, tanpa
-   * normalisasi/tebakan -- versi media dari sendTextMessage(). `jid` di sini
-   * boleh berupa @s.whatsapp.net, @lid, atau @g.us, sama seperti sendTextMessage().
+   * Kirim SATU pesan media (gambar/dokumen/sticker) ke sebuah JID, apa
+   * adanya, tanpa normalisasi/tebakan -- versi media dari
+   * sendTextMessage(). `jid` di sini boleh berupa @s.whatsapp.net, @lid,
+   * atau @g.us, sama seperti sendTextMessage().
    *
    * PRINSIP SAMA seperti media MASUK: Gateway TIDAK PERNAH menyimpan file media
    * ke disk. `buffer` yang diterima di sini hanya dipegang di memory selama
    * pemanggilan function ini (diteruskan langsung ke Baileys), tidak pernah
    * disimpan ke property instance mana pun.
    *
+   * Sticker: WhatsApp TIDAK mengizinkan caption/mimetype custom untuk
+   * sticker (diverifikasi dari `AnyMediaMessageContent` di Baileys --
+   * variant sticker cuma `{ sticker, isAnimated? }`), jadi `caption`/
+   * `mimetype` di `options` diabaikan untuk mediaType ini. `buffer`
+   * WAJIB sudah berupa WebP valid -- Gateway TIDAK melakukan konversi
+   * otomatis dari format lain (lihat validasi di ci4Routes.js/routes.js
+   * SEBELUM fungsi ini dipanggil).
+   *
    * @param {string} jid
-   * @param {'image'|'document'} mediaType
+   * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
    */
   async sendMediaMessage(jid, mediaType, buffer, options = {}) {
     if (!this.isConnected()) {
@@ -728,7 +763,7 @@ class ConnectionManager {
     }
 
     const jidType = classifyJid(jid);
-    const { caption, mimetype, fileName } = options;
+    const { caption, mimetype, fileName, isAnimated } = options;
 
     let content;
     if (mediaType === 'image') {
@@ -740,6 +775,8 @@ class ConnectionManager {
         fileName: fileName || 'file',
         caption: caption || undefined,
       };
+    } else if (mediaType === 'sticker') {
+      content = { sticker: buffer, isAnimated: Boolean(isAnimated) || undefined };
     } else {
       const err = new Error(`mediaType tidak dikenal: ${mediaType}`);
       err.code = 'INVALID_MEDIA_TYPE';
@@ -759,13 +796,17 @@ class ConnectionManager {
       // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
       // directPath/mediaKey asli dari server WhatsApp untuk file yang baru
       // saja diunggah -- sama persis strukturnya dengan imageMessage/
-      // documentMessage pada pesan MASUK. Diekstrak dengan buildMediaRef()
-      // yang sama supaya media KELUAR ini juga bisa diambil ulang nanti
-      // (mis. dibuka lagi dari Inbox POS) lewat alur downloadMediaByRef()
-      // yang sudah ada, TANPA perlu menyimpan file apa pun di sini.
-      const sentMediaMessage = mediaType === 'image'
-        ? result?.message?.imageMessage
-        : result?.message?.documentMessage;
+      // documentMessage/stickerMessage pada pesan MASUK. Diekstrak dengan
+      // buildMediaRef() yang sama supaya media KELUAR ini juga bisa diambil
+      // ulang nanti (mis. dibuka lagi dari Inbox POS) lewat alur
+      // downloadMediaByRef() yang sudah ada, TANPA perlu menyimpan file
+      // apa pun di sini.
+      const sentMediaMessageByType = {
+        image: result?.message?.imageMessage,
+        document: result?.message?.documentMessage,
+        sticker: result?.message?.stickerMessage,
+      };
+      const sentMediaMessage = sentMediaMessageByType[mediaType];
       const mediaRef = buildMediaRef(sentMediaMessage, mediaType, fileName || null);
 
       logger.info('[SEND] pesan media berhasil dikirim', {
@@ -794,14 +835,15 @@ class ConnectionManager {
   }
 
   /**
-   * Balas SATU conversation dengan media (gambar/dokumen) -- versi media dari
-   * sendReply(). chatId di sini SAMA PRINSIPNYA dengan sendReply(): JID asli
-   * apa adanya, TIDAK PERNAH melalui normalizeToJid()/jidToPhone().
+   * Balas SATU conversation dengan media (gambar/dokumen/sticker) -- versi
+   * media dari sendReply(). chatId di sini SAMA PRINSIPNYA dengan
+   * sendReply(): JID asli apa adanya, TIDAK PERNAH melalui
+   * normalizeToJid()/jidToPhone().
    *
    * @param {string} chatId
-   * @param {'image'|'document'} mediaType
+   * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
    */
   async sendMediaReply(chatId, mediaType, buffer, options = {}) {
     if (!isDecodableJid(chatId)) {
@@ -859,7 +901,7 @@ class ConnectionManager {
    * (ci4Routes.js) yang menerjemahkan ini jadi respons error yang
    * jelas ke CI4/browser.
    *
-   * @param {{mediaType: 'image'|'document', directPath: string, mediaKeyBase64: string}} mediaRef
+   * @param {{mediaType: 'image'|'document'|'sticker', directPath: string, mediaKeyBase64: string}} mediaRef
    * @returns {Promise<Buffer>}
    */
   async downloadMediaByRef(mediaRef) {
@@ -898,11 +940,17 @@ class ConnectionManager {
 
 /**
  * Ekstrak REFERENSI media (bukan file-nya) dari sebuah imageMessage/
- * documentMessage Baileys -- directPath + mediaKey (base64) + info
- * lain yang cukup untuk mendekripsi ulang NANTI, on-demand, saat
- * kasir benar-benar membuka pesan itu di Inbox POS. File aslinya
- * TIDAK diunduh/didekripsi di sini sama sekali (sesuai keputusan:
- * "cukup simpan referensi, file tetap di WhatsApp").
+ * documentMessage/stickerMessage Baileys -- directPath + mediaKey
+ * (base64) + info lain yang cukup untuk mendekripsi ulang NANTI,
+ * on-demand, saat kasir benar-benar membuka pesan itu di Inbox POS.
+ * File aslinya TIDAK diunduh/didekripsi di sini sama sekali (sesuai
+ * keputusan: "cukup simpan referensi, file tetap di WhatsApp").
+ *
+ * Generik untuk ketiga tipe (image/document/sticker) -- field yang
+ * diekstrak sama persis di ketiganya (directPath/mediaKey/mimetype/
+ * fileLength/fileSha256), sudah diverifikasi langsung dari proto
+ * Baileys (WAProto/index.d.ts: IImageMessage/IDocumentMessage/
+ * IStickerMessage semuanya punya field yang sama untuk ini).
  *
  * Mengembalikan null kalau directPath/mediaKey tidak ada -- berarti
  * referensinya tidak lengkap, tidak ada gunanya diteruskan (nanti
