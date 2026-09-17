@@ -91,18 +91,21 @@ Java_com_auliapos_wagateway_NodeBridge_startNodeWithArguments(
     }
     env->ReleaseStringUTFChars(workingDir, workingDirChars);
 
-    // FIX bug "ENOENT ... open '/tmp/image...-original'": os.tmpdir() Node
-    // fallback ke "/tmp" kalau env var TMPDIR tidak diset, dan "/tmp" TIDAK
-    // ADA/tidak writable di sandbox proses app Android biasa. Baileys
-    // (lib/Utils/messages-media.js) menulis file sementara ke os.tmpdir()
-    // setiap kali kirim gambar/video KELUAR untuk generate thumbnail
-    // otomatis -- tanpa TMPDIR yang valid, ini gagal keras. setenv() di
-    // sini (BUKAN putenv(), supaya string-nya di-copy oleh libc, aman
-    // walau tmpDirChars di-release setelah ini) WAJIB dipanggil SEBELUM
-    // node::Start(), karena os.tmpdir() Node membaca process.env (yang
-    // bersumber dari environ proses OS ini) saat itu juga -- lihat
-    // NodeBridge.tmpDir()/cleanTmpDir() di sisi Kotlin untuk penjelasan
-    // lengkap & pembersihan foldernya.
+    // Percobaan awal FIX bug "ENOENT ... open '/tmp/image...-original'"
+    // (lihat NodeBridge.tmpDir() untuk latar belakang lengkap bug-nya).
+    //
+    // CATATAN KEJUJURAN: setenv() ini SENDIRIAN TERBUKTI TIDAK CUKUP --
+    // diverifikasi lewat testing sungguhan di HP: baris log "TMPDIR diset
+    // ke ..." di bawah muncul dengan path yang BENAR, TAPI Baileys tetap
+    // gagal ENOENT mencoba tulis ke "/tmp" literal. Kesimpulan: runtime
+    // Node di build nodejs-mobile yang dipakai TIDAK membaca env var
+    // TMPDIR untuk os.tmpdir() (beda dari Node desktop biasa). Fix yang
+    // TERBUKTI benar-benar berhasil ada di level JavaScript --
+    // src/whatsapp/baileysLoader.js meng-override os.tmpdir() langsung,
+    // dibaca dari APP_TMP_DIR di `.env` (lihat NodeBridge.writeEnvFile()).
+    // setenv() di sini DIPERTAHANKAN sebagai lapisan tambahan yang tidak
+    // merugikan (harmless -- kalaupun tidak dipakai Node, tidak ada
+    // efek samping), bukan lagi diklaim sebagai fix utamanya.
     const char* tmpDirChars = env->GetStringUTFChars(tmpDir, nullptr);
     if (setenv("TMPDIR", tmpDirChars, 1) != 0) {
         LOGI("Peringatan: gagal set TMPDIR ke %s", tmpDirChars);

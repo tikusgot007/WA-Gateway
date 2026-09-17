@@ -21,12 +21,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      restart total, seluruh proses Android app-nya yang diminta selesai
  *      oleh GatewayForegroundService lalu Android/BootReceiver yang
  *      menghidupkan proses baru).
- *   4. Menyiapkan (& membersihkan) folder tmp privat app sendiri untuk
- *      dipakai sebagai TMPDIR proses Node -- lihat tmpDir()/cleanTmpDir(),
- *      dibutuhkan karena `/tmp` sistem tidak ada/tidak writable di sandbox
- *      app Android (beda dari Linux/Windows desktop), padahal Baileys
- *      butuh direktori temp yang valid untuk generate thumbnail otomatis
- *      saat kirim gambar/video keluar.
+ *   4. Menyiapkan (& membersihkan) folder tmp privat app sendiri, dikirim
+ *      ke Baileys lewat DUA jalur sekaligus -- lihat tmpDir()/
+ *      cleanTmpDir() di sini, dan src/whatsapp/baileysLoader.js di sisi
+ *      JavaScript (jalur yang TERBUKTI benar-benar dipakai Baileys,
+ *      lihat catatan kejujuran di file itu) -- dibutuhkan karena `/tmp`
+ *      sistem tidak ada/tidak writable di sandbox app Android (beda dari
+ *      Linux/Windows desktop), padahal Baileys butuh direktori temp yang
+ *      valid untuk generate thumbnail otomatis saat kirim gambar/video/
+ *      sticker keluar.
  */
 object NodeBridge {
     private const val TAG = "NodeBridge"
@@ -47,20 +50,29 @@ object NodeBridge {
     fun projectDir(context: Context): File = File(context.filesDir, PROJECT_ASSET_DIR)
 
     /**
-     * Folder temp milik APP SENDIRI, dipakai sebagai `TMPDIR` untuk proses
-     * Node (lihat startIfNeeded() & native-lib.cpp) -- BUKAN `/tmp` sistem.
+     * Folder temp milik APP SENDIRI -- BUKAN `/tmp` sistem.
      *
      * LATAR BELAKANG BUG: Baileys (lib/Utils/messages-media.js) menulis
-     * file sementara ke `os.tmpdir()` setiap kali kirim gambar/video KELUAR
-     * tanpa `jpegThumbnail` yang sudah disiapkan sendiri (persis yang
-     * dilakukan sendMediaMessage() di sini) -- untuk generate thumbnail
-     * otomatis. `os.tmpdir()` default ke `/tmp` kalau env var `TMPDIR`
-     * tidak diset, dan `/tmp` TIDAK ADA/tidak writable di sandbox proses
-     * app Android biasa (beda dari Linux/Windows desktop) -- Node
-     * melempar `ENOENT: no such file or directory, open '/tmp/image...-
-     * original'` (atau `-enc`) begitu Baileys mencoba menulis/membacanya.
-     * Diverifikasi ulang gejala persis ini di sandbox pengembangan dengan
-     * memaksa `TMPDIR` ke folder yang tidak ada.
+     * file sementara ke `os.tmpdir()` setiap kali kirim gambar/video/
+     * sticker KELUAR (untuk generate thumbnail otomatis pada image/video --
+     * tapi file `*-enc` untuk data upload terenkripsi dibuat untuk SEMUA
+     * jenis media tanpa kecuali, termasuk sticker). `os.tmpdir()` default
+     * ke `/tmp` kalau tidak di-override, dan `/tmp` TIDAK ADA/tidak
+     * writable di sandbox proses app Android biasa (beda dari Linux/
+     * Windows desktop) -- Node melempar `ENOENT: no such file or
+     * directory, open '/tmp/image...-original'` (atau `-enc`) begitu
+     * Baileys mencoba menulis/membacanya. Diverifikasi ulang gejala
+     * persis ini di sandbox pengembangan dengan memaksa `TMPDIR` ke
+     * folder yang tidak ada.
+     *
+     * Path dari folder ini dikirim ke Node lewat DUA jalur: (1) parameter
+     * ke `startNodeWithArguments()` -> `setenv("TMPDIR", ...)` di
+     * native-lib.cpp (dipertahankan sebagai lapisan tambahan, TAPI
+     * TERBUKTI TIDAK CUKUP SENDIRIAN -- lihat catatan di bawah), dan
+     * (2) `.env` (`APP_TMP_DIR`, lihat writeEnvFile()) yang dibaca
+     * `src/whatsapp/baileysLoader.js` untuk override `os.tmpdir()`
+     * langsung di level JavaScript -- jalur (2) inilah yang TERBUKTI
+     * benar-benar menyelesaikan masalahnya lewat testing sungguhan di HP.
      */
     fun tmpDir(context: Context): File = File(context.filesDir, TMP_DIR_NAME)
 
@@ -148,6 +160,11 @@ object NodeBridge {
      * SELALU 0.0.0.0 (bukan 127.0.0.1 seperti default desktop) karena
      * skenario pemakaian app ini adalah server POS di LAN yang sama
      * memanggil Gateway di HP ini langsung -- lihat android/README.md.
+     *
+     * APP_TMP_DIR: dibaca `src/whatsapp/baileysLoader.js` untuk override
+     * os.tmpdir() -- lihat komentar lengkap di file itu soal kenapa ini
+     * dibutuhkan (setenv("TMPDIR") saja di native-lib.cpp TERBUKTI TIDAK
+     * CUKUP di runtime Node/nodejs-mobile yang dipakai).
      */
     fun writeEnvFile(context: Context, prefs: GatewayPrefs) {
         val envFile = File(projectDir(context), ".env")
@@ -159,6 +176,7 @@ object NodeBridge {
             appendLine("SQLITE_PATH=./data/gateway.sqlite")
             appendLine("CI4_BASE_URL=${prefs.ci4BaseUrl}")
             appendLine("CI4_GATEWAY_TOKEN=${prefs.ci4GatewayToken}")
+            appendLine("APP_TMP_DIR=${tmpDir(context).absolutePath}")
         }
         envFile.writeText(content)
     }

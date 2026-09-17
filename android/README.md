@@ -18,12 +18,15 @@ dipakai di Windows/desktop. Satu source code, dua target.
 > Kotlin/JNI-nya sempat cuma divalidasi lewat pembacaan kode cermat.
 > Setelah dicoba build sungguhan, ditemukan & diperbaiki **dua masalah
 > nyata**: (1) `baileys` ESM-only crash di Node 18 milik nodejs-mobile
-> (lihat `src/whatsapp/baileysLoader.js`), dan (2) kirim gambar keluar
-> gagal karena `/tmp` tidak ada di sandbox Android (lihat
-> `NodeBridge.kt`/`native-lib.cpp`, §7 Troubleshooting). Masalah (2)
-> **BELUM dikonfirmasi jalan di HP sungguhan** -- baru diverifikasi
-> logic-nya di level Node/Baileys, compile Kotlin/JNI-nya sendiri belum
-> pernah dicoba oleh sesi yang menulisnya. Kemungkinan masih ada
+> (lihat `src/whatsapp/baileysLoader.js`), dan (2) kirim gambar/sticker
+> keluar gagal karena `/tmp` tidak ada di sandbox Android. Masalah (2)
+> sempat **dicoba fix 2 kali**: percobaan pertama (`setenv("TMPDIR")` di
+> `native-lib.cpp`) TERBUKTI TIDAK CUKUP setelah dites sungguhan di HP
+> (runtime Node di nodejs-mobile tidak menghormati env var itu) --
+> percobaan kedua (override `os.tmpdir()` langsung di
+> `src/whatsapp/baileysLoader.js`) sudah diverifikasi berhasil di level
+> Node/Baileys (termasuk untuk sticker), TAPI **belum dikonfirmasi di HP
+> sungguhan** -- lihat §7 Troubleshooting. Kemungkinan masih ada
 > penyesuaian kecil lain tersisa, tapi arsitektur intinya sudah
 > divalidasi end-to-end.
 
@@ -47,29 +50,44 @@ dipakai di Windows/desktop. Satu source code, dua target.
   `abiFilters`). Dashboard (WebView) tampil normal, heartbeat ke CI4
   gagal sebagaimana mestinya kalau `CI4_BASE_URL`/token belum diisi
   (bukan bug, lihat §arsitektur soal heartbeat non-fatal).
-- **Bug nyata ditemukan & diperbaiki dari testing sungguhan**: kirim
-  gambar keluar (`/send-media`, `mediaType: "image"`) gagal konsisten
-  dengan `ENOENT: no such file or directory, open '/tmp/image...-
-  original'`. Root cause: Baileys menulis file sementara ke
-  `os.tmpdir()` untuk generate thumbnail JPEG otomatis (dipicu karena
-  Gateway tidak pernah supply `jpegThumbnail` sendiri) -- dan `/tmp`
-  TIDAK ADA/tidak writable di sandbox proses app Android. **Diverifikasi
-  ulang persis di level Node/Baileys** (bukan cuma teori): direproduksi
-  dengan memaksa `TMPDIR` ke folder yang tidak ada (error identik
-  muncul), lalu dibuktikan **hilang** setelah `TMPDIR` diarahkan ke
-  folder valid. Fix: `NodeBridge.kt` menyiapkan+membersihkan folder
-  `filesDir/tmp` privat app setiap start, diteruskan ke
-  `native-lib.cpp` yang `setenv("TMPDIR", ...)` SEBELUM `node::Start()`.
-  **BELUM diverifikasi**: compile Kotlin/JNI sungguhan (butuh Android
-  Studio) dan kirim JPEG sungguhan ke WhatsApp asli end-to-end -- lihat
-  §7 Troubleshooting untuk detail & langkah tes yang perlu dijalankan.
+- **Bug nyata ditemukan & diperbaiki dari testing sungguhan (2 ronde)**:
+  kirim gambar/sticker keluar (`/send-media`) gagal konsisten dengan
+  `ENOENT: no such file or directory, open '/tmp/image...-enc'` (atau
+  `-original`). Root cause: Baileys menulis file sementara ke
+  `os.tmpdir()` untuk SEMUA jenis media keluar (file `*-enc`, wajib
+  untuk semua tipe) dan khusus image/video juga file `*-original`
+  (untuk generate thumbnail JPEG otomatis, dipicu karena Gateway tidak
+  pernah supply `jpegThumbnail` sendiri) -- dan `/tmp` TIDAK ADA/tidak
+  writable di sandbox proses app Android.
+  - **Percobaan fix #1** (`setenv("TMPDIR", ...)` di `native-lib.cpp`
+    sebelum `node::Start()`): **TERBUKTI TIDAK CUKUP** setelah dites
+    sungguhan di HP -- Logcat menunjukkan baris "TMPDIR diset ke ..."
+    muncul dengan path yang BENAR, tapi Baileys tetap gagal ENOENT
+    mencoba tulis ke `/tmp` literal. Kesimpulan: runtime Node di build
+    nodejs-mobile yang dipakai TIDAK menghormati env var `TMPDIR` untuk
+    `os.tmpdir()` (beda dari Node desktop biasa, yang sudah diverifikasi
+    menghormatinya dengan benar).
+  - **Percobaan fix #2** (yang dipakai sekarang): override `os.tmpdir()`
+    LANGSUNG di level JavaScript (`src/whatsapp/baileysLoader.js`),
+    dibaca dari `.env` (`APP_TMP_DIR`, ditulis `NodeBridge.writeEnvFile()`)
+    -- TIDAK bergantung pada env var native sama sekali. **Diverifikasi
+    ulang persis di level Node/Baileys** memakai Baileys SUNGGUHAN
+    (`prepareWAMessageMedia()`, bukan mock): berhasil generate+kirim
+    media (image MAUPUN sticker) walau `TMPDIR` sistem sengaja diarahkan
+    ke folder yang tidak ada -- lihat `test/simulate-tmpdir-override.js`.
+    Di desktop (`APP_TMP_DIR` tidak pernah diisi), override ini TIDAK
+    PERNAH aktif -- dipastikan TIDAK ADA perubahan behavior sama sekali.
+  - **BELUM diverifikasi**: compile Kotlin/JNI sungguhan (butuh Android
+    Studio) dan kirim JPEG/sticker sungguhan ke WhatsApp asli end-to-end
+    dengan fix #2 ini -- lihat §7 Troubleshooting untuk detail & langkah
+    tes yang perlu dijalankan.
 
-Yang **belum** diverifikasi: kirim JPEG/gambar sungguhan ke WhatsApp asli
-setelah fix TMPDIR di atas (ini WAJIB dites ulang, bukan opsional --
-belum pernah ada percobaan outgoing image yang berhasil sampai sekarang),
-kirim/terima sticker sungguhan, foreground service bertahan lama di
-background (layar mati, battery optimization aktif), auto-start setelah
-reboot HP.
+Yang **belum** diverifikasi: kirim JPEG/gambar/sticker sungguhan ke
+WhatsApp asli setelah fix #2 di atas (ini WAJIB dites ulang, bukan
+opsional -- belum pernah ada satu pun percobaan outgoing image/sticker
+yang berhasil sampai laporan ini ditulis), foreground service bertahan
+lama di background (layar mati, battery optimization aktif), auto-start
+setelah reboot HP.
 
 ---
 
@@ -369,29 +387,44 @@ Jangan tambahkan `org.gradle.java.home=...` ke `android/gradle.properties`
 di Windows, `~/.gradle/gradle.properties` di Mac/Linux) -- lihat komentar
 di `android/gradle.properties` untuk detail.
 
-**Kirim gambar (bukan sticker) gagal dengan `ENOENT ... open '/tmp/image...-original'`**
-Sudah diperbaiki (lihat entri "Bug nyata ditemukan & diperbaiki" di
-bagian "Yang sudah diverifikasi" di atas) -- root cause: `/tmp` sistem
-tidak ada/tidak writable di sandbox app Android, padahal Baileys butuh
-itu untuk generate thumbnail otomatis saat kirim gambar/video keluar.
-Fix-nya set `TMPDIR` ke folder privat app (`filesDir/tmp`, dibersihkan
-tiap start) sebelum `node::Start()`. Kalau **masih** muncul setelah
-`git pull` perbaikan ini:
-1. Pastikan APK di-build ULANG (bukan cuma `npm run android:prepare-assets`
-   -- fix ini ada di `NodeBridge.kt`/`native-lib.cpp`, kode Kotlin/native,
-   BUKAN di `src/` JavaScript, jadi harus lewat build APK baru di Android
-   Studio, tidak cukup regenerate assets saja).
-2. Cek Logcat (`adb logcat | grep WaGatewayNode`) untuk baris
-   `TMPDIR diset ke ...` saat app start -- kalau baris ini TIDAK muncul
-   sama sekali, kemungkinan APK yang ter-install masih versi lama.
-3. Kalau baris `TMPDIR diset ke ...` muncul TAPI error `/tmp/...` yang
-   sama masih terjadi -- kemungkinan ada jalur lain di Baileys yang
-   memanggil `os.tmpdir()` sebelum `setenv()` sempat jalan (race
-   kondisi start-up), atau folder `filesDir/tmp` gagal dibuat (cek
-   permission storage app). Laporkan log lengkapnya untuk didiagnosis
-   lebih lanjut -- **belum ada percobaan kirim gambar sungguhan yang
-   berhasil sampai laporan ini ditulis**, jadi fix ini masih perlu
-   dikonfirmasi jalan di HP sungguhan.
+**Kirim gambar/sticker gagal dengan `ENOENT ... open '/tmp/image...-enc'` (atau `-original`)**
+Root cause: `/tmp` sistem tidak ada/tidak writable di sandbox app
+Android, padahal Baileys butuh direktori temp yang valid untuk SEMUA
+jenis media keluar (file `*-enc`, wajib untuk semua tipe termasuk
+sticker) dan khusus image/video juga file `*-original` (thumbnail
+otomatis).
+
+Sudah dicoba **2 pendekatan fix**:
+1. `setenv("TMPDIR", ...)` di `native-lib.cpp` sebelum `node::Start()`
+   -- **TERBUKTI TIDAK CUKUP** (diverifikasi dari testing sungguhan:
+   Logcat menunjukkan `TMPDIR` berhasil di-set dengan path yang benar,
+   tapi Baileys tetap gagal ENOENT ke `/tmp` literal -- runtime Node di
+   nodejs-mobile tidak menghormati env var ini).
+2. **Override `os.tmpdir()` langsung di JavaScript**
+   (`src/whatsapp/baileysLoader.js`, dibaca dari `.env` `APP_TMP_DIR`)
+   -- ini yang dipakai SEKARANG, sudah diverifikasi berhasil di level
+   Node/Baileys (`test/simulate-tmpdir-override.js`) tapi **belum
+   dikonfirmasi di HP sungguhan**.
+
+Kalau **masih** muncul setelah `git pull` fix #2 di atas:
+1. Pastikan APK di-build ULANG **DAN** `npm run android:prepare-assets`
+   dijalankan ULANG dari root repo SEBELUM build -- fix #2 ada di
+   `src/whatsapp/baileysLoader.js` + `src/config/index.js` (JavaScript,
+   masuk lewat `assets/nodejs-project/`) DAN `NodeBridge.kt` (Kotlin,
+   menulis `APP_TMP_DIR` ke `.env`) -- **kedua-duanya** harus ter-update,
+   bukan cuma salah satu.
+2. Cek Logcat (`adb logcat | grep NodeBridge`) untuk baris `Memulai
+   Node.js runtime ... TMPDIR: /data/user/0/com.auliapos.wagateway/files/tmp`
+   -- pastikan path-nya benar path privat app, bukan `/tmp`.
+3. Cek isi file `.env` yang benar-benar ter-generate di HP (lewat `adb
+   shell run-as com.auliapos.wagateway cat files/nodejs-project/.env`
+   kalau app debuggable) -- pastikan ada baris `APP_TMP_DIR=...` dengan
+   path yang benar. Kalau baris ini TIDAK ADA, `NodeBridge.kt` versi
+   lama yang masih jalan (APK belum ter-update).
+4. Kalau semua di atas sudah benar TAPI tetap gagal -- laporkan log
+   lengkapnya (khususnya apakah error masih menyebut `/tmp/...` literal
+   atau sudah menyebut path privat app tapi gagal karena alasan lain,
+   mis. permission) untuk didiagnosis lebih lanjut.
 
 ---
 
