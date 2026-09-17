@@ -304,6 +304,19 @@ Sesuaikan `NODEJS_MOBILE_LIBNODE_DIR`/`include_directories` di
 `app/src/main/cpp/CMakeLists.txt` dengan struktur folder rilis yang kamu
 unduh.
 
+**Sudah ubah pengaturan di layar Setup (URL POS/token/port), tapi
+perubahan tidak kepakai / error lama masih muncul terus**
+Node.js yang jalan di dalam app HANYA baca `.env` SEKALI, waktu pertama
+kali start di proses itu -- menyimpan pengaturan baru cuma menulis ulang
+file `.env`-nya, TIDAK membuat Node yang sudah terlanjur jalan baca ulang
+(Node tidak didesain untuk reload config tanpa proses barunya, lihat
+komentar `NodeBridge.startIfNeeded()`). Supaya pengaturan baru kepakai:
+1. **Setelan HP > Aplikasi > WA Gateway > Paksa berhenti (Force Stop)**
+   -- sekadar menutup app dari recent apps BELUM TENTU cukup, karena
+   Gateway jalan sebagai foreground service yang bisa tetap hidup di
+   background.
+2. Buka lagi app dari home screen.
+
 **App kebuka tapi status selalu "Menghubungkan..." tidak pernah lanjut**
 Cek `adb logcat | grep WaGatewayNode` dan `adb logcat | grep NodeJS` --
 semua log Gateway (termasuk error Baileys) diteruskan ke Logcat lewat

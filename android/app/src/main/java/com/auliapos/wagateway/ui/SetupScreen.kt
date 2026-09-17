@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.auliapos.wagateway.GatewayPrefs
+import com.auliapos.wagateway.NodeBridge
 
 /**
  * Layar pengaturan: port HTTP Gateway, base URL & token server POS
@@ -56,6 +57,21 @@ fun SetupScreen(
                     "HARUS berada di jaringan WiFi/LAN yang sama dengan HP ini.",
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            if (NodeBridge.isNodeStarted()) {
+                // Node.js yang sudah jalan HANYA baca .env sekali waktu start --
+                // perubahan di layar ini tidak otomatis kepakai sampai app
+                // benar-benar di-restart total (lihat NodeBridge.startIfNeeded()
+                // dan android/README.md bagian Troubleshooting).
+                Text(
+                    "⚠️ Gateway sudah berjalan. Perubahan di sini BARU " +
+                        "kepakai setelah app di-Force Stop (Setelan > Aplikasi > " +
+                        "WA Gateway > Paksa berhenti) lalu dibuka lagi -- sekadar " +
+                        "menutup app dari recent apps belum cukup.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
 
             OutlinedTextField(
                 value = port,
@@ -91,7 +107,18 @@ fun SetupScreen(
             Button(
                 onClick = {
                     prefs.port = port.toIntOrNull() ?: 3000
-                    prefs.ci4BaseUrl = ci4BaseUrl
+                    // Kesalahan input yang ternyata gampang terjadi: lupa tulis
+                    // skema (http://) di URL POS -- fetch() di sisi Node akan
+                    // gagal keras ("Failed to parse URL") kalau ini dibiarkan.
+                    // Tambahkan otomatis di sini (mirror dari pengaman yang sama
+                    // di src/config/index.js) supaya kesalahan ini tidak terjadi
+                    // sama sekali, bukan cuma "gagal dengan lebih rapi".
+                    val trimmedUrl = ci4BaseUrl.trim()
+                    prefs.ci4BaseUrl = when {
+                        trimmedUrl.isEmpty() -> trimmedUrl
+                        trimmedUrl.matches(Regex("(?i)^https?://.*")) -> trimmedUrl
+                        else -> "http://$trimmedUrl"
+                    }
                     prefs.ci4GatewayToken = ci4Token
                     prefs.autoStartOnBoot = autoStart
                     prefs.setupCompleted = true
