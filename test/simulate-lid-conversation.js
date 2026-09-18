@@ -107,6 +107,33 @@ console.log('\n--- 6. sendReply harus ditolak saat belum connected (tanpa koneks
     console.log('OK: sendReply menolak chatId yang tidak valid sebelum sempat mencoba mengirim.');
   }
 
+console.log('\n--- 7. Regresi: pushName akun sendiri (fromMe:true) tidak boleh bocor jadi nama customer ---');
+const chatIdStaffReply = '111222333444@lid';
+await simulateIncoming({
+  remoteJid: chatIdStaffReply,
+  pushName: 'Pelanggan Asli',
+  text: 'Halo, mau tanya stok',
+  messageTimestamp: now + 10,
+  fromMe: false,
+});
+await simulateIncoming({
+  remoteJid: chatIdStaffReply,
+  pushName: 'Aulia Digital Photo Service',
+  text: 'Halo, stok masih ada',
+  messageTimestamp: now + 11,
+  fromMe: true,
+});
+
+const messagesStaffReply = messageStore.getByChatId(chatIdStaffReply);
+assert.strictEqual(messagesStaffReply.length, 2, 'Harus ada 2 pesan (1 dari customer, 1 balasan staff)');
+
+const customerMsg = messagesStaffReply.find((m) => !m.fromMe);
+const staffMsg = messagesStaffReply.find((m) => m.fromMe);
+assert.ok(customerMsg && staffMsg, 'Kedua pesan (customer & staff) harus ditemukan');
+assert.strictEqual(customerMsg.sender.name, 'Pelanggan Asli', 'Nama customer asli tetap tersimpan apa adanya');
+assert.strictEqual(staffMsg.sender.name, null, 'REGRESI: pushName akun sendiri (fromMe:true) TIDAK BOLEH diteruskan sebagai sender.name -- itu nama akun toko sendiri, bukan customer');
+console.log('OK: pushName untuk pesan fromMe:true (balasan staff dari WA Web/HP) tidak bocor jadi nama customer.');
+
 console.log('\n=== SEMUA SIMULASI LOGIKA LULUS ===');
 console.log('CATATAN: ini simulasi in-process, BUKAN pengiriman nyata ke WhatsApp.');
 

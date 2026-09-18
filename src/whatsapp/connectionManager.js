@@ -570,7 +570,13 @@ class ConnectionManager {
     // BUKAN nomor telepon -- terutama penting untuk kasus @lid.
     const remoteJid = msg.key?.remoteJid || null;
     const fromMe = Boolean(msg.key?.fromMe);
-    const senderName = msg.pushName || null;
+    // pushName untuk fromMe:true adalah nama profil AKUN SENDIRI (staff
+    // balas dari WA Web/HP), BUKAN nama customer -- jangan pernah
+    // diteruskan sebagai identitas customer ke AuliaPos. AuliaPos akan
+    // skip update whatsapp_name kalau nilainya null (lihat
+    // InboxGatewayApi::messages() di sisi AuliaPos), jadi nama customer
+    // yang sudah benar sebelumnya tidak akan tertimpa.
+    const senderName = fromMe ? null : (msg.pushName || null);
     const jidType = classifyJid(remoteJid);
 
     // PRINSIP IDENTITAS: nomor telepon hanya diisi jika JID memang benar-benar
