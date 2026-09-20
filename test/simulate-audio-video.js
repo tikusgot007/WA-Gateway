@@ -10,6 +10,7 @@
  * Windows dengan koneksi asli sebelum dianggap "selesai".
  */
 const assert = require('assert');
+const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const connectionManager = require('../src/whatsapp/connectionManager');
 const messageStore = require('../src/whatsapp/messageStore');
 const incomingBuffer = require('../src/store/incomingBuffer');
@@ -29,6 +30,11 @@ async function simulateIncomingRaw(remoteJid, waMessageId, messageContent, extra
 }
 
 (async () => {
+
+// Sama seperti src/app/index.js -- baileys@6.7.24 ESM-only, harus di-load
+// SEKALI di awal sebelum connectionManager.js dipakai (lihat
+// baileysLoader.js untuk penjelasan lengkap).
+await ensureBaileysLoaded();
 
 console.log('--- 1. Audio biasa (tanpa caption -- WhatsApp memang tidak izinkan caption di audio) ---');
 await simulateIncomingRaw('6281111000001@s.whatsapp.net', 'SIM-AUDIO-1', {

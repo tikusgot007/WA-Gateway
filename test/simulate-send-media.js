@@ -11,6 +11,7 @@
  * /send-media) WAJIB dijalankan di Windows dengan koneksi asli.
  */
 const assert = require('assert');
+const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const connectionManager = require('../src/whatsapp/connectionManager');
 const { VALID_MEDIA_TYPES, decodeBase64Media } = require('../src/whatsapp/mediaPayload');
 const config = require('../src/config');
@@ -34,11 +35,19 @@ assert.ok(/batas maksimum/.test(decodedTooLarge.reason), 'alasan penolakan harus
 console.log(`OK: media > ${Math.round(config.maxMediaUploadBytes / 1024 / 1024)}MB ditolak sebelum dikirim ke Baileys.`);
 
 console.log('\n--- 3. VALID_MEDIA_TYPES konsisten dengan yang didukung media MASUK ---');
-assert.deepStrictEqual(VALID_MEDIA_TYPES, ['image', 'document']);
-console.log('OK: jenis media keluar (image/document) sama dengan yang didukung untuk media masuk.');
+// 'sticker' ditambahkan belakangan (lihat test/simulate-sticker.js) --
+// dicek di sini juga supaya kalau ada yang tidak sengaja menghapusnya lagi,
+// test manapun yang jalan duluan akan menangkapnya.
+assert.deepStrictEqual(VALID_MEDIA_TYPES, ['image', 'document', 'sticker']);
+console.log('OK: jenis media keluar (image/document/sticker) sama dengan yang didukung untuk media masuk.');
 
 console.log('\n--- 4. sendMediaReply harus ditolak saat chatId tidak valid (sebelum cek koneksi) ---');
 (async () => {
+  // Sama seperti src/app/index.js -- baileys@6.7.24 ESM-only, harus di-load
+  // SEKALI di awal sebelum connectionManager.js dipakai (lihat
+  // baileysLoader.js untuk penjelasan lengkap).
+  await ensureBaileysLoaded();
+
   try {
     await connectionManager.sendMediaReply('bukan-jid-valid', 'image', smallBuffer, {});
     console.log('GAGAL: seharusnya melempar error karena chatId tidak valid');

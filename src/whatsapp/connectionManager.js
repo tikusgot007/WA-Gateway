@@ -4,14 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 const { Boom } = require('@hapi/boom');
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  makeCacheableSignalKeyStore,
-  downloadContentFromMessage,
-} = require('baileys');
+// baileys di-load lewat baileysLoader.js (dynamic import di-cache), bukan
+// require() langsung -- lihat penjelasan lengkap di file itu. ensureBaileysLoaded()
+// SUDAH di-await di src/app/index.js sebelum ConnectionManager dipakai, jadi
+// getBaileys() di sini aman dipanggil sinkron.
+const { getBaileys } = require('./baileysLoader');
 
 const config = require('../config');
 const logger = require('../logging');
@@ -43,6 +40,15 @@ class ConnectionManager {
     this.status = 'disconnected';
     this.qr = null; // raw QR string terbaru (null jika tidak ada/expired)
     this.qrDataUrl = null; // versi data:image untuk ditampilkan di dashboard
+
+    // Alternatif login selain scan QR: pairing code (dipakai terutama
+    // ketika Gateway dijalankan di HP YANG SAMA dengan HP yang punya
+    // WhatsApp aktif -- lihat requestPairingCode()). null kalau belum
+    // pernah diminta / sudah dipakai (connected) / expired karena
+    // reconnect baru.
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
+
     this.connectedNumber = null;
     this.lastConnectedAt = null;
     this.lastDisconnectedAt = null;
@@ -76,6 +82,7 @@ class ConnectionManager {
       lastDisconnectedAt: this.lastDisconnectedAt,
       lastDisconnectReason: this.lastDisconnectReason,
       hasQr: Boolean(this.qr),
+      pairingCode: this.pairingCode,
     };
   }
 
@@ -129,6 +136,15 @@ class ConnectionManager {
     this.setStatus('connecting');
     this.qr = null;
     this.qrDataUrl = null;
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
+
+    const {
+      default: makeWASocket,
+      useMultiFileAuthState,
+      fetchLatestBaileysVersion,
+      makeCacheableSignalKeyStore,
+    } = getBaileys();
 
     const { state, saveCreds } = await useMultiFileAuthState(config.authFolder);
     this.saveCreds = saveCreds;
@@ -192,6 +208,8 @@ class ConnectionManager {
       this.reconnectAttempts = 0;
       this.qr = null;
       this.qrDataUrl = null;
+      this.pairingCode = null;
+      this.pairingCodeRequestedFor = null;
       this.connectedNumber = jidToPhone(this.sock?.user?.id) || null;
       this.lastConnectedAt = new Date().toISOString();
       this.lastDisconnectReason = null;
@@ -213,6 +231,7 @@ class ConnectionManager {
         reason: reasonText,
       });
 
+      const { DisconnectReason } = getBaileys();
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
       if (isLoggedOut) {
@@ -274,6 +293,41 @@ class ConnectionManager {
   }
 
   /**
+   * Minta pairing code (alternatif login selain scan QR) untuk nomor
+   * tertentu. Dipakai terutama saat Gateway dijalankan di HP YANG SAMA
+   * dengan HP yang memegang WhatsApp aktif (app Android) -- scan QR ke
+   * layar HP itu sendiri tidak praktis, sedangkan pairing code cukup
+   * diketik manual di WhatsApp: Setelan > Perangkat Tertaut > Tautkan
+   * dengan nomor telepon.
+   *
+   * Pembatasan dari Baileys sendiri: hanya bisa diminta SEBELUM device
+   * berhasil registered (belum pernah/tidak sedang login), dan idealnya
+   * dipanggil sekali per siklus socket -- kalau socket keburu reconnect
+   * (mis. karena code sudah expired), operator perlu memicu ulang lewat
+   * endpoint ini (pairingCode lama otomatis di-reset di awal _connect()).
+   *
+   * phoneNumber: format internasional TANPA '+'/spasi/tanda lain,
+   * misalnya "62812xxxxxxx".
+   */
+  async requestPairingCode(phoneNumber) {
+    if (typeof phoneNumber !== 'string' || !/^\d{8,15}$/.test(phoneNumber)) {
+      throw new Error('Nomor telepon tidak valid. Gunakan format internasional tanpa "+"/spasi/0 di depan, contoh: 62812xxxxxxx.');
+    }
+    if (!this.sock) {
+      throw new Error('Koneksi belum siap. Tunggu status "connecting" muncul lalu coba lagi.');
+    }
+    if (this.sock.authState?.creds?.registered) {
+      throw new Error('WhatsApp sudah pernah login sebelumnya. Logout/reset session dulu sebelum meminta pairing code baru.');
+    }
+
+    const code = await this.sock.requestPairingCode(phoneNumber);
+    this.pairingCode = code;
+    this.pairingCodeRequestedFor = phoneNumber;
+    logger.info('Pairing code baru diminta, silakan masukkan di WhatsApp.', { phoneNumber });
+    return code;
+  }
+
+  /**
    * Logout dari WhatsApp dan hapus folder session, sehingga QR baru
    * akan diminta pada koneksi berikutnya. Dipakai untuk kebutuhan testing.
    */
@@ -315,6 +369,8 @@ class ConnectionManager {
     this.connectedNumber = null;
     this.qr = null;
     this.qrDataUrl = null;
+    this.pairingCode = null;
+    this.pairingCodeRequestedFor = null;
     this.lastDisconnectReason = 'manual logout';
     this.lastDisconnectedAt = new Date().toISOString();
     this.reconnectAttempts = 0;
@@ -423,11 +479,12 @@ class ConnectionManager {
     let media = null;
 
     if (text === null) {
-      // Bukan pesan teks biasa -- cek apakah gambar/dokumen/audio/video
-      // (didukung), selain itu (sticker/lokasi/kontak/dst) di luar scope
-      // untuk sekarang, cukup di-log & dilewati.
+      // Bukan pesan teks biasa -- cek apakah gambar/dokumen/sticker/audio/video
+      // (didukung), selain itu (lokasi/kontak/dst) di luar scope untuk
+      // sekarang, cukup di-log & dilewati.
       const imageMsg = msg.message.imageMessage;
       const documentMsg = msg.message.documentMessage;
+      const stickerMsg = msg.message.stickerMessage;
       const audioMsg = msg.message.audioMessage;
       const videoMsg = msg.message.videoMessage;
 
@@ -457,6 +514,31 @@ class ConnectionManager {
           });
           return;
         }
+      } else if (stickerMsg) {
+        // SAMA PRINSIP dengan image/document (BUKAN audio/video): sticker
+        // wajib punya directPath/mediaKey lengkap, kalau tidak dibuang --
+        // lihat buildMediaRef(). WhatsApp TIDAK mengizinkan caption pada
+        // sticker (stickerMessage proto memang tidak punya field caption),
+        // jadi text selalu null di sini, konsisten dengan audioMessage.
+        //
+        // stickerMsg.isAnimated SENGAJA TIDAK ikut dimasukkan ke `media`
+        // di sini -- kontrak field `media` yang diteruskan ke CI4 (lihat
+        // normalized.media di bawah & incomingBuffer.js) WAJIB IDENTIK
+        // dengan image/document (direct_path/media_key_base64/mimetype/
+        // file_length/file_sha256_base64/file_name) supaya AuliaPos bisa
+        // memproses sticker lewat cabang kode yang sama dengan image/
+        // document, tanpa field tambahan yang tidak dikenal.
+        messageType = 'sticker';
+        text = null;
+        media = buildMediaRef(stickerMsg, 'sticker', null);
+
+        if (!media) {
+          logger.warn('Pesan sticker diterima tapi referensi tidak lengkap (directPath/mediaKey kosong), dilewati', {
+            messageId: msg.key?.id,
+            messageType,
+          });
+          return;
+        }
       } else if (audioMsg || videoMsg) {
         // Audio (termasuk voice note/PTT -- dianggap audio biasa, TIDAK
         // ada tipe/business logic terpisah) dan video: BEDA PRINSIP dari
@@ -476,7 +558,7 @@ class ConnectionManager {
           fileLength: mediaMsg.fileLength ? Number(mediaMsg.fileLength) : null,
         };
       } else {
-        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/audio/video)', {
+        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/sticker/audio/video)', {
           messageId: msg.key?.id,
           type: Object.keys(msg.message)[0],
         });
@@ -488,7 +570,13 @@ class ConnectionManager {
     // BUKAN nomor telepon -- terutama penting untuk kasus @lid.
     const remoteJid = msg.key?.remoteJid || null;
     const fromMe = Boolean(msg.key?.fromMe);
-    const senderName = msg.pushName || null;
+    // pushName untuk fromMe:true adalah nama profil AKUN SENDIRI (staff
+    // balas dari WA Web/HP), BUKAN nama customer -- jangan pernah
+    // diteruskan sebagai identitas customer ke AuliaPos. AuliaPos akan
+    // skip update whatsapp_name kalau nilainya null (lihat
+    // InboxGatewayApi::messages() di sisi AuliaPos), jadi nama customer
+    // yang sudah benar sebelumnya tidak akan tertimpa.
+    const senderName = fromMe ? null : (msg.pushName || null);
     const jidType = classifyJid(remoteJid);
 
     // PRINSIP IDENTITAS: nomor telepon hanya diisi jika JID memang benar-benar
@@ -650,19 +738,28 @@ class ConnectionManager {
   }
 
   /**
-   * Kirim SATU pesan media (gambar/dokumen) ke sebuah JID, apa adanya, tanpa
-   * normalisasi/tebakan -- versi media dari sendTextMessage(). `jid` di sini
-   * boleh berupa @s.whatsapp.net, @lid, atau @g.us, sama seperti sendTextMessage().
+   * Kirim SATU pesan media (gambar/dokumen/sticker) ke sebuah JID, apa
+   * adanya, tanpa normalisasi/tebakan -- versi media dari
+   * sendTextMessage(). `jid` di sini boleh berupa @s.whatsapp.net, @lid,
+   * atau @g.us, sama seperti sendTextMessage().
    *
    * PRINSIP SAMA seperti media MASUK: Gateway TIDAK PERNAH menyimpan file media
    * ke disk. `buffer` yang diterima di sini hanya dipegang di memory selama
    * pemanggilan function ini (diteruskan langsung ke Baileys), tidak pernah
    * disimpan ke property instance mana pun.
    *
+   * Sticker: WhatsApp TIDAK mengizinkan caption/mimetype custom untuk
+   * sticker (diverifikasi dari `AnyMediaMessageContent` di Baileys --
+   * variant sticker cuma `{ sticker, isAnimated? }`), jadi `caption`/
+   * `mimetype` di `options` diabaikan untuk mediaType ini. `buffer`
+   * WAJIB sudah berupa WebP valid -- Gateway TIDAK melakukan konversi
+   * otomatis dari format lain (lihat validasi di ci4Routes.js/routes.js
+   * SEBELUM fungsi ini dipanggil).
+   *
    * @param {string} jid
-   * @param {'image'|'document'} mediaType
+   * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
    */
   async sendMediaMessage(jid, mediaType, buffer, options = {}) {
     if (!this.isConnected()) {
@@ -672,7 +769,7 @@ class ConnectionManager {
     }
 
     const jidType = classifyJid(jid);
-    const { caption, mimetype, fileName } = options;
+    const { caption, mimetype, fileName, isAnimated } = options;
 
     let content;
     if (mediaType === 'image') {
@@ -684,6 +781,8 @@ class ConnectionManager {
         fileName: fileName || 'file',
         caption: caption || undefined,
       };
+    } else if (mediaType === 'sticker') {
+      content = { sticker: buffer, isAnimated: Boolean(isAnimated) || undefined };
     } else {
       const err = new Error(`mediaType tidak dikenal: ${mediaType}`);
       err.code = 'INVALID_MEDIA_TYPE';
@@ -703,13 +802,17 @@ class ConnectionManager {
       // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
       // directPath/mediaKey asli dari server WhatsApp untuk file yang baru
       // saja diunggah -- sama persis strukturnya dengan imageMessage/
-      // documentMessage pada pesan MASUK. Diekstrak dengan buildMediaRef()
-      // yang sama supaya media KELUAR ini juga bisa diambil ulang nanti
-      // (mis. dibuka lagi dari Inbox POS) lewat alur downloadMediaByRef()
-      // yang sudah ada, TANPA perlu menyimpan file apa pun di sini.
-      const sentMediaMessage = mediaType === 'image'
-        ? result?.message?.imageMessage
-        : result?.message?.documentMessage;
+      // documentMessage/stickerMessage pada pesan MASUK. Diekstrak dengan
+      // buildMediaRef() yang sama supaya media KELUAR ini juga bisa diambil
+      // ulang nanti (mis. dibuka lagi dari Inbox POS) lewat alur
+      // downloadMediaByRef() yang sudah ada, TANPA perlu menyimpan file
+      // apa pun di sini.
+      const sentMediaMessageByType = {
+        image: result?.message?.imageMessage,
+        document: result?.message?.documentMessage,
+        sticker: result?.message?.stickerMessage,
+      };
+      const sentMediaMessage = sentMediaMessageByType[mediaType];
       const mediaRef = buildMediaRef(sentMediaMessage, mediaType, fileName || null);
 
       logger.info('[SEND] pesan media berhasil dikirim', {
@@ -738,14 +841,15 @@ class ConnectionManager {
   }
 
   /**
-   * Balas SATU conversation dengan media (gambar/dokumen) -- versi media dari
-   * sendReply(). chatId di sini SAMA PRINSIPNYA dengan sendReply(): JID asli
-   * apa adanya, TIDAK PERNAH melalui normalizeToJid()/jidToPhone().
+   * Balas SATU conversation dengan media (gambar/dokumen/sticker) -- versi
+   * media dari sendReply(). chatId di sini SAMA PRINSIPNYA dengan
+   * sendReply(): JID asli apa adanya, TIDAK PERNAH melalui
+   * normalizeToJid()/jidToPhone().
    *
    * @param {string} chatId
-   * @param {'image'|'document'} mediaType
+   * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
    */
   async sendMediaReply(chatId, mediaType, buffer, options = {}) {
     if (!isDecodableJid(chatId)) {
@@ -803,12 +907,13 @@ class ConnectionManager {
    * (ci4Routes.js) yang menerjemahkan ini jadi respons error yang
    * jelas ke CI4/browser.
    *
-   * @param {{mediaType: 'image'|'document', directPath: string, mediaKeyBase64: string}} mediaRef
+   * @param {{mediaType: 'image'|'document'|'sticker', directPath: string, mediaKeyBase64: string}} mediaRef
    * @returns {Promise<Buffer>}
    */
   async downloadMediaByRef(mediaRef) {
     const mediaKey = Buffer.from(mediaRef.mediaKeyBase64, 'base64');
 
+    const { downloadContentFromMessage } = getBaileys();
     const stream = await downloadContentFromMessage(
       { directPath: mediaRef.directPath, mediaKey },
       mediaRef.mediaType
@@ -841,11 +946,17 @@ class ConnectionManager {
 
 /**
  * Ekstrak REFERENSI media (bukan file-nya) dari sebuah imageMessage/
- * documentMessage Baileys -- directPath + mediaKey (base64) + info
- * lain yang cukup untuk mendekripsi ulang NANTI, on-demand, saat
- * kasir benar-benar membuka pesan itu di Inbox POS. File aslinya
- * TIDAK diunduh/didekripsi di sini sama sekali (sesuai keputusan:
- * "cukup simpan referensi, file tetap di WhatsApp").
+ * documentMessage/stickerMessage Baileys -- directPath + mediaKey
+ * (base64) + info lain yang cukup untuk mendekripsi ulang NANTI,
+ * on-demand, saat kasir benar-benar membuka pesan itu di Inbox POS.
+ * File aslinya TIDAK diunduh/didekripsi di sini sama sekali (sesuai
+ * keputusan: "cukup simpan referensi, file tetap di WhatsApp").
+ *
+ * Generik untuk ketiga tipe (image/document/sticker) -- field yang
+ * diekstrak sama persis di ketiganya (directPath/mediaKey/mimetype/
+ * fileLength/fileSha256), sudah diverifikasi langsung dari proto
+ * Baileys (WAProto/index.d.ts: IImageMessage/IDocumentMessage/
+ * IStickerMessage semuanya punya field yang sama untuk ini).
  *
  * Mengembalikan null kalau directPath/mediaKey tidak ada -- berarti
  * referensinya tidak lengkap, tidak ada gunanya diteruskan (nanti

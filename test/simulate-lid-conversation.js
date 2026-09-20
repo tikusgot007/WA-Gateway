@@ -10,6 +10,7 @@
  * (TEST A/B/C/D pada laporan) wajib dijalankan di Windows dengan koneksi asli.
  */
 const assert = require('assert');
+const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('../src/whatsapp/jidUtils');
 const messageStore = require('../src/whatsapp/messageStore');
 const connectionManager = require('../src/whatsapp/connectionManager');
@@ -29,6 +30,11 @@ async function simulateIncoming({ remoteJid, pushName, text, messageTimestamp, f
 }
 
 (async () => {
+
+// Sama seperti src/app/index.js -- baileys@6.7.24 ESM-only, harus di-load
+// SEKALI di awal sebelum jidUtils.js/connectionManager.js dipakai (lihat
+// baileysLoader.js untuk penjelasan lengkap).
+await ensureBaileysLoaded();
 
 console.log('--- 1. classifyJid & extractPhoneIfAvailable ---');
 assert.strictEqual(classifyJid('6281234567890@s.whatsapp.net'), 'pn');
@@ -100,6 +106,33 @@ console.log('\n--- 6. sendReply harus ditolak saat belum connected (tanpa koneks
     assert.strictEqual(err.code, 'INVALID_CHAT_ID');
     console.log('OK: sendReply menolak chatId yang tidak valid sebelum sempat mencoba mengirim.');
   }
+
+console.log('\n--- 7. Regresi: pushName akun sendiri (fromMe:true) tidak boleh bocor jadi nama customer ---');
+const chatIdStaffReply = '111222333444@lid';
+await simulateIncoming({
+  remoteJid: chatIdStaffReply,
+  pushName: 'Pelanggan Asli',
+  text: 'Halo, mau tanya stok',
+  messageTimestamp: now + 10,
+  fromMe: false,
+});
+await simulateIncoming({
+  remoteJid: chatIdStaffReply,
+  pushName: 'Aulia Digital Photo Service',
+  text: 'Halo, stok masih ada',
+  messageTimestamp: now + 11,
+  fromMe: true,
+});
+
+const messagesStaffReply = messageStore.getByChatId(chatIdStaffReply);
+assert.strictEqual(messagesStaffReply.length, 2, 'Harus ada 2 pesan (1 dari customer, 1 balasan staff)');
+
+const customerMsg = messagesStaffReply.find((m) => !m.fromMe);
+const staffMsg = messagesStaffReply.find((m) => m.fromMe);
+assert.ok(customerMsg && staffMsg, 'Kedua pesan (customer & staff) harus ditemukan');
+assert.strictEqual(customerMsg.sender.name, 'Pelanggan Asli', 'Nama customer asli tetap tersimpan apa adanya');
+assert.strictEqual(staffMsg.sender.name, null, 'REGRESI: pushName akun sendiri (fromMe:true) TIDAK BOLEH diteruskan sebagai sender.name -- itu nama akun toko sendiri, bukan customer');
+console.log('OK: pushName untuk pesan fromMe:true (balasan staff dari WA Web/HP) tidak bocor jadi nama customer.');
 
 console.log('\n=== SEMUA SIMULASI LOGIKA LULUS ===');
 console.log('CATATAN: ini simulasi in-process, BUKAN pengiriman nyata ke WhatsApp.');

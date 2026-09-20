@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">WA Gateway</string>
+    <string name="notif_channel_name">Status Gateway</string>
+    <string name="notif_title_connecting">WA Gateway – menghubungkan…</string>
+    <string name="notif_title_connected">WA Gateway – terhubung (%1$s)</string>
+    <string name="notif_title_disconnected">WA Gateway – terputus</string>
+</resources>

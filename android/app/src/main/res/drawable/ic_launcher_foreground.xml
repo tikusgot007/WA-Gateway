@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ikon sederhana: gelembung chat + panah dua-arah kecil (melambangkan
+     "gateway" pesan masuk/keluar), warna putih di atas latar hijau WA. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,24 C36.3,24 22,36.7 22,52.4 C22,60.6 25.9,68 32.2,73.1 L29,86 L43.6,79.7 C46.8,80.6 50.3,81.1 54,81.1 C71.7,81.1 86,68.4 86,52.4 C86,36.7 71.7,24 54,24 Z" />
+    <path
+        android:fillColor="#FF128C7E"
+        android:pathData="M44,46 L64,46 L64,51 L44,51 Z" />
+    <path
+        android:fillColor="#FF128C7E"
+        android:pathData="M44,58 L58,58 L58,63 L44,63 Z" />
+</vector>

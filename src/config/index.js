@@ -35,7 +35,18 @@ const config = {
   ci4: {
     // Base URL AuliaPos CI4, TANPA trailing slash. Contoh:
     // http://192.168.1.10/aulia
-    baseUrl: (process.env.CI4_BASE_URL || '').replace(/\/+$/, ''),
+    //
+    // Kalau operator lupa tulis skema (http://) -- kesalahan input yang
+    // ternyata gampang terjadi, terutama di layar Setup app Android --
+    // fetch() akan gagal keras dengan pesan "Failed to parse URL",
+    // sehingga heartbeat/delivery ke CI4 gagal TERUS tanpa penjelasan
+    // yang jelas di dashboard. Daripada gagal total, tambahkan http://
+    // secara defensif kalau skemanya belum ada.
+    baseUrl: (() => {
+      const raw = (process.env.CI4_BASE_URL || '').trim().replace(/\/+$/, '');
+      if (!raw) return '';
+      return /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    })(),
 
     // Shared secret -- HARUS SAMA PERSIS dengan app/Config/Inbox.php
     // (env inbox.gatewayToken) di sisi CI4. Dikirim sebagai
@@ -79,6 +90,23 @@ const config = {
 
   // Timeout mengunduh media dari URL (khusus mediaUrl di dashboard test).
   mediaFetchTimeoutMs: toInt(process.env.MEDIA_FETCH_TIMEOUT_MS, 15000),
+
+  // =============================================================
+  // Override folder temp OS (os.tmpdir()) -- HANYA dipakai di build
+  // Android (lihat src/whatsapp/baileysLoader.js). Baileys menulis file
+  // sementara ke os.tmpdir() untuk generate thumbnail otomatis saat
+  // kirim gambar/video/sticker KELUAR -- di Android, "/tmp" sistem
+  // TIDAK ADA/tidak writable di sandbox proses app, dan mencoba benerin
+  // ini lewat env var TMPDIR native (setenv() di native-lib.cpp) TERBUKTI
+  // TIDAK CUKUP -- runtime Node di build nodejs-mobile yang dipakai
+  // TIDAK menghormati TMPDIR untuk os.tmpdir() (diverifikasi lewat
+  // testing sungguhan di HP: baris log "TMPDIR diset ke ..." muncul
+  // benar, tapi Baileys tetap coba tulis ke "/tmp" literal). Solusinya:
+  // override os.tmpdir() di level JavaScript secara langsung -- lihat
+  // baileysLoader.js. Di desktop (Windows/dst), env var ini TIDAK diisi
+  // sama sekali, jadi os.tmpdir() bawaan Node tetap dipakai apa adanya,
+  // TIDAK ADA perubahan behavior sama sekali untuk desktop.
+  appTmpDir: process.env.APP_TMP_DIR || null,
 };
 
 // Peringatan keras jika HOST dibuka ke LAN tanpa authentication.

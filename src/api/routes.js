@@ -7,7 +7,7 @@ const logger = require('../logging');
 const config = require('../config');
 const { normalizeToJid } = require('../whatsapp/normalize');
 const { isDecodableJid } = require('../whatsapp/jidUtils');
-const { VALID_MEDIA_TYPES, decodeBase64Media, fetchMediaFromUrl } = require('../whatsapp/mediaPayload');
+const { VALID_MEDIA_TYPES, decodeBase64Media, fetchMediaFromUrl, isValidWebp } = require('../whatsapp/mediaPayload');
 
 const router = express.Router();
 
@@ -80,6 +80,24 @@ router.post('/messages/send', jsonSmall, async (req, res) => {
   } catch (err) {
     logger.error('Endpoint send message gagal', { error: err.message });
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// --- POST /api/pairing-code -----------------------------------------------
+// Alternatif login selain scan QR (lihat requestPairingCode() di
+// connectionManager.js) -- terutama untuk kasus Gateway dijalankan di HP
+// yang sama dengan HP pemilik nomor WhatsApp, di mana scan QR ke layar
+// sendiri tidak praktis. Body: { "phone": "62812xxxxxxx" } (format
+// internasional, tanpa '+'/spasi/0 di depan).
+router.post('/pairing-code', jsonSmall, async (req, res) => {
+  const { phone } = req.body || {};
+
+  try {
+    const code = await connectionManager.requestPairingCode(phone);
+    res.json({ ok: true, data: { pairingCode: code, phone } });
+  } catch (err) {
+    logger.warn('Gagal meminta pairing code', { phone, error: err.message });
+    res.status(400).json({ ok: false, error: err.message });
   }
 });
 
@@ -174,14 +192,14 @@ router.post('/chats/:chatId/reply', jsonSmall, async (req, res) => {
 });
 
 // --- POST /api/chats/:chatId/reply-media --------------------------------------
-// Balas SATU conversation dengan media (gambar/dokumen). Sumber file boleh
+// Balas SATU conversation dengan media (gambar/dokumen/sticker). Sumber file boleh
 // SALAH SATU: `mediaBase64` (konten langsung, base64) ATAU `mediaUrl` (Gateway
 // mengunduhnya sendiri). `mediaUrl` HANYA untuk kemudahan uji manual dari
 // dashboard test ini (tempel link gambar/dokumen) -- endpoint machine-to-machine
 // untuk CI4 (POST /send-media, lihat ci4Routes.js) SENGAJA hanya menerima base64.
 router.post('/chats/:chatId/reply-media', jsonMedia, async (req, res) => {
   const { chatId } = req.params;
-  const { mediaType, mediaBase64, mediaUrl, caption, fileName, mimetype } = req.body || {};
+  const { mediaType, mediaBase64, mediaUrl, caption, fileName, mimetype, isAnimated } = req.body || {};
 
   if (!isDecodableJid(chatId)) {
     return res.status(400).json({ ok: false, error: `chatId tidak valid: ${chatId}` });
@@ -222,11 +240,21 @@ router.post('/chats/:chatId/reply-media', jsonMedia, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Wajib isi salah satu: "mediaBase64" atau "mediaUrl"' });
   }
 
+  if (mediaType === 'sticker' && !isValidWebp(buffer)) {
+    // Gateway TIDAK melakukan konversi otomatis (JPEG/PNG -> WebP) --
+    // lihat komentar isValidWebp() di mediaPayload.js.
+    return res.status(400).json({
+      ok: false,
+      error: 'File sticker harus berupa WebP valid (Gateway tidak melakukan konversi otomatis dari format lain)',
+    });
+  }
+
   try {
     const result = await connectionManager.sendMediaReply(chatId, mediaType, buffer, {
       caption: caption || undefined,
       mimetype: resolvedMimetype || undefined,
       fileName: fileName || undefined,
+      isAnimated: Boolean(isAnimated),
     });
     return res.json({ ok: true, data: result });
   } catch (err) {

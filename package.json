@@ -13,7 +13,8 @@
     "supervisor": "node supervisor/server.js",
     "supervisor:install-service": "node supervisor/service.js install",
     "supervisor:uninstall-service": "node supervisor/service.js uninstall",
-    "build:exe": "powershell -ExecutionPolicy Bypass -File scripts/build-exe.ps1"
+    "build:exe": "powershell -ExecutionPolicy Bypass -File scripts/build-exe.ps1",
+    "android:prepare-assets": "node scripts/prepare-android-assets.js"
   },
   "dependencies": {
     "@hapi/boom": "^9.1.3",

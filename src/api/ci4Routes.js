@@ -6,7 +6,7 @@ const logger = require('../logging');
 const config = require('../config');
 const { isDecodableJid } = require('../whatsapp/jidUtils');
 const { requireCI4Token } = require('./authMiddleware');
-const { VALID_MEDIA_TYPES, decodeBase64Media } = require('../whatsapp/mediaPayload');
+const { VALID_MEDIA_TYPES, decodeBase64Media, isValidWebp } = require('../whatsapp/mediaPayload');
 
 /**
  * Router khusus endpoint yang dipanggil CI4 (Phase 3: outgoing text
@@ -100,7 +100,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
 });
 
 // --- POST /send-media ----------------------------------------------------
-// Kirim media (gambar/dokumen) KELUAR dari POS. Berbeda dari /media/download
+// Kirim media (gambar/dokumen/sticker) KELUAR dari POS. Berbeda dari /media/download
 // (yang MENGAMBIL referensi media dari WhatsApp), di sini CI4 mengirim
 // KONTEN file itu sendiri sebagai base64 (`media_base64`) -- kasir upload
 // file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa
@@ -116,6 +116,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     mimetype,
     file_name: fileName,
     caption,
+    is_animated: isAnimated,
   } = req.body || {};
 
   if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
@@ -166,6 +167,17 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     });
   }
 
+  if (mediaType === 'sticker' && !isValidWebp(decoded.buffer)) {
+    // Gateway TIDAK melakukan konversi otomatis (JPEG/PNG -> WebP) --
+    // lihat komentar isValidWebp() di mediaPayload.js. Ditolak dengan
+    // pesan jelas di sini, SEBELUM sempat diteruskan ke Baileys/WhatsApp.
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_STICKER_FORMAT',
+      message: 'File sticker harus berupa WebP valid (Gateway tidak melakukan konversi otomatis dari format lain).',
+    });
+  }
+
   if (!connectionManager.isConnected()) {
     logger.warn('[SEND-MEDIA-CI4] ditolak, WhatsApp belum connected', { chatId, mediaType });
     return res.status(409).json({
@@ -183,6 +195,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       caption: caption || undefined,
       mimetype: mimetype || undefined,
       fileName: fileName || undefined,
+      isAnimated: Boolean(isAnimated),
     });
 
     logger.info('[SEND-MEDIA-CI4] media keluar dari POS berhasil dikirim', {
@@ -226,11 +239,11 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
 router.post('/media/download', jsonSmall, requireCI4Token, async (req, res) => {
   const { media_type: mediaType, direct_path: directPath, media_key_base64: mediaKeyBase64, mimetype } = req.body || {};
 
-  if (!['image', 'document'].includes(mediaType)) {
+  if (!VALID_MEDIA_TYPES.includes(mediaType)) {
     return res.status(400).json({
       success: false,
       error_code: 'INVALID_MEDIA_TYPE',
-      message: `media_type harus 'image' atau 'document', diterima: ${mediaType}`,
+      message: `media_type harus salah satu dari: ${VALID_MEDIA_TYPES.join(', ')}, diterima: ${mediaType}`,
     });
   }
 

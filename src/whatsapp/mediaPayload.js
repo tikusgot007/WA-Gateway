@@ -7,11 +7,46 @@ const config = require('../config');
 
 /**
  * Jenis media KELUAR yang didukung untuk sekarang -- SAMA seperti media MASUK
- * yang sudah didukung di connectionManager.js (image/document). Jenis lain
- * (audio/video/sticker/lokasi/dst) sengaja di luar scope, konsisten dengan
- * keterbatasan yang sama pada arah incoming.
+ * yang sudah didukung di connectionManager.js (image/document/sticker).
+ * Jenis lain (audio/video/lokasi/dst) sengaja di luar scope, konsisten
+ * dengan keterbatasan yang sama pada arah incoming.
  */
-const VALID_MEDIA_TYPES = ['image', 'document'];
+const VALID_MEDIA_TYPES = ['image', 'document', 'sticker'];
+
+// Magic bytes RIFF....WEBP -- lihat https://developers.google.com/speed/webp/docs/riff_container
+// Byte 0-3: "RIFF", byte 8-11: "WEBP" (byte 4-7 = ukuran file, diabaikan).
+const WEBP_RIFF_MAGIC = Buffer.from('RIFF', 'ascii');
+const WEBP_FORMAT_MAGIC = Buffer.from('WEBP', 'ascii');
+
+/**
+ * Validasi MINIMAL bahwa sebuah buffer benar-benar file WebP (dicek dari
+ * magic bytes container RIFF, BUKAN dari field `mimetype` yang dikirim
+ * client -- field itu gampang salah/dipalsukan). Sengaja TIDAK memvalidasi
+ * struktur WebP lebih dalam (ukuran dimensi, VP8/VP8L/VP8X chunk, dst) --
+ * WhatsApp/Baileys sendiri yang akan menolak kalau isinya tetap tidak valid
+ * setelah lolos cek dasar ini, cukup untuk menyaring kesalahan paling umum
+ * (kasir kelupaan konversi, upload JPEG/PNG mentah sebagai "sticker").
+ *
+ * Gateway SENGAJA TIDAK melakukan konversi otomatis dari format lain
+ * (JPEG/PNG/dll) ke WebP -- tidak ada dependency konversi gambar di
+ * project ini (`sharp` yang muncul di node_modules HANYALAH optional
+ * peer dependency milik `baileys` sendiri, BUKAN dependency project ini
+ * -- lihat node_modules/baileys/package.json `peerDependencies.sharp`),
+ * dan menambahkannya HANYA untuk fitur ini berarti mengulang masalah yang
+ * sama seperti `better-sqlite3` untuk build Android (native addon, lihat
+ * android/README.md). Kasir/POS bertanggung jawab mengirim file WebP
+ * yang sudah valid.
+ *
+ * @param {Buffer} buffer
+ * @returns {boolean}
+ */
+function isValidWebp(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
+  return (
+    buffer.subarray(0, 4).equals(WEBP_RIFF_MAGIC) &&
+    buffer.subarray(8, 12).equals(WEBP_FORMAT_MAGIC)
+  );
+}
 
 // Node.js Buffer.from(str, 'base64') SANGAT permisif -- diam-diam mengabaikan
 // karakter yang tidak valid alih-alih melempar error, sehingga string acak
@@ -155,4 +190,4 @@ function fetchMediaFromUrl(url) {
   });
 }
 
-module.exports = { VALID_MEDIA_TYPES, decodeBase64Media, fetchMediaFromUrl };
+module.exports = { VALID_MEDIA_TYPES, decodeBase64Media, fetchMediaFromUrl, isValidWebp };

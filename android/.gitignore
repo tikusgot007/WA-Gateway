@@ -1,0 +1,21 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# libnode.so + header Node.js (nodejs-mobile) TIDAK di-commit -- ukurannya
+# ratusan MB per arsitektur, dan bukan kode yang kami tulis. Developer WAJIB
+# mengunduhnya sendiri sebelum build, lihat android/README.md.
+app/libnode/bin/*/libnode.so
+app/libnode/include/
+
+# nodejs-project di assets DIISI OTOMATIS oleh scripts/prepare-nodejs-assets.sh
+# (lihat android/README.md) dari source di repo root (../src, ../public,
+# ../package.json) -- bukan sumber kebenaran, jangan commit hasil generate-nya.
+app/src/main/assets/nodejs-project/

@@ -342,14 +342,16 @@
     }
   });
 
-  // Label kecil "[gambar]"/"[dokumen]" untuk pesan bertipe media di daftar
-  // pesan -- caption (kalau ada) tetap ditampilkan setelah label ini.
+  // Label kecil "[gambar]"/"[dokumen]"/"[sticker]" untuk pesan bertipe media
+  // di daftar pesan -- caption (kalau ada) tetap ditampilkan setelah label
+  // ini (sticker tidak punya caption, WhatsApp memang tidak mengizinkannya).
   function mediaLabel(m) {
     if (m.messageType === 'image') return '[gambar] ';
     if (m.messageType === 'document') {
       const name = m.media && m.media.fileName ? ` (${escapeHtml(m.media.fileName)})` : '';
       return `[dokumen${name}] `;
     }
+    if (m.messageType === 'sticker') return '[sticker] ';
     return '';
   }
 
