@@ -1,11 +1,12 @@
 'use strict';
 /**
  * Skrip simulasi M1 Wave 1 durable buffer. Dibuat di TASK-002 (bagian retry,
- * AC-007); TASK-003/005/006 melengkapi dengan overflow (AC-008, AC-009,
- * AC-016) dan integritas SQLite (AC-011).
+ * AC-007); TASK-003 menambah overflow buffer (AC-009, AC-016, dan bagian
+ * buffer dari AC-008); TASK-005/006 melengkapi dengan integritas SQLite
+ * (AC-011) dan AC-008 penuh lewat siklus worker.
  *
- * Bagian retry memakai buffer palsu yang bisa diprogram untuk gagal, jadi
- * tidak membuka database dan tidak menyentuh berkas apa pun.
+ * Bagian retry dan overflow memakai buffer palsu yang bisa diprogram untuk
+ * gagal, jadi tidak membuka database dan tidak menyentuh berkas apa pun.
  * Jalankan: node test/simulate-durable-buffer.js
  */
 const assert = require('assert');
@@ -81,7 +82,103 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.ok(elapsed < 800, `tidak boleh memakai jeda ke-3 (800ms), terukur ${elapsed}ms`);
   console.log(`OK: menunggu ${elapsed}ms untuk 2 retry (50 + 200 ms).`);
 
-  console.log('\nSemua assert simulate-durable-buffer (bagian retry) lolos.');
+  // ---- TASK-003: overflow buffer (REQ-010/011/012, AC-008 bagian buffer, AC-009, AC-016) ----
+  const logger = require('../src/logging');
+  const { OverflowBuffer } = require('../src/store/overflowBuffer');
+
+  /** Tangkap panggilan logger selama fn() berjalan, lalu pulihkan. */
+  function captureLogs(fn) {
+    const captured = { info: [], warn: [], error: [] };
+    const original = {};
+    for (const level of Object.keys(captured)) {
+      original[level] = logger[level];
+      logger[level] = (message, meta) => captured[level].push({ message, meta });
+    }
+    try {
+      fn();
+    } finally {
+      for (const level of Object.keys(captured)) logger[level] = original[level];
+    }
+    return captured;
+  }
+
+  console.log('\n--- 7. overflow: push menambah, size() akurat, ukuran tercatat (AC-016) ---');
+  let overflow = new OverflowBuffer(3);
+  let logs = captureLogs(() => {
+    assert.strictEqual(overflow.push({ messageId: 'A' }), false);
+    assert.strictEqual(overflow.push({ messageId: 'B' }), false);
+  });
+  assert.strictEqual(overflow.size(), 2);
+  assert.deepStrictEqual(logs.warn.map((l) => l.meta.size), [1, 2], 'tiap perubahan ukuran tercatat');
+  console.log('OK: size 2, ukuran 1 lalu 2 tercatat.');
+
+  console.log('\n--- 8. AC-009: penuh -> event TERBARU dibuang, log critical berisi jumlah dibuang ---');
+  overflow = new OverflowBuffer(2);
+  overflow.push({ messageId: 'OLD-1' });
+  overflow.push({ messageId: 'OLD-2' });
+  logs = captureLogs(() => {
+    assert.strictEqual(overflow.push({ messageId: 'NEW-3' }), true, 'push penuh harus mengembalikan true (dibuang)');
+    assert.strictEqual(overflow.push({ messageId: 'NEW-4' }), true);
+  });
+  assert.strictEqual(overflow.size(), 2, 'ukuran tidak melebihi batas');
+  assert.deepStrictEqual(
+    overflow.items.map((e) => e.messageId),
+    ['OLD-1', 'OLD-2'],
+    'yang lama dipertahankan, yang terbaru dibuang'
+  );
+  assert.strictEqual(logs.error.length, 2, 'tiap pembuangan dicatat error keras');
+  assert.match(logs.error[0].message, /^\[CRITICAL\]/);
+  assert.strictEqual(logs.error[0].meta.severity, 'critical');
+  assert.strictEqual(logs.error[0].meta.dropped, 1);
+  assert.strictEqual(logs.error[1].meta.totalDropped, 2, 'akumulasi jumlah dibuang tercatat');
+  assert.strictEqual(logs.warn.length, 0, 'event yang dibuang tidak dicatat sebagai masuk');
+  console.log('OK: 2 event terbaru dibuang, log critical mencatat dropped=1 dan totalDropped=2.');
+
+  console.log('\n--- 9. AC-008 (bagian buffer): drain memasukkan yang berhasil, sisanya tetap ---');
+  overflow = new OverflowBuffer(5);
+  ['E1', 'E2', 'E3'].forEach((id) => overflow.push({ messageId: id }));
+  const stored = [];
+  let remaining;
+  logs = captureLogs(() => {
+    remaining = overflow.drain((event) => {
+      if (event.messageId === 'E2') throw new Error('masih gagal');
+      stored.push(event.messageId);
+    });
+  });
+  assert.deepStrictEqual(stored, ['E1', 'E3']);
+  assert.deepStrictEqual(remaining.map((e) => e.messageId), ['E2'], 'yang gagal tetap tertampung');
+  assert.strictEqual(overflow.size(), 1);
+  assert.strictEqual(logs.info.length, 1);
+  assert.strictEqual(logs.info[0].meta.size, 1, 'ukuran terbaru tercatat setelah drain (AC-016)');
+  assert.strictEqual(logs.info[0].meta.drained, 2);
+  console.log('OK: E1/E3 tersimpan, E2 tetap, ukuran 1 tercatat.');
+
+  console.log('\n--- 10. drain sekali coba per event; pulih pada siklus berikutnya -> kosong ---');
+  let attempts = 0;
+  overflow.drain(() => {
+    attempts += 1;
+    throw new Error('masih gagal');
+  });
+  assert.strictEqual(attempts, 1, 'satu percobaan per event per drain, tanpa jeda/ulang');
+  assert.strictEqual(overflow.size(), 1);
+  logs = captureLogs(() => overflow.drain(() => {}));
+  assert.strictEqual(overflow.size(), 0, 'setelah database pulih penampung kosong');
+  assert.strictEqual(logs.info[0].meta.size, 0);
+  console.log('OK: sekali coba per event, kosong setelah pulih.');
+
+  console.log('\n--- 11. drain gagal semua / kosong -> ukuran tidak berubah, tidak ada log ---');
+  overflow = new OverflowBuffer(5);
+  logs = captureLogs(() => {
+    assert.deepStrictEqual(overflow.drain(() => {}), [], 'kosong -> []');
+  });
+  assert.strictEqual(logs.info.length, 0);
+  overflow.push({ messageId: 'Z' });
+  logs = captureLogs(() => overflow.drain(() => { throw new Error('x'); }));
+  assert.strictEqual(logs.info.length, 0, 'ukuran tidak berubah -> tidak ada log baru');
+  assert.strictEqual(overflow.size(), 1);
+  console.log('OK: tanpa perubahan ukuran, tanpa log.');
+
+  console.log('\nSemua assert simulate-durable-buffer (retry + overflow) lolos.');
 })().catch((err) => {
   console.error('SIMULASI GAGAL:', err);
   process.exit(1);
