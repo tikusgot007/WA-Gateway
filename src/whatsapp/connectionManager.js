@@ -418,8 +418,19 @@ class ConnectionManager {
         // WhatsApp dengan query paralel kalau banyak pesan masuk sekaligus.
         await this._handleIncomingMessage(msg);
       } catch (err) {
-        // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
-        logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
+        // Satu pesan gagal diproses tidak boleh menjatuhkan gateway, dan pesan
+        // LAIN dalam batch yang sama tetap diproses (loop lanjut ke pesan
+        // berikutnya). M1 Wave 1 TASK-014 (REQ-015, GUD-002): catat cukup
+        // konteks untuk melacak pesan mana yang hilang -- ID pesan, JID, dan
+        // tipe konten -- karena Baileys sudah mengirim tanda terima sehingga
+        // pesan ini TIDAK akan datang lagi.
+        logger.error('Gagal memproses satu pesan masuk, dilewati', {
+          messageId: msg?.key?.id ?? null,
+          jid: msg?.key?.remoteJid ?? null,
+          contentType: this._describeContentType(msg),
+          upsertType: type,
+          error: err.message,
+        });
         // E-06 DIREVERT: sempat ditambah fallback yang menyimpan pesan
         // "minimal" (tanpa teks/media) di sini. Plan resmi
         // (plan/plan-process-m1-wave1-incoming-reliability-v1.0.md,
@@ -428,6 +439,20 @@ class ConnectionManager {
         // message yang dicoba ulang tanpa batas. Ditahan ke sekadar log
         // (perilaku lama) sampai dead-letter (gelombang 3 plan resmi) ada.
       }
+    }
+  }
+
+  /**
+   * M1 Wave 1 TASK-014: tipe konten pesan Baileys (kunci pertama `msg.message`,
+   * mis. 'conversation', 'imageMessage', 'ephemeralMessage') untuk log error.
+   * Tidak pernah melempar: dipanggil DI DALAM catch, jadi kegagalannya sendiri
+   * tidak boleh menutupi error asli atau menghentikan batch.
+   */
+  _describeContentType(msg) {
+    try {
+      return Object.keys(msg?.message || {})[0] ?? null;
+    } catch (err) {
+      return null;
     }
   }
 
