@@ -271,26 +271,73 @@ class IncomingBufferJsonFile {
     });
   }
 
+  /**
+   * E-09 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md, P0 #2):
+   * sebelum fix ini, file utama yang korup langsung menyebabkan antrean
+   * dimulai dari kosong TANPA cadangan -- penulisan berikutnya lalu
+   * menimpa file lama yang sebenarnya masih ada isinya. Sekarang: file
+   * utama yang korup dipindahkan (dikarantina) alih-alih dibiarkan
+   * ditimpa, lalu dicoba dipulihkan dari cadangan (`.bak`, ditulis di
+   * `_persist()` sebelum file utama ditimpa). Kalau cadangan juga tidak
+   * ada/korup, baru mulai dari kosong seperti perilaku lama.
+   */
   _load() {
-    try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        this.rows = Array.isArray(parsed.rows) ? parsed.rows : [];
-        this.nextId = Number.isFinite(parsed.nextId) ? parsed.nextId : this._computeNextId();
-      }
-    } catch (err) {
-      // File korup/tidak terbaca -- jangan crash, mulai dari kosong.
-      // Lebih baik kehilangan antrian retry lama daripada Gateway tidak
-      // bisa start sama sekali.
-      logger.error('Gagal membaca file JSON incoming buffer, memulai dari kosong', { error: err.message });
+    const loaded = this._tryLoadFrom(this.filePath);
+    if (loaded) {
+      this.rows = loaded.rows;
+      this.nextId = loaded.nextId;
+      return;
+    }
+
+    if (!fs.existsSync(this.filePath)) {
+      // Belum pernah ada file sama sekali (bukan kasus korup) -- mulai kosong.
       this.rows = [];
       this.nextId = 1;
+      return;
     }
+
+    const quarantinePath = `${this.filePath}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(this.filePath, quarantinePath);
+      logger.error('File JSON incoming buffer korup, dipindahkan untuk diperiksa manual (bukan ditimpa)', {
+        quarantinePath,
+      });
+    } catch (err) {
+      logger.error('File JSON incoming buffer korup dan gagal dipindahkan', { error: err.message });
+    }
+
+    const recovered = this._tryLoadFrom(`${this.filePath}.bak`);
+    if (recovered) {
+      logger.warn('Pemulihan dari cadangan (.bak) berhasil setelah file utama korup', {
+        pendingSetelahPemulihan: recovered.rows.length,
+      });
+      this.rows = recovered.rows;
+      this.nextId = recovered.nextId;
+      return;
+    }
+
+    // Cadangan juga tidak ada/korup -- perilaku lama: jangan crash, mulai
+    // dari kosong. Lebih baik kehilangan antrian retry lama daripada
+    // Gateway tidak bisa start sama sekali.
+    logger.error('Cadangan (.bak) juga tidak tersedia/korup, memulai dari kosong');
+    this.rows = [];
+    this.nextId = 1;
   }
 
-  _computeNextId() {
-    return this.rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+  /** @returns {{rows: object[], nextId: number}|null} null kalau file tidak ada/tidak terbaca/korup. */
+  _tryLoadFrom(filePath) {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const rows = Array.isArray(parsed.rows) ? parsed.rows : [];
+      const nextId = Number.isFinite(parsed.nextId)
+        ? parsed.nextId
+        : rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+      return { rows, nextId };
+    } catch (err) {
+      return null;
+    }
   }
 
   _persist() {
@@ -304,6 +351,19 @@ class IncomingBufferJsonFile {
       if (row.status !== 'completed') return true;
       return new Date(row.updated_at).getTime() > cutoff;
     });
+
+    // E-09: cadangkan isi file yang MASIH valid sebelum ditimpa, supaya
+    // ada sesuatu untuk dipulihkan kalau penulisan berikutnya korup di
+    // tengah jalan (mis. proses/HP mati tepat saat menulis). Best-effort
+    // & non-fatal -- kegagalan menyalin cadangan tidak boleh menghalangi
+    // penulisan utama.
+    try {
+      if (fs.existsSync(this.filePath)) {
+        fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+      }
+    } catch (err) {
+      logger.warn('Gagal menyalin cadangan (.bak) file JSON incoming buffer (non-fatal)', { error: err.message });
+    }
 
     const tmpPath = `${this.filePath}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify({ nextId: this.nextId, rows: this.rows }));
@@ -406,3 +466,8 @@ process.on('exit', () => {
 });
 
 module.exports = instance;
+// Diekspos terpisah HANYA supaya test/simulate-*.js bisa menguji pemulihan
+// file JSON korup (E-09) secara langsung tanpa bergantung pada ada/tidaknya
+// better-sqlite3 di lingkungan yang menjalankan test. Pemakaian normal
+// aplikasi tetap lewat `instance` singleton di atas.
+module.exports.IncomingBufferJsonFile = IncomingBufferJsonFile;
