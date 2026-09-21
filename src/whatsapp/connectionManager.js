@@ -17,6 +17,7 @@ const incomingBuffer = require('../store/incomingBuffer');
 const { enqueueWithRetry } = require('../store/enqueueRetry');
 const { EnqueueValidationError } = require('../store/enqueueValidationError');
 const { overflowBuffer } = require('../store/overflowBuffer');
+const { ownSentRegistry } = require('./ownSentRegistry');
 const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
 
@@ -728,6 +729,25 @@ class ConnectionManager {
   }
 
   /**
+   * M1 Wave 1 TASK-009 (REQ-003, D-03): tentukan ID pesan SEBELUM kirim dan
+   * catat ke ownSentRegistry. WAJIB dipanggil SEBELUM `await sock.sendMessage()`
+   * (RISK-001): Baileys memancarkan `append` untuk kiriman sendiri lewat
+   * process.nextTick TEPAT SEBELUM sendMessage() kembali, jadi mencatat ID
+   * setelah kirim kalah balapan dan filter `append` (TASK-010) akan mencatat
+   * ulang balasan kasir sebagai pesan ganda.
+   *
+   * ID diteruskan ke Baileys lewat opsi `messageId`, yang menimpa ID otomatis
+   * (dibaca dari messages-send.js: `messageId: generateMessageIDV2(...),
+   * ...options`). ID tetap tercatat walau pengiriman gagal -- tidak berbahaya.
+   */
+  _registerOwnSentId() {
+    const { generateMessageIDV2 } = getBaileys();
+    const messageId = generateMessageIDV2(this.sock?.user?.id);
+    ownSentRegistry.register(messageId);
+    return messageId;
+  }
+
+  /**
    * Kirim pesan teks ke SEBUAH JID, apa adanya, tanpa normalisasi/tebakan apa pun.
    * `jid` di sini boleh berupa @s.whatsapp.net, @lid, atau @g.us -- fungsi ini
    * hanya meneruskan ke sock.sendMessage() milik Baileys, yang memang mendukung
@@ -747,7 +767,8 @@ class ConnectionManager {
     logger.info('[SEND] mengirim pesan keluar', { targetJid: jid, jidType });
 
     try {
-      const result = await this.sock.sendMessage(jid, { text });
+      const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
+      const result = await this.sock.sendMessage(jid, { text }, { messageId: ownMessageId });
       logger.info('[SEND] pesan berhasil dikirim', {
         targetJid: jid,
         jidType,
@@ -865,7 +886,8 @@ class ConnectionManager {
     });
 
     try {
-      const result = await this.sock.sendMessage(jid, content);
+      const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
+      const result = await this.sock.sendMessage(jid, content, { messageId: ownMessageId });
 
       // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
       // directPath/mediaKey asli dari server WhatsApp untuk file yang baru
