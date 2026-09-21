@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const logger = require('../logging');
+const { EnqueueValidationError } = require('./enqueueValidationError');
 
 /**
  * Reliability buffer untuk pesan MASUK **maupun** pesan KELUAR yang
@@ -50,22 +51,6 @@ const logger = require('../logging');
  * bukan hilang tanpa jejak. Duplikat wa_message_id (idempotensi normal,
  * lihat E-10) TETAP diabaikan seperti sebelumnya -- itu bukan kegagalan.
  */
-
-/**
- * M1 Wave 1 TASK-001 (REQ-006): error bertipe khusus untuk event yang tidak
- * lengkap. Dibedakan dari error penyimpanan (disk/lock) karena event yang
- * tidak valid tidak akan pernah berhasil kalau dicoba ulang -- pemanggil
- * (enqueueWithRetry, TASK-002) MUST melemparnya langsung tanpa retry.
- */
-class EnqueueValidationError extends Error {
-  constructor(missing) {
-    super(
-      `incomingBuffer.enqueue: field wajib kosong/null (${missing.join(', ')}) -- pesan DITOLAK sebelum tersimpan, bukan diabaikan diam-diam`
-    );
-    this.name = 'EnqueueValidationError';
-    this.missing = missing;
-  }
-}
 
 function assertRequiredFields(event) {
   const missing = [];
