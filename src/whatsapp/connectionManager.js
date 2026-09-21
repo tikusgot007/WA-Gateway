@@ -30,10 +30,6 @@ const VALID_STATUSES = [
   'error',
 ];
 
-// E-05: batas waktu query onWhatsApp() di _resolveLidForPhoneJid() -- lihat
-// docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md.
-const RESOLVE_LID_TIMEOUT_MS = 5000;
-
 /**
  * ConnectionManager bertanggung jawab penuh atas lifecycle koneksi WhatsApp:
  * - membuat/menutup socket Baileys
@@ -80,6 +76,14 @@ class ConnectionManager {
     // (string), Value: JID LID hasil resolve (string) ATAU null kalau
     // tidak ada/gagal.
     this._lidResolutionCache = new Map();
+
+    // M1 Wave 1 TASK-013 (REQ-019): cache NEGATIF untuk KEGAGALAN query LID
+    // (timeout/error). Key: JID PN, Value: waktu gagal (ms epoch). Berbeda
+    // dari _lidResolutionCache di atas: entri di sini KEDALUWARSA setelah
+    // config.lidLookupNegativeTtlMs, supaya kegagalan sesaat tidak membuat JID
+    // itu tidak pernah dicoba lagi, tapi pesan-pesan beruntun dari JID yang
+    // sama tidak menunggu timeout berulang kali.
+    this._lidFailureCache = new Map();
   }
 
   getStatusSnapshot() {
@@ -526,23 +530,33 @@ class ConnectionManager {
       return this._lidResolutionCache.get(phoneJid);
     }
 
+    // M1 Wave 1 TASK-013 (REQ-019, AC-018): JID yang query-nya BARU gagal
+    // dilewati TANPA memanggil onWhatsApp() dan tanpa menunggu timeout, selama
+    // masa cache negatif belum lewat. Sesudahnya dicoba lagi.
+    const failedAt = this._lidFailureCache.get(phoneJid);
+    if (failedAt !== undefined) {
+      if (Date.now() - failedAt < config.lidLookupNegativeTtlMs) return null;
+      this._lidFailureCache.delete(phoneJid);
+    }
+
     let resolvedLid = null;
 
     if (this.isConnected()) {
+      let timer;
       try {
-        // E-05 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
-        // sebelum fix ini, query ini di-`await` TANPA timeout -- karena
-        // _onMessagesUpsert() memproses pesan berurutan (bukan
-        // Promise.all), satu query yang tersangkut menahan SEMUA pesan
-        // berikutnya dalam batch sebelum sempat tersimpan. Timeout di
-        // sini membatasi jendela itu; resolusi LID tetap best-effort
-        // (non-fatal) seperti sebelumnya kalau timeout tercapai.
-        const results = await Promise.race([
-          this.sock.onWhatsApp(phoneJid),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('onWhatsApp() timeout')), RESOLVE_LID_TIMEOUT_MS)
-          ),
-        ]);
+        // E-05 / REQ-014 (AC-010): query ini di-`await` di dalam loop pesan
+        // yang berurutan (_onMessagesUpsert), jadi satu query yang tersangkut
+        // menahan SEMUA pesan berikutnya dalam batch sebelum sempat tersimpan.
+        // Batas waktu config.lidLookupTimeoutMs (bawaan 2 detik) membatasi
+        // jendela itu; resolusi LID tetap best-effort (non-fatal). Timer
+        // dibersihkan di `finally` supaya tidak menahan proses saat query cepat.
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`onWhatsApp() timeout (${config.lidLookupTimeoutMs}ms)`)),
+            config.lidLookupTimeoutMs
+          );
+        });
+        const results = await Promise.race([this.sock.onWhatsApp(phoneJid), timeout]);
         const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
 
         if (match?.lid) {
@@ -551,10 +565,18 @@ class ConnectionManager {
           resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
         }
       } catch (err) {
-        logger.debug('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp() (non-fatal, dilewati)', {
+        // KEGAGALAN (timeout/error): pesan tetap disimpan tanpa identity_hint,
+        // dicatat sebagai peringatan, dan JID ini masuk cache negatif -- TIDAK
+        // masuk _lidResolutionCache, jadi bisa dicoba lagi setelah TTL.
+        logger.warn('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp(); pesan disimpan tanpa identity_hint', {
           phoneJid,
           error: err.message,
+          negativeCacheMs: config.lidLookupNegativeTtlMs,
         });
+        this._lidFailureCache.set(phoneJid, Date.now());
+        return null;
+      } finally {
+        clearTimeout(timer);
       }
     }
 

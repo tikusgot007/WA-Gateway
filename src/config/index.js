@@ -102,6 +102,14 @@ const config = {
   ownSentTtlMs: toInt(process.env.OWN_SENT_TTL_MS, 600000),
   ownSentMax: Math.max(1, toInt(process.env.OWN_SENT_MAX, 1000)),
 
+  // M1 Wave 1 TASK-013 (REQ-014, REQ-019, GUD-001): query LID (onWhatsApp).
+  // - lidLookupTimeoutMs: batas waktu satu query (bawaan 2 detik); min 1.
+  // - lidLookupNegativeTtlMs: berapa lama KEGAGALAN query untuk sebuah JID
+  //   di-cache supaya pesan berikutnya dari JID yang sama tidak menunggu
+  //   timeout lagi (bawaan 60 detik); 0 = tanpa cache negatif.
+  lidLookupTimeoutMs: Math.max(1, toInt(process.env.LID_LOOKUP_TIMEOUT_MS, 2000)),
+  lidLookupNegativeTtlMs: Math.max(0, toInt(process.env.LID_LOOKUP_NEGATIVE_TTL_MS, 60000)),
+
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
 
