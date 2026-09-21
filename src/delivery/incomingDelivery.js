@@ -3,6 +3,7 @@
 const config = require('../config');
 const logger = require('../logging');
 const incomingBuffer = require('../store/incomingBuffer');
+const { overflowBuffer } = require('../store/overflowBuffer');
 const { postToCI4 } = require('./ci4Client');
 
 /**
@@ -70,6 +71,13 @@ async function tick() {
   isRunning = true;
 
   try {
+    // M1 Wave 1 TASK-004 (REQ-011): kuras penampung sementara ke buffer utama
+    // di AWAL siklus, sebelum mengambil event yang jatuh tempo. Satu percobaan
+    // per event tanpa jeda; yang masih gagal tetap tertampung untuk siklus
+    // berikutnya. Sengaja SEBELUM cek konfigurasi CI4 di bawah: ini hanya
+    // penyimpanan lokal, tidak butuh CI4.
+    overflowBuffer.drain((event) => incomingBuffer.enqueue(event));
+
     if (!config.ci4.baseUrl || !config.ci4.gatewayToken) {
       // Belum dikonfigurasi -- jangan spam warning tiap 5 detik, cukup
       // debug level (tetap tercatat kalau LOG_LEVEL=debug, tapi tidak
@@ -107,4 +115,6 @@ function stop() {
   }
 }
 
-module.exports = { start, stop };
+// `tick` diekspos supaya test/simulate-*.js bisa memanggil satu siklus worker
+// secara langsung (deterministik, tanpa menunggu timer nyata).
+module.exports = { start, stop, tick };

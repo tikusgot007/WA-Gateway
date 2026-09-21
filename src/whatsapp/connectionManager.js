@@ -14,6 +14,9 @@ const config = require('../config');
 const logger = require('../logging');
 const messageStore = require('./messageStore');
 const incomingBuffer = require('../store/incomingBuffer');
+const { enqueueWithRetry } = require('../store/enqueueRetry');
+const { EnqueueValidationError } = require('../store/enqueueValidationError');
+const { overflowBuffer } = require('../store/overflowBuffer');
 const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
 
@@ -494,35 +497,44 @@ class ConnectionManager {
   }
 
   /**
-   * E-04 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): sebelum
-   * fix ini, satu kegagalan `incomingBuffer.enqueue()` (mis. database
-   * terkunci sesaat) langsung berarti pesan hilang -- tidak ada percobaan
-   * ulang sama sekali. Baileys sudah mengirim tanda terima untuk pesan
-   * yang sedang diproses di sini, jadi kegagalan enqueue TIDAK bisa
-   * ditutupi dengan pesan datang lagi (lihat E-13). Ini BUKAN pengganti
-   * durable buffer (Ticket 03) -- hanya memperkecil peluang kegagalan
-   * sesaat (lock/disk sibuk) berakhir jadi pesan hilang permanen.
+   * M1 Wave 1 TASK-004 (REQ-006, REQ-009, REQ-010, REQ-011; menggantikan
+   * `_enqueueWithRetry` ad-hoc E-04). Menyimpan satu event ke buffer utama:
+   *
+   * 1. Coba `enqueueWithRetry()` (1 percobaan + ulangan berjeda, TASK-002).
+   * 2. Semua percobaan gagal (kegagalan penyimpanan) -> event DITAMPUNG di
+   *    `overflowBuffer` dan error keras dicatat; siklus worker berikutnya
+   *    (incomingDelivery.js) mengurasnya kembali ke buffer utama.
+   * 3. Event TIDAK LENGKAP (EnqueueValidationError) tidak akan pernah
+   *    berhasil, jadi TIDAK ditampung -- hanya dicatat error keras berisi
+   *    alasan dan kunci pesan (REQ-006).
+   *
+   * Baileys sudah mengirim tanda terima untuk pesan yang sedang diproses di
+   * sini, jadi pesan ini TIDAK akan datang lagi (E-13) -- karena itu kegagalan
+   * tidak boleh senyap. Tidak pernah melempar: satu pesan yang gagal tidak
+   * boleh menjatuhkan penerimaan pesan WhatsApp lainnya.
    */
-  async _enqueueWithRetry(event, attempts = 3, delayMs = 200) {
-    let lastErr;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      try {
-        incomingBuffer.enqueue(event);
+  async _persistIncoming(event) {
+    try {
+      await enqueueWithRetry(incomingBuffer, event);
+    } catch (err) {
+      if (err instanceof EnqueueValidationError) {
+        logger.error('[DELIVERY] pesan DITOLAK sebelum tersimpan: field wajib kosong -- pesan ini hilang', {
+          messageId: event.messageId,
+          chatId: event.chatId,
+          missing: err.missing,
+        });
         return;
-      } catch (err) {
-        lastErr = err;
-        if (attempt < attempts) {
-          logger.warn('[DELIVERY] enqueue gagal, mencoba ulang', {
-            messageId: event.messageId,
-            attempt,
-            attempts,
-            error: err.message,
-          });
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
       }
+
+      const dropped = overflowBuffer.push(event);
+      logger.error('[DELIVERY] GAGAL menyimpan pesan ke buffer utama setelah dicoba ulang -- berisiko tidak sampai ke POS', {
+        messageId: event.messageId,
+        direction: event.direction,
+        overflowSize: overflowBuffer.size(),
+        droppedFromOverflow: dropped,
+        error: err.message,
+      });
     }
-    throw lastErr;
   }
 
   async _handleIncomingMessage(msg) {
@@ -692,24 +704,12 @@ class ConnectionManager {
     //   merefleksikan kenyataan percakapan walau balasannya tidak
     //   lewat POS, mencegah kasir lain mengira belum dibalas dan
     //   balas dobel.
-    try {
-      await this._enqueueWithRetry({
-        ...normalized,
-        direction: fromMe ? 'outgoing' : 'incoming',
-      });
-    } catch (err) {
-      // Gagal simpan ke SQLite tidak boleh menjatuhkan proses penerimaan
-      // pesan WhatsApp itu sendiri -- cukup log sekeras mungkin karena ini
-      // berarti pesan BERISIKO tidak sampai ke POS. Baileys sudah
-      // mengirim tanda terima, jadi pesan ini TIDAK akan datang lagi
-      // (lihat E-13) -- sudah dicoba ulang beberapa kali di
-      // _enqueueWithRetry() sebelum sampai ke sini (E-04).
-      logger.error('[DELIVERY] GAGAL menyimpan pesan ke SQLite buffer -- pesan ini berisiko tidak sampai ke POS', {
-        messageId: normalized.messageId,
-        direction: fromMe ? 'outgoing' : 'incoming',
-        error: err.message,
-      });
-    }
+    // Kegagalan simpan ditangani di _persistIncoming() (retry -> overflow
+    // buffer, TASK-004); metode itu tidak pernah melempar.
+    await this._persistIncoming({
+      ...normalized,
+      direction: fromMe ? 'outgoing' : 'incoming',
+    });
 
     logger.info('[CHAT] pesan masuk diterima', {
       chatId: normalized.chatId,

@@ -6,9 +6,21 @@
  * (AC-011) dan AC-008 penuh lewat siklus worker.
  *
  * Bagian retry dan overflow memakai buffer palsu yang bisa diprogram untuk
- * gagal, jadi tidak membuka database dan tidak menyentuh berkas apa pun.
+ * gagal. Bagian integrasi worker (TASK-004) memakai singleton nyata yang
+ * diarahkan ke folder temp (dihapus setelah tes) dan CI4 dikosongkan supaya
+ * tidak pernah ada pengiriman HTTP sungguhan.
  * Jalankan: node test/simulate-durable-buffer.js
  */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// HARUS sebelum modul src/ mana pun di-require: config dibaca sekali saat load.
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-durable-buffer-'));
+process.env.SQLITE_PATH = path.join(tmpDir, 'gateway.sqlite');
+process.env.CI4_BASE_URL = '';
+process.env.CI4_GATEWAY_TOKEN = '';
+
 const assert = require('assert');
 const { enqueueWithRetry, DEFAULT_RETRY_DELAYS_MS } = require('../src/store/enqueueRetry');
 const { EnqueueValidationError } = require('../src/store/enqueueValidationError');
@@ -178,8 +190,75 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.strictEqual(overflow.size(), 1);
   console.log('OK: tanpa perubahan ukuran, tanpa log.');
 
-  console.log('\nSemua assert simulate-durable-buffer (retry + overflow) lolos.');
+  // ---- TASK-004: wiring -- jalur terima pesan + siklus worker (AC-008 penuh) ----
+  console.log('\n--- 12. AC-008: enqueue gagal terus -> overflow; pulih saat siklus worker berjalan ---');
+  const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
+  await ensureBaileysLoaded();
+  const connectionManager = require('../src/whatsapp/connectionManager');
+  const incomingBuffer = require('../src/store/incomingBuffer');
+  const { overflowBuffer } = require('../src/store/overflowBuffer');
+  const incomingDelivery = require('../src/delivery/incomingDelivery');
+
+  overflowBuffer.items = [];
+  const realEnqueue = incomingBuffer.enqueue;
+  incomingBuffer.enqueue = () => {
+    throw new Error('simulasi database terkunci terus');
+  };
+  const wiredEvent = {
+    messageId: 'SIM-DUR-WIRED-1',
+    chatId: '628111000401@s.whatsapp.net',
+    jidType: 'pn',
+    messageType: 'text',
+    text: 'via overflow',
+    timestamp: new Date().toISOString(),
+    direction: 'incoming',
+  };
+  try {
+    await connectionManager._persistIncoming(wiredEvent);
+    assert.strictEqual(overflowBuffer.size(), 1, 'gagal terus -> masuk overflow');
+    assert.strictEqual(incomingBuffer.countPending(), 0, 'belum ada di buffer utama');
+
+    await incomingDelivery.tick(); // siklus worker, database MASIH gagal
+    assert.strictEqual(overflowBuffer.size(), 1, 'drain gagal -> tetap tertampung');
+
+    incomingBuffer.enqueue = realEnqueue; // database pulih
+    await incomingDelivery.tick(); // siklus worker berikutnya
+    assert.strictEqual(overflowBuffer.size(), 0, 'setelah pulih overflow kosong');
+    assert.strictEqual(incomingBuffer.countPending(), 1, 'event tersimpan di buffer utama');
+    assert.strictEqual(incomingBuffer.getDueEvents(5)[0].wa_message_id, 'SIM-DUR-WIRED-1');
+  } finally {
+    incomingBuffer.enqueue = realEnqueue;
+  }
+  console.log('OK: event tertahan di overflow, lalu tersimpan setelah siklus worker berikutnya.');
+
+  console.log('\n--- 13. Event tidak lengkap -> error keras, TIDAK masuk overflow ---');
+  const errorLogs = [];
+  const realError = logger.error;
+  logger.error = (message, meta) => errorLogs.push({ message, meta });
+  try {
+    await connectionManager._persistIncoming({ ...wiredEvent, messageId: null });
+  } finally {
+    logger.error = realError;
+  }
+  assert.strictEqual(overflowBuffer.size(), 0, 'validasi tidak boleh masuk overflow');
+  assert.strictEqual(errorLogs.length, 1);
+  assert.deepStrictEqual(errorLogs[0].meta.missing, ['messageId']);
+  console.log('OK: event tidak lengkap dicatat error keras dan tidak ditampung.');
+
+  console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring) lolos.');
+  cleanup(incomingBuffer);
 })().catch((err) => {
   console.error('SIMULASI GAGAL:', err);
+  cleanup();
   process.exit(1);
 });
+
+/** Lepas handle singleton lalu hapus folder temp (Windows menolak hapus file terbuka). */
+function cleanup(incomingBuffer) {
+  try {
+    (incomingBuffer || require('../src/store/incomingBuffer')).close();
+  } catch (err) {
+    // abaikan
+  }
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
