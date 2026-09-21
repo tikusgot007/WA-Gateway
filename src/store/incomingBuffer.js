@@ -50,25 +50,44 @@ const logger = require('../logging');
  * bukan hilang tanpa jejak. Duplikat wa_message_id (idempotensi normal,
  * lihat E-10) TETAP diabaikan seperti sebelumnya -- itu bukan kegagalan.
  */
+
+/**
+ * M1 Wave 1 TASK-001 (REQ-006): error bertipe khusus untuk event yang tidak
+ * lengkap. Dibedakan dari error penyimpanan (disk/lock) karena event yang
+ * tidak valid tidak akan pernah berhasil kalau dicoba ulang -- pemanggil
+ * (enqueueWithRetry, TASK-002) MUST melemparnya langsung tanpa retry.
+ */
+class EnqueueValidationError extends Error {
+  constructor(missing) {
+    super(
+      `incomingBuffer.enqueue: field wajib kosong/null (${missing.join(', ')}) -- pesan DITOLAK sebelum tersimpan, bukan diabaikan diam-diam`
+    );
+    this.name = 'EnqueueValidationError';
+    this.missing = missing;
+  }
+}
+
 function assertRequiredFields(event) {
   const missing = [];
   if (!event.messageId) missing.push('messageId');
   if (!event.chatId) missing.push('chatId');
   if (!event.jidType) missing.push('jidType');
+  if (!event.messageType) missing.push('messageType');
   if (!event.timestamp) missing.push('timestamp');
   if (missing.length > 0) {
-    throw new Error(
-      `incomingBuffer.enqueue: field wajib kosong/null (${missing.join(', ')}) -- pesan DITOLAK sebelum tersimpan, bukan diabaikan diam-diam`
-    );
+    throw new EnqueueValidationError(missing);
   }
 }
 
 class IncomingBufferSqlite {
-  constructor(Database) {
-    const dir = path.dirname(config.sqlitePath);
+  // dbPath bisa disuntik supaya kelas ini testable terisolasi (TASK-001);
+  // pemakaian normal aplikasi tetap memakai config.sqlitePath.
+  constructor(Database, dbPath = config.sqlitePath) {
+    const dir = path.dirname(dbPath);
     fs.mkdirSync(dir, { recursive: true });
 
-    this.db = new Database(config.sqlitePath);
+    this.dbPath = dbPath;
+    this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL'); // lebih tahan terhadap crash mendadak
 
     this._migrate();
@@ -82,6 +101,10 @@ class IncomingBufferSqlite {
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid,
          @message_type, @text, @media_json, @identity_hint_json, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
+    `);
+
+    this.existsStmt = this.db.prepare(`
+      SELECT 1 FROM incoming_queue WHERE wa_message_id = @wa_message_id
     `);
 
     this.getDueStmt = this.db.prepare(`
@@ -107,7 +130,7 @@ class IncomingBufferSqlite {
     `);
 
     logger.info('SQLite incoming buffer siap', {
-      path: config.sqlitePath,
+      path: dbPath,
       pendingSaatStartup: this.countPending(),
     });
   }
@@ -187,18 +210,26 @@ class IncomingBufferSqlite {
    * ringan ({mimetype, fileLength}, TANPA referensi download -- binary-
    * nya tidak pernah diambil sama sekali, lihat _handleIncomingMessage()).
    * null untuk teks.
+   *
+   * TASK-001 (REQ-006/007/008): event tidak lengkap -> EnqueueValidationError
+   * (tanpa insert). Hasil insert diperiksa: kalau tidak ada baris baru dan
+   * wa_message_id sudah ada -> {status:'duplicate'} (sah, idempoten); kalau
+   * belum ada -> Error tak terduga (baris hilang senyap tidak boleh lolos).
+   * Sukses -> {status:'inserted'}.
+   *
+   * @returns {{status: 'inserted'|'duplicate'}}
    */
   enqueue(event) {
     assertRequiredFields(event);
     const now = new Date().toISOString();
-    this.insertStmt.run({
+    const info = this.insertStmt.run({
       wa_message_id: event.messageId,
       chat_id: event.chatId,
       jid_type: event.jidType,
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
       sender_jid: event.sender?.jid ?? null,
-      message_type: event.messageType || 'text',
+      message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
@@ -207,6 +238,16 @@ class IncomingBufferSqlite {
       next_attempt_at: now, // langsung boleh dicoba kirim saat itu juga
       now,
     });
+
+    if (info.changes > 0) return { status: 'inserted' };
+
+    if (this.existsStmt.get({ wa_message_id: event.messageId })) {
+      return { status: 'duplicate' };
+    }
+
+    throw new Error(
+      `incomingBuffer.enqueue: INSERT tidak menghasilkan baris padahal wa_message_id ${event.messageId} belum ada -- kondisi tak terduga`
+    );
   }
 
   /** Ambil event yang sudah waktunya dicoba kirim (pending atau failed yang sudah lewat backoff-nya). */
@@ -255,11 +296,11 @@ class IncomingBufferSqlite {
  * mati (mis. Android mematikan proses) di tengah penulisan.
  */
 class IncomingBufferJsonFile {
-  constructor() {
-    const dir = path.dirname(config.sqlitePath);
+  constructor(sqlitePath = config.sqlitePath) {
+    const dir = path.dirname(sqlitePath);
     fs.mkdirSync(dir, { recursive: true });
 
-    this.filePath = config.sqlitePath.replace(/\.sqlite$/i, '') + '.json';
+    this.filePath = sqlitePath.replace(/\.sqlite$/i, '') + '.json';
     this.nextId = 1;
     this.rows = [];
 
@@ -374,7 +415,7 @@ class IncomingBufferJsonFile {
     assertRequiredFields(event);
 
     if (this.rows.some((row) => row.wa_message_id === event.messageId)) {
-      return; // INSERT OR IGNORE -- sudah pernah tercatat, abaikan (idempoten)
+      return { status: 'duplicate' }; // sudah pernah tercatat, abaikan (idempoten)
     }
 
     const now = new Date().toISOString();
@@ -386,7 +427,7 @@ class IncomingBufferJsonFile {
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
       sender_jid: event.sender?.jid ?? null,
-      message_type: event.messageType || 'text',
+      message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
@@ -400,6 +441,7 @@ class IncomingBufferJsonFile {
       updated_at: now,
     });
     this._persist();
+    return { status: 'inserted' };
   }
 
   getDueEvents(limit = 20) {
@@ -471,3 +513,7 @@ module.exports = instance;
 // better-sqlite3 di lingkungan yang menjalankan test. Pemakaian normal
 // aplikasi tetap lewat `instance` singleton di atas.
 module.exports.IncomingBufferJsonFile = IncomingBufferJsonFile;
+// Idem: diekspos supaya test bisa membuat instance SQLite terisolasi (path DB
+// disuntik) dan mengenali error validasi (TASK-001, TASK-002).
+module.exports.IncomingBufferSqlite = IncomingBufferSqlite;
+module.exports.EnqueueValidationError = EnqueueValidationError;

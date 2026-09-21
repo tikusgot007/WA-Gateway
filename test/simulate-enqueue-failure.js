@@ -29,6 +29,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
         messageId: null,
         chatId: '628111000201@s.whatsapp.net',
         jidType: 'pn',
+        messageType: 'text',
         text: 'tanpa id',
         timestamp: new Date().toISOString(),
       }),
@@ -44,6 +45,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
         messageId: 'SIM-ENQ-2',
         chatId: null,
         jidType: 'pn',
+        messageType: 'text',
         text: 'tanpa chatId',
         timestamp: new Date().toISOString(),
       }),
@@ -58,6 +60,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
     messageId: 'SIM-ENQ-3',
     chatId: '628111000203@s.whatsapp.net',
     jidType: 'pn',
+    messageType: 'text',
     text: 'lengkap',
     timestamp: new Date().toISOString(),
   });
@@ -70,6 +73,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
       messageId: 'SIM-ENQ-3', // sama seperti langkah 3
       chatId: '628111000203@s.whatsapp.net',
       jidType: 'pn',
+      messageType: 'text',
       text: 'duplikat',
       timestamp: new Date().toISOString(),
     })
@@ -93,6 +97,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
         messageId: 'SIM-ENQ-5',
         chatId: '628111000205@s.whatsapp.net',
         jidType: 'pn',
+        messageType: 'text',
         text: 'retry',
         timestamp: new Date().toISOString(),
       },
@@ -117,6 +122,7 @@ const incomingBuffer = require('../src/store/incomingBuffer');
             messageId: 'SIM-ENQ-6',
             chatId: '628111000206@s.whatsapp.net',
             jidType: 'pn',
+            messageType: 'text',
             text: 'gagal terus',
             timestamp: new Date().toISOString(),
           },

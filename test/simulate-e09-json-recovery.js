@@ -48,6 +48,7 @@ function makeEvent(messageId) {
     messageId,
     chatId: '628111000401@s.whatsapp.net',
     jidType: 'pn',
+    messageType: 'text',
     text: `pesan ${messageId}`,
     timestamp: new Date().toISOString(),
   };
