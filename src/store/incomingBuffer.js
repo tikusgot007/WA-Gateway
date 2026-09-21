@@ -64,6 +64,68 @@ function assertRequiredFields(event) {
   }
 }
 
+/**
+ * M1 Wave 1 TASK-005 (REQ-013, AC-011, ASSUMPTION "pesan di database korup
+ * dianggap hilang dari antrean aktif tapi berkasnya dipindah"): buka database
+ * SQLite dan pastikan integritasnya. `PRAGMA quick_check` dijalankan SEBELUM
+ * pragma lain (berkas yang bukan database membuat pragma apa pun melempar),
+ * lewat koneksi read-only (lihat checkIntegrity()).
+ * Gagal (hasil bukan "ok", atau pragma melempar) -> berkas beserta `-wal` /
+ * `-shm` DIPINDAH (bukan dihapus) ke `<nama>.corrupt-<waktu>` supaya bisa
+ * diperiksa manual, database baru dibuat, dan error keras dicatat -- Gateway
+ * tetap bisa start. `synchronous = FULL` selalu diatur (durabilitas penuh
+ * setiap commit) pada database yang lolos maupun yang baru dibuat.
+ */
+function checkIntegrity(Database, dbPath) {
+  // Berkas belum ada -> database baru akan dibuat, tidak ada yang diperiksa.
+  if (!fs.existsSync(dbPath)) return { healthy: true };
+
+  // Koneksi READ-ONLY sengaja: koneksi tulis yang ditutup membuat SQLite
+  // membersihkan (menghapus) `-wal`/`-shm` sendiri, padahal untuk database
+  // korup berkas itu harus tetap ada supaya bisa dipindah utuh (REQ-013).
+  let probe;
+  try {
+    probe = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const result = probe.pragma('quick_check', { simple: true });
+    return result === 'ok' ? { healthy: true } : { healthy: false, detail: String(result) };
+  } catch (err) {
+    return { healthy: false, detail: err.message };
+  } finally {
+    try {
+      if (probe) probe.close();
+    } catch (err) {
+      // abaikan
+    }
+  }
+}
+
+function openVerifiedDatabase(Database, dbPath) {
+  const { healthy, detail } = checkIntegrity(Database, dbPath);
+
+  if (!healthy) {
+    const stamp = Date.now();
+    const moved = [];
+    for (const suffix of ['', '-wal', '-shm']) {
+      const source = `${dbPath}${suffix}`;
+      if (!fs.existsSync(source)) continue;
+      const target = `${source}.corrupt-${stamp}`;
+      fs.renameSync(source, target);
+      moved.push(target);
+    }
+    logger.error('[CRITICAL] database SQLite incoming buffer korup -- dipindahkan untuk diperiksa manual, database baru dibuat', {
+      severity: 'critical',
+      dbPath,
+      moved,
+      detail,
+    });
+  }
+
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL'); // lebih tahan terhadap crash mendadak
+  db.pragma('synchronous = FULL');
+  return db;
+}
+
 class IncomingBufferSqlite {
   // dbPath bisa disuntik supaya kelas ini testable terisolasi (TASK-001);
   // pemakaian normal aplikasi tetap memakai config.sqlitePath.
@@ -72,8 +134,7 @@ class IncomingBufferSqlite {
     fs.mkdirSync(dir, { recursive: true });
 
     this.dbPath = dbPath;
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL'); // lebih tahan terhadap crash mendadak
+    this.db = openVerifiedDatabase(Database, dbPath);
 
     this._migrate();
 

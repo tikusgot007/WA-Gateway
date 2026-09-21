@@ -245,7 +245,84 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.deepStrictEqual(errorLogs[0].meta.missing, ['messageId']);
   console.log('OK: event tidak lengkap dicatat error keras dan tidak ditampung.');
 
-  console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring) lolos.');
+  // ---- TASK-005: integritas SQLite saat start (REQ-013, AC-011) + konfigurasi (GUD-001) ----
+  const Database = require('better-sqlite3');
+  const { IncomingBufferSqlite } = incomingBuffer;
+  const integrityDir = path.join(tmpDir, 'integrity');
+  fs.mkdirSync(integrityDir);
+  const corruptFilesOf = (dbPath) =>
+    fs.readdirSync(path.dirname(dbPath)).filter((name) => name.startsWith(path.basename(dbPath)) && name.includes('.corrupt-'));
+
+  console.log('\n--- 14. Database sehat: tidak dipindah, synchronous=FULL, data lama utuh ---');
+  const healthyPath = path.join(integrityDir, 'healthy.sqlite');
+  let sqliteBuf = new IncomingBufferSqlite(Database, healthyPath);
+  sqliteBuf.enqueue({ ...wiredEvent, messageId: 'SIM-DUR-H1' });
+  sqliteBuf.close();
+  logs = captureLogs(() => {
+    sqliteBuf = new IncomingBufferSqlite(Database, healthyPath);
+  });
+  assert.strictEqual(logs.error.length, 0, 'database sehat tidak boleh memicu error');
+  assert.deepStrictEqual(corruptFilesOf(healthyPath), [], 'tidak ada berkas .corrupt-');
+  assert.strictEqual(sqliteBuf.countPending(), 1, 'data lama tetap ada');
+  assert.strictEqual(sqliteBuf.db.pragma('synchronous', { simple: true }), 2, 'synchronous = FULL (2)');
+  sqliteBuf.close();
+  console.log('OK: database sehat dibuka apa adanya, synchronous FULL.');
+
+  console.log('\n--- 15. AC-011: berkas bukan-database (+ -wal/-shm) -> dipindah, database baru, error keras ---');
+  const garbagePath = path.join(integrityDir, 'garbage.sqlite');
+  for (const suffix of ['', '-wal', '-shm']) {
+    fs.writeFileSync(garbagePath + suffix, Buffer.alloc(4096, 0xab));
+  }
+  logs = captureLogs(() => {
+    sqliteBuf = new IncomingBufferSqlite(Database, garbagePath);
+  });
+  assert.strictEqual(corruptFilesOf(garbagePath).length, 3, 'utama + -wal + -shm dipindah, bukan dihapus');
+  assert.strictEqual(logs.error.length, 1);
+  assert.strictEqual(logs.error[0].meta.severity, 'critical');
+  assert.strictEqual(logs.error[0].meta.moved.length, 3);
+  assert.deepStrictEqual(sqliteBuf.enqueue({ ...wiredEvent, messageId: 'SIM-DUR-G1' }), { status: 'inserted' }, 'database baru berfungsi');
+  assert.strictEqual(sqliteBuf.db.pragma('synchronous', { simple: true }), 2, 'database baru juga FULL');
+  sqliteBuf.close();
+  console.log('OK: 3 berkas dipindah ke .corrupt-<waktu>, database baru dibuat, error keras tercatat.');
+
+  console.log('\n--- 16. AC-011: database valid tapi halaman rusak -> dipindah, database baru ---');
+  const damagedPath = path.join(integrityDir, 'damaged.sqlite');
+  sqliteBuf = new IncomingBufferSqlite(Database, damagedPath);
+  for (let i = 1; i <= 5; i += 1) sqliteBuf.enqueue({ ...wiredEvent, messageId: `SIM-DUR-D${i}` });
+  sqliteBuf.close();
+  const fd = fs.openSync(damagedPath, 'r+');
+  fs.writeSync(fd, Buffer.alloc(4096, 0xff), 0, 4096, 4096); // rusak halaman ke-2 (b-tree tabel)
+  fs.closeSync(fd);
+  logs = captureLogs(() => {
+    sqliteBuf = new IncomingBufferSqlite(Database, damagedPath);
+  });
+  assert.ok(corruptFilesOf(damagedPath).length >= 1, 'berkas rusak dipindah');
+  assert.strictEqual(logs.error.length, 1, 'error keras tercatat');
+  assert.strictEqual(sqliteBuf.countPending(), 0, 'database baru kosong (pesan lama dianggap hilang dari antrean aktif)');
+  sqliteBuf.close();
+  console.log('OK: kerusakan tingkat halaman terdeteksi dan ditangani sama.');
+
+  console.log('\n--- 17. Konfigurasi ENQUEUE_RETRY_DELAYS_MS / ENQUEUE_OVERFLOW_MAX (GUD-001) ---');
+  const { execFileSync } = require('child_process');
+  const repoRoot = path.resolve(__dirname, '..');
+  const readConfig = (envOverrides) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        ['-e', "const c = require('./src/config'); console.log(JSON.stringify([c.enqueueRetryDelaysMs, c.enqueueOverflowMax]))"],
+        { cwd: repoRoot, env: { ...process.env, ENQUEUE_RETRY_DELAYS_MS: '', ENQUEUE_OVERFLOW_MAX: '', ...envOverrides }, encoding: 'utf8' }
+      )
+    );
+  assert.deepStrictEqual(readConfig({}), [[50, 200, 800], 500], 'bawaan');
+  assert.deepStrictEqual(readConfig({ ENQUEUE_RETRY_DELAYS_MS: '10, 20' }), [[10, 20], 500], 'daftar kustom (spasi ditoleransi)');
+  assert.deepStrictEqual(readConfig({ ENQUEUE_RETRY_DELAYS_MS: 'abc' }), [[50, 200, 800], 500], 'tidak valid -> bawaan utuh');
+  assert.deepStrictEqual(readConfig({ ENQUEUE_RETRY_DELAYS_MS: '50,-1' }), [[50, 200, 800], 500], 'negatif -> bawaan utuh');
+  assert.deepStrictEqual(readConfig({ ENQUEUE_OVERFLOW_MAX: '25' })[1], 25);
+  assert.strictEqual(readConfig({ ENQUEUE_OVERFLOW_MAX: '0' })[1], 1, '0 dijaga minimal 1 (0 = buang semua event)');
+  assert.strictEqual(readConfig({ ENQUEUE_OVERFLOW_MAX: 'x' })[1], 500, 'tidak valid -> bawaan');
+  console.log('OK: bawaan, kustom, dan nilai tidak valid ditangani.');
+
+  console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring + integritas) lolos.');
   cleanup(incomingBuffer);
 })().catch((err) => {
   console.error('SIMULASI GAGAL:', err);
@@ -260,5 +337,10 @@ function cleanup(incomingBuffer) {
   } catch (err) {
     // abaikan
   }
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  try {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  } catch (err) {
+    // Jangan menutupi kegagalan tes yang sebenarnya dengan error pembersihan (mis. EBUSY di Windows).
+    console.error(`Peringatan: folder temp tidak terhapus (${err.code}): ${tmpDir}`);
+  }
 }

@@ -1,5 +1,6 @@
 'use strict';
 
+const config = require('../config');
 const logger = require('../logging');
 
 /**
@@ -89,8 +90,8 @@ class OverflowBuffer {
 }
 
 // Satu instance bersama untuk jalur terima pesan (connectionManager) dan
-// siklus worker (incomingDelivery) -- diwire di TASK-004. Kapasitas dari
-// environment ditambahkan di TASK-005 (ENQUEUE_OVERFLOW_MAX).
-const overflowBuffer = new OverflowBuffer();
+// siklus worker (incomingDelivery). Kapasitas dari ENQUEUE_OVERFLOW_MAX
+// (TASK-005, GUD-001); bawaan 500.
+const overflowBuffer = new OverflowBuffer(config.enqueueOverflowMax);
 
 module.exports = { OverflowBuffer, DEFAULT_OVERFLOW_MAX, overflowBuffer };

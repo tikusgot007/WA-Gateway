@@ -515,7 +515,7 @@ class ConnectionManager {
    */
   async _persistIncoming(event) {
     try {
-      await enqueueWithRetry(incomingBuffer, event);
+      await enqueueWithRetry(incomingBuffer, event, config.enqueueRetryDelaysMs);
     } catch (err) {
       if (err instanceof EnqueueValidationError) {
         logger.error('[DELIVERY] pesan DITOLAK sebelum tersimpan: field wajib kosong -- pesan ini hilang', {

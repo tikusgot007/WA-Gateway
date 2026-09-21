@@ -10,6 +10,16 @@ function toInt(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// Daftar angka dipisah koma (mis. "50,200,800"). Nilai kosong/tidak valid
+// (bukan angka, atau negatif) -> pakai fallback utuh, bukan sebagian, supaya
+// salah ketik di .env tidak menghasilkan jeda retry yang aneh.
+function toIntList(value, fallback) {
+  if (!value || !value.trim()) return fallback;
+  const parts = value.split(',').map((s) => s.trim());
+  const nums = parts.map((s) => (/^\d+$/.test(s) ? parseInt(s, 10) : NaN));
+  return nums.every(Number.isFinite) ? nums : fallback;
+}
+
 const config = {
   host: process.env.HOST || '127.0.0.1',
   port: toInt(process.env.PORT, 3000),
@@ -75,6 +85,14 @@ const config = {
     maxDelayMs: toInt(process.env.DELIVERY_RETRY_MAX_DELAY_MS, 120000),
     backoffFactor: parseFloat(process.env.DELIVERY_RETRY_BACKOFF_FACTOR || '2') || 2,
   },
+
+  // M1 Wave 1 TASK-005 (GUD-001): batas durable buffer.
+  // - enqueueRetryDelaysMs: jeda antar percobaan ulang enqueue() ke buffer
+  //   utama (REQ-009). Panjang daftar = jumlah percobaan ULANG; bawaan sama
+  //   dengan DEFAULT_RETRY_DELAYS_MS di src/store/enqueueRetry.js.
+  // - enqueueOverflowMax: kapasitas penampung sementara in-memory (REQ-010).
+  enqueueRetryDelaysMs: toIntList(process.env.ENQUEUE_RETRY_DELAYS_MS, [50, 200, 800]),
+  enqueueOverflowMax: Math.max(1, toInt(process.env.ENQUEUE_OVERFLOW_MAX, 500)), // min 1: 0 = buang semua event
 
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
