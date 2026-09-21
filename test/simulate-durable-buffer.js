@@ -245,6 +245,37 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.deepStrictEqual(errorLogs[0].meta.missing, ['messageId']);
   console.log('OK: event tidak lengkap dicatat error keras dan tidak ditampung.');
 
+  console.log('\n--- 13b. AC-005: pesan lain setelah event tidak lengkap tetap diproses dan tersimpan ---');
+  const pendingBefore = incomingBuffer.countPending();
+  logger.error = () => {}; // bungkam log error yang memang diharapkan
+  try {
+    await connectionManager._persistIncoming({ ...wiredEvent, messageId: null }); // tidak lengkap
+    await connectionManager._persistIncoming({ ...wiredEvent, messageId: 'SIM-DUR-AFTER-INVALID' }); // valid
+  } finally {
+    logger.error = realError;
+  }
+  assert.strictEqual(incomingBuffer.countPending(), pendingBefore + 1, 'hanya pesan valid yang tersimpan');
+  console.log('OK: event tidak lengkap tidak menghalangi pesan berikutnya.');
+
+  console.log('\n--- 13c. AC-006: insert tak menghasilkan baris (ID belum ada) lewat jalur terima -> error tak terduga tercatat ---');
+  const realRun = incomingBuffer.insertStmt.run.bind(incomingBuffer.insertStmt);
+  incomingBuffer.insertStmt.run = () => ({ changes: 0 }); // simulasi baris hilang senyap
+  const unexpectedLogs = [];
+  logger.error = (message, meta) => unexpectedLogs.push({ message, meta });
+  try {
+    await connectionManager._persistIncoming({ ...wiredEvent, messageId: 'SIM-DUR-GHOST' });
+  } finally {
+    logger.error = realError;
+    incomingBuffer.insertStmt.run = realRun;
+  }
+  assert.ok(
+    unexpectedLogs.some((l) => /kondisi tak terduga/.test(l.meta?.error || '')),
+    'error tak terduga harus tercatat lengkap dengan alasannya'
+  );
+  assert.strictEqual(overflowBuffer.size(), 1, 'karena bukan validasi, event ditampung (tidak hilang senyap)');
+  overflowBuffer.items = []; // bersihkan singleton
+  console.log('OK: baris hilang senyap tercatat sebagai error tak terduga dan event tidak hilang.');
+
   // ---- TASK-005: integritas SQLite saat start (REQ-013, AC-011) + konfigurasi (GUD-001) ----
   const Database = require('better-sqlite3');
   const { IncomingBufferSqlite } = incomingBuffer;
