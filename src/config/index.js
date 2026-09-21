@@ -94,6 +94,14 @@ const config = {
   enqueueRetryDelaysMs: toIntList(process.env.ENQUEUE_RETRY_DELAYS_MS, [50, 200, 800]),
   enqueueOverflowMax: Math.max(1, toInt(process.env.ENQUEUE_OVERFLOW_MAX, 500)), // min 1: 0 = buang semua event
 
+  // M1 Wave 1 TASK-008 (REQ-003, GUD-001): daftar ID pesan yang Gateway kirim
+  // sendiri, dipakai menyaring event `append` kiriman sendiri (D-01/D-03).
+  // - ownSentTtlMs: masa berlaku ID (bawaan 10 menit).
+  // - ownSentMax: jumlah ID maksimum (bawaan 1000); min 1 supaya daftar tidak
+  //   pernah mengeluarkan ID yang baru dicatat.
+  ownSentTtlMs: toInt(process.env.OWN_SENT_TTL_MS, 600000),
+  ownSentMax: Math.max(1, toInt(process.env.OWN_SENT_MAX, 1000)),
+
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
 
