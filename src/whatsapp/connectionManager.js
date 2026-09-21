@@ -382,7 +382,13 @@ class ConnectionManager {
 
   async _onMessagesUpsert({ messages, type }, myGeneration) {
     if (myGeneration !== this.generation) return;
-    if (type !== 'notify') return; // hanya proses pesan baru real-time
+    // 'notify' = pesan real-time baru. 'append' = pesan yang dikirim ulang
+    // WhatsApp setelah reconnect (mis. Gateway sempat offline) -- Baileys
+    // sudah mengirim tanda terima untuk pesan ini, jadi kalau dibuang di
+    // sini pesan itu hilang permanen (lihat E-01,
+    // docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md). Tipe lain
+    // (mis. 'prepend' dari history sync) tetap diabaikan.
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
       try {
