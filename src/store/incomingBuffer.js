@@ -376,48 +376,87 @@ class IncomingBufferJsonFile {
       return;
     }
 
-    if (!fs.existsSync(this.filePath)) {
+    // M1 Wave 1 TASK-015 (REQ-017, AC-012): berkas utama tidak terbaca (korup,
+    // bentuk salah, atau hilang). Urutan: karantina berkas utama (bila ada) ->
+    // coba `.bak` -> kalau keduanya gagal, mulai kosong dengan error keras.
+    //
+    // Berkas utama yang korup dipindah LEBIH DULU, juga saat `.bak` berhasil
+    // memulihkan (spec hanya mewajibkan pemindahan bila keduanya gagal):
+    // itu menjaga bukti untuk diperiksa manual dan mencegah berkas korup itu
+    // disalin menimpa `.bak` yang masih baik pada penulisan berikutnya.
+    const mainExists = fs.existsSync(this.filePath);
+    let sizeBytes = null;
+    let quarantinePath = null;
+
+    if (mainExists) {
+      try {
+        sizeBytes = fs.statSync(this.filePath).size; // diukur SEBELUM dipindah
+      } catch (err) {
+        // ukuran tidak terbaca -- tetap lanjut karantina
+      }
+      const target = `${this.filePath}.corrupt-${Date.now()}`;
+      try {
+        fs.renameSync(this.filePath, target);
+        quarantinePath = target;
+      } catch (err) {
+        logger.error('File JSON incoming buffer tidak terbaca dan gagal dipindahkan', {
+          filePath: this.filePath,
+          sizeBytes,
+          error: err.message,
+        });
+      }
+    }
+
+    const recovered = this._tryLoadFrom(`${this.filePath}.bak`);
+    if (recovered) {
+      logger.warn(
+        mainExists
+          ? 'File JSON incoming buffer tidak terbaca, dipulihkan dari cadangan (.bak)'
+          : 'File JSON incoming buffer hilang, dipulihkan dari cadangan (.bak)',
+        {
+          filePath: this.filePath,
+          sizeBytes,
+          quarantinePath,
+          pendingSetelahPemulihan: recovered.rows.length,
+        }
+      );
+      this.rows = recovered.rows;
+      this.nextId = recovered.nextId;
+      return;
+    }
+
+    if (!mainExists) {
       // Belum pernah ada file sama sekali (bukan kasus korup) -- mulai kosong.
       this.rows = [];
       this.nextId = 1;
       return;
     }
 
-    const quarantinePath = `${this.filePath}.corrupt-${Date.now()}`;
-    try {
-      fs.renameSync(this.filePath, quarantinePath);
-      logger.error('File JSON incoming buffer korup, dipindahkan untuk diperiksa manual (bukan ditimpa)', {
-        quarantinePath,
-      });
-    } catch (err) {
-      logger.error('File JSON incoming buffer korup dan gagal dipindahkan', { error: err.message });
-    }
-
-    const recovered = this._tryLoadFrom(`${this.filePath}.bak`);
-    if (recovered) {
-      logger.warn('Pemulihan dari cadangan (.bak) berhasil setelah file utama korup', {
-        pendingSetelahPemulihan: recovered.rows.length,
-      });
-      this.rows = recovered.rows;
-      this.nextId = recovered.nextId;
-      return;
-    }
-
-    // Cadangan juga tidak ada/korup -- perilaku lama: jangan crash, mulai
-    // dari kosong. Lebih baik kehilangan antrian retry lama daripada
-    // Gateway tidak bisa start sama sekali.
-    logger.error('Cadangan (.bak) juga tidak tersedia/korup, memulai dari kosong');
+    // Berkas utama DAN cadangan sama-sama tidak bisa dipakai. Jangan crash:
+    // lebih baik kehilangan antrian retry lama daripada Gateway tidak bisa
+    // start sama sekali -- tapi harus terlihat keras, dengan ukuran berkas
+    // asli supaya tahu seberapa banyak yang mungkin hilang.
+    logger.error('[CRITICAL] File JSON incoming buffer DAN cadangannya (.bak) tidak bisa dipakai -- antrean dimulai dari kosong', {
+      severity: 'critical',
+      filePath: this.filePath,
+      sizeBytes,
+      quarantinePath,
+    });
     this.rows = [];
     this.nextId = 1;
   }
 
-  /** @returns {{rows: object[], nextId: number}|null} null kalau file tidak ada/tidak terbaca/korup. */
+  /** @returns {{rows: object[], nextId: number}|null} null kalau file tidak ada/tidak terbaca/korup/bentuk salah. */
   _tryLoadFrom(filePath) {
     try {
       if (!fs.existsSync(filePath)) return null;
       const raw = fs.readFileSync(filePath, 'utf8');
       const parsed = JSON.parse(raw);
-      const rows = Array.isArray(parsed.rows) ? parsed.rows : [];
+      // JSON yang valid tapi bentuknya salah ({}, [], null, ...) BUKAN berkas
+      // sehat: dianggap sehat, isinya akan dianggap "antrean kosong" dan
+      // hilang diam-diam. _persist() selalu menulis { nextId, rows: [...] }.
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.rows)) return null;
+      const rows = parsed.rows;
       const nextId = Number.isFinite(parsed.nextId)
         ? parsed.nextId
         : rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
@@ -439,14 +478,22 @@ class IncomingBufferJsonFile {
       return new Date(row.updated_at).getTime() > cutoff;
     });
 
-    // E-09: cadangkan isi file yang MASIH valid sebelum ditimpa, supaya
-    // ada sesuatu untuk dipulihkan kalau penulisan berikutnya korup di
-    // tengah jalan (mis. proses/HP mati tepat saat menulis). Best-effort
-    // & non-fatal -- kegagalan menyalin cadangan tidak boleh menghalangi
-    // penulisan utama.
+    // E-09 / REQ-016: cadangkan isi file yang MASIH valid sebelum ditimpa,
+    // supaya ada sesuatu untuk dipulihkan kalau penulisan berikutnya korup di
+    // tengah jalan (mis. proses/HP mati tepat saat menulis). Berkas utama
+    // diperiksa dulu: kalau ternyata sudah tidak valid (rusak di tengah
+    // operasi), TIDAK disalin -- kalau disalin, satu-satunya cadangan yang
+    // baik ikut tertimpa. Best-effort & non-fatal -- kegagalan menyalin
+    // cadangan tidak boleh menghalangi penulisan utama.
     try {
       if (fs.existsSync(this.filePath)) {
-        fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+        if (this._tryLoadFrom(this.filePath)) {
+          fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+        } else {
+          logger.warn('File JSON incoming buffer tidak valid saat akan dicadangkan; cadangan (.bak) lama TIDAK ditimpa', {
+            filePath: this.filePath,
+          });
+        }
       }
     } catch (err) {
       logger.warn('Gagal menyalin cadangan (.bak) file JSON incoming buffer (non-fatal)', { error: err.message });
