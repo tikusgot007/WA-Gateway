@@ -26,6 +26,10 @@ const VALID_STATUSES = [
   'error',
 ];
 
+// E-05: batas waktu query onWhatsApp() di _resolveLidForPhoneJid() -- lihat
+// docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md.
+const RESOLVE_LID_TIMEOUT_MS = 5000;
+
 /**
  * ConnectionManager bertanggung jawab penuh atas lifecycle koneksi WhatsApp:
  * - membuat/menutup socket Baileys
@@ -401,7 +405,64 @@ class ConnectionManager {
       } catch (err) {
         // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
         logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
+
+        // E-06 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
+        // sebelum fix ini, error apa pun sebelum enqueue (ekstraksi teks,
+        // media, LID, dst di dalam _handleIncomingMessage) berarti pesan
+        // hilang total -- Baileys sudah mengirim tanda terima (E-13), jadi
+        // tidak akan datang lagi. Fallback ini menyimpan identitas minimal
+        // pesan (ID, chat, waktu) SEBELUM pemrosesan lanjut yang gagal,
+        // supaya staf setidaknya tahu ADA pesan yang gagal diproses, bukan
+        // hilang tanpa jejak sama sekali. Best-effort & non-fatal --
+        // kegagalan di sini juga hanya dilog, tidak boleh menjatuhkan loop.
+        await this._enqueueMinimalFallback(msg, err);
       }
+    }
+  }
+
+  /**
+   * E-06 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): jalur
+   * cadangan dipanggil HANYA saat _handleIncomingMessage() melempar error
+   * SEBELUM sempat enqueue pesan aslinya. Menyimpan record minimal (tanpa
+   * teks/media -- itu bagian yang gagal diekstrak) supaya pesan tidak
+   * hilang tanpa jejak sama sekali. Kalau `msg.key?.id` sendiri kosong
+   * (tidak ada apa pun yang bisa diandalkan untuk idempotensi), cukup
+   * dilog -- tidak ada yang bisa disimpan dengan aman.
+   */
+  async _enqueueMinimalFallback(msg, originalErr) {
+    const messageId = msg.key?.id;
+    if (!messageId) {
+      logger.error('[DELIVERY] Pesan gagal diproses dan tidak punya ID -- tidak ada fallback yang bisa disimpan', {
+        error: originalErr.message,
+      });
+      return;
+    }
+
+    try {
+      await this._enqueueWithRetry({
+        messageId,
+        chatId: msg.key?.remoteJid || 'unknown',
+        jidType: classifyJid(msg.key?.remoteJid),
+        sender: {},
+        text: null,
+        messageType: 'text',
+        media: null,
+        identityHint: null,
+        timestamp: msg.messageTimestamp
+          ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
+          : new Date().toISOString(),
+        direction: msg.key?.fromMe ? 'outgoing' : 'incoming',
+      });
+      logger.warn('[DELIVERY] Pesan gagal diproses penuh, fallback minimal tersimpan (tanpa teks/media)', {
+        messageId,
+        processingError: originalErr.message,
+      });
+    } catch (fallbackErr) {
+      logger.error('[DELIVERY] Fallback minimal juga gagal -- pesan ini BENAR-BENAR hilang', {
+        messageId,
+        processingError: originalErr.message,
+        fallbackError: fallbackErr.message,
+      });
     }
   }
 
@@ -446,7 +507,19 @@ class ConnectionManager {
 
     if (this.isConnected()) {
       try {
-        const results = await this.sock.onWhatsApp(phoneJid);
+        // E-05 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
+        // sebelum fix ini, query ini di-`await` TANPA timeout -- karena
+        // _onMessagesUpsert() memproses pesan berurutan (bukan
+        // Promise.all), satu query yang tersangkut menahan SEMUA pesan
+        // berikutnya dalam batch sebelum sempat tersimpan. Timeout di
+        // sini membatasi jendela itu; resolusi LID tetap best-effort
+        // (non-fatal) seperti sebelumnya kalau timeout tercapai.
+        const results = await Promise.race([
+          this.sock.onWhatsApp(phoneJid),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('onWhatsApp() timeout')), RESOLVE_LID_TIMEOUT_MS)
+          ),
+        ]);
         const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
 
         if (match?.lid) {
