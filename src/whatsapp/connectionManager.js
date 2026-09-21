@@ -386,13 +386,17 @@ class ConnectionManager {
 
   async _onMessagesUpsert({ messages, type }, myGeneration) {
     if (myGeneration !== this.generation) return;
-    // 'notify' = pesan real-time baru. 'append' = pesan yang dikirim ulang
-    // WhatsApp setelah reconnect (mis. Gateway sempat offline) -- Baileys
-    // sudah mengirim tanda terima untuk pesan ini, jadi kalau dibuang di
-    // sini pesan itu hilang permanen (lihat E-01,
-    // docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md). Tipe lain
-    // (mis. 'prepend' dari history sync) tetap diabaikan.
-    if (type !== 'notify' && type !== 'append') return;
+    // E-01 DIREVERT (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
+    // sempat diubah untuk menerima type='append', tapi plan resmi
+    // (plan/plan-process-m1-wave1-incoming-reliability-v1.0.md, ALT-002)
+    // menemukan Baileys JUGA memancarkan 'append' untuk kiriman Gateway
+    // SENDIRI (lewat /send) sebelum sendMessage() selesai -- tanpa
+    // ownSentRegistry (TASK-008/009/010 di plan resmi) untuk menyaringnya,
+    // menerima 'append' di sini berisiko membuat setiap pesan yang dikirim
+    // dari POS ikut masuk ulang sebagai pesan keluar duplikat. Ditahan ke
+    // 'notify' saja sampai eksekusi plan resmi (dengan ownSentRegistry)
+    // selesai.
+    if (type !== 'notify') return;
 
     for (const msg of messages) {
       try {
@@ -405,64 +409,14 @@ class ConnectionManager {
       } catch (err) {
         // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
         logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
-
-        // E-06 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
-        // sebelum fix ini, error apa pun sebelum enqueue (ekstraksi teks,
-        // media, LID, dst di dalam _handleIncomingMessage) berarti pesan
-        // hilang total -- Baileys sudah mengirim tanda terima (E-13), jadi
-        // tidak akan datang lagi. Fallback ini menyimpan identitas minimal
-        // pesan (ID, chat, waktu) SEBELUM pemrosesan lanjut yang gagal,
-        // supaya staf setidaknya tahu ADA pesan yang gagal diproses, bukan
-        // hilang tanpa jejak sama sekali. Best-effort & non-fatal --
-        // kegagalan di sini juga hanya dilog, tidak boleh menjatuhkan loop.
-        await this._enqueueMinimalFallback(msg, err);
+        // E-06 DIREVERT: sempat ditambah fallback yang menyimpan pesan
+        // "minimal" (tanpa teks/media) di sini. Plan resmi
+        // (plan/plan-process-m1-wave1-incoming-reliability-v1.0.md,
+        // ALT-004) menolak eksplisit pendekatan ini -- kontrak AuliaPos
+        // menolak event tidak lengkap, jadi pesan minimal jadi poison
+        // message yang dicoba ulang tanpa batas. Ditahan ke sekadar log
+        // (perilaku lama) sampai dead-letter (gelombang 3 plan resmi) ada.
       }
-    }
-  }
-
-  /**
-   * E-06 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): jalur
-   * cadangan dipanggil HANYA saat _handleIncomingMessage() melempar error
-   * SEBELUM sempat enqueue pesan aslinya. Menyimpan record minimal (tanpa
-   * teks/media -- itu bagian yang gagal diekstrak) supaya pesan tidak
-   * hilang tanpa jejak sama sekali. Kalau `msg.key?.id` sendiri kosong
-   * (tidak ada apa pun yang bisa diandalkan untuk idempotensi), cukup
-   * dilog -- tidak ada yang bisa disimpan dengan aman.
-   */
-  async _enqueueMinimalFallback(msg, originalErr) {
-    const messageId = msg.key?.id;
-    if (!messageId) {
-      logger.error('[DELIVERY] Pesan gagal diproses dan tidak punya ID -- tidak ada fallback yang bisa disimpan', {
-        error: originalErr.message,
-      });
-      return;
-    }
-
-    try {
-      await this._enqueueWithRetry({
-        messageId,
-        chatId: msg.key?.remoteJid || 'unknown',
-        jidType: classifyJid(msg.key?.remoteJid),
-        sender: {},
-        text: null,
-        messageType: 'text',
-        media: null,
-        identityHint: null,
-        timestamp: msg.messageTimestamp
-          ? new Date(Number(msg.messageTimestamp) * 1000).toISOString()
-          : new Date().toISOString(),
-        direction: msg.key?.fromMe ? 'outgoing' : 'incoming',
-      });
-      logger.warn('[DELIVERY] Pesan gagal diproses penuh, fallback minimal tersimpan (tanpa teks/media)', {
-        messageId,
-        processingError: originalErr.message,
-      });
-    } catch (fallbackErr) {
-      logger.error('[DELIVERY] Fallback minimal juga gagal -- pesan ini BENAR-BENAR hilang', {
-        messageId,
-        processingError: originalErr.message,
-        fallbackError: fallbackErr.message,
-      });
     }
   }
 
