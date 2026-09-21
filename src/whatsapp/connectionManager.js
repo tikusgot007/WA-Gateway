@@ -466,6 +466,38 @@ class ConnectionManager {
     return resolvedLid;
   }
 
+  /**
+   * E-04 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): sebelum
+   * fix ini, satu kegagalan `incomingBuffer.enqueue()` (mis. database
+   * terkunci sesaat) langsung berarti pesan hilang -- tidak ada percobaan
+   * ulang sama sekali. Baileys sudah mengirim tanda terima untuk pesan
+   * yang sedang diproses di sini, jadi kegagalan enqueue TIDAK bisa
+   * ditutupi dengan pesan datang lagi (lihat E-13). Ini BUKAN pengganti
+   * durable buffer (Ticket 03) -- hanya memperkecil peluang kegagalan
+   * sesaat (lock/disk sibuk) berakhir jadi pesan hilang permanen.
+   */
+  async _enqueueWithRetry(event, attempts = 3, delayMs = 200) {
+    let lastErr;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        incomingBuffer.enqueue(event);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < attempts) {
+          logger.warn('[DELIVERY] enqueue gagal, mencoba ulang', {
+            messageId: event.messageId,
+            attempt,
+            attempts,
+            error: err.message,
+          });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   async _handleIncomingMessage(msg) {
     if (!msg.message) return; // pesan protokol/kosong (mis. reaction, receipt), abaikan untuk POC
 
@@ -634,14 +666,17 @@ class ConnectionManager {
     //   lewat POS, mencegah kasir lain mengira belum dibalas dan
     //   balas dobel.
     try {
-      incomingBuffer.enqueue({
+      await this._enqueueWithRetry({
         ...normalized,
         direction: fromMe ? 'outgoing' : 'incoming',
       });
     } catch (err) {
       // Gagal simpan ke SQLite tidak boleh menjatuhkan proses penerimaan
       // pesan WhatsApp itu sendiri -- cukup log sekeras mungkin karena ini
-      // berarti pesan BERISIKO tidak sampai ke POS.
+      // berarti pesan BERISIKO tidak sampai ke POS. Baileys sudah
+      // mengirim tanda terima, jadi pesan ini TIDAK akan datang lagi
+      // (lihat E-13) -- sudah dicoba ulang beberapa kali di
+      // _enqueueWithRetry() sebelum sampai ke sini (E-04).
       logger.error('[DELIVERY] GAGAL menyimpan pesan ke SQLite buffer -- pesan ini berisiko tidak sampai ke POS', {
         messageId: normalized.messageId,
         direction: fromMe ? 'outgoing' : 'incoming',

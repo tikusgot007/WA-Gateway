@@ -40,6 +40,29 @@ const logger = require('../logging');
  *   lebih dari cukup.
  */
 
+/**
+ * E-03 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): sebelum
+ * fix ini, `INSERT OR IGNORE` (SQLite) dan pengecekan duplikat manual
+ * (JSON fallback) membuang pelanggaran NOT NULL secara diam-diam --
+ * enqueue() tetap kembali normal padahal baris TIDAK tersimpan. Validasi
+ * field wajib di sini SEBELUM insert supaya kegagalan itu jadi Error yang
+ * dilempar (ditangkap oleh caller di connectionManager.js, lihat E-04),
+ * bukan hilang tanpa jejak. Duplikat wa_message_id (idempotensi normal,
+ * lihat E-10) TETAP diabaikan seperti sebelumnya -- itu bukan kegagalan.
+ */
+function assertRequiredFields(event) {
+  const missing = [];
+  if (!event.messageId) missing.push('messageId');
+  if (!event.chatId) missing.push('chatId');
+  if (!event.jidType) missing.push('jidType');
+  if (!event.timestamp) missing.push('timestamp');
+  if (missing.length > 0) {
+    throw new Error(
+      `incomingBuffer.enqueue: field wajib kosong/null (${missing.join(', ')}) -- pesan DITOLAK sebelum tersimpan, bukan diabaikan diam-diam`
+    );
+  }
+}
+
 class IncomingBufferSqlite {
   constructor(Database) {
     const dir = path.dirname(config.sqlitePath);
@@ -166,6 +189,7 @@ class IncomingBufferSqlite {
    * null untuk teks.
    */
   enqueue(event) {
+    assertRequiredFields(event);
     const now = new Date().toISOString();
     this.insertStmt.run({
       wa_message_id: event.messageId,
@@ -287,6 +311,8 @@ class IncomingBufferJsonFile {
   }
 
   enqueue(event) {
+    assertRequiredFields(event);
+
     if (this.rows.some((row) => row.wa_message_id === event.messageId)) {
       return; // INSERT OR IGNORE -- sudah pernah tercatat, abaikan (idempoten)
     }
