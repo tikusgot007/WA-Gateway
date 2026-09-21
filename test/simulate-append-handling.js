@@ -121,7 +121,130 @@ function cleanup() {
     assert.notStrictEqual(calls[0].options.messageId, calls[1].options.messageId);
     console.log('OK: dua kiriman, dua ID berbeda.');
 
-    console.log('\nSemua assert simulate-append-handling (bagian pencatatan ID) lolos.');
+    // ---- TASK-010: filter `append` di _onMessagesUpsert ----
+    const incomingBuffer = require('../src/store/incomingBuffer');
+    const logger = require('../src/logging');
+
+    const PN = '628111000201@s.whatsapp.net';
+    const LID = '12345678901234@lid';
+    const GROUP = '120363111111111111@g.us';
+    const CHANNEL = '120363999999999999@newsletter'; // terklasifikasi 'unknown'
+
+    const makeMsg = ({ id, jid = PN, fromMe = false, text = 'halo' }) => ({
+      key: { id, remoteJid: jid, fromMe },
+      message: { conversation: text },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      pushName: 'Pelanggan Tes',
+    });
+    const upsert = (type, messages) =>
+      connectionManager._onMessagesUpsert({ messages, type }, connectionManager.generation);
+    const rowsFor = (id) => incomingBuffer.db.prepare('SELECT * FROM incoming_queue WHERE wa_message_id = ?').all(id);
+
+    /** Tangkap log selama fn() (async) berjalan. */
+    async function captureLogs(fn) {
+      const captured = { debug: [], info: [], warn: [], error: [] };
+      const original = {};
+      for (const level of Object.keys(captured)) {
+        original[level] = logger[level];
+        logger[level] = (message, meta) => captured[level].push({ message, meta });
+      }
+      try {
+        await fn();
+      } finally {
+        for (const level of Object.keys(captured)) logger[level] = original[level];
+      }
+      return captured;
+    }
+
+    // Pemrosesan pesan tidak boleh menyentuh jaringan: anggap Gateway tidak connected.
+    connectionManager.status = 'disconnected';
+    connectionManager.sock = null;
+
+    console.log('\n--- 5. AC-002: `append` kiriman sendiri tiba SEBELUM sendMessage() kembali -> tidak ada baris ---');
+    let sentId;
+    connectionManager.status = 'connected';
+    connectionManager.sock = {
+      user: { id: '628111000999:1@s.whatsapp.net' },
+      async sendMessage(jid, content, options) {
+        sentId = options.messageId;
+        // Persis perilaku Baileys: `append` kiriman sendiri dipancarkan SEBELUM sendMessage() kembali.
+        await upsert('append', [makeMsg({ id: sentId, jid, fromMe: true, text: content.text })]);
+        return { key: { id: sentId }, message: {} };
+      },
+    };
+    await connectionManager.sendTextMessage(PN, 'balasan dari POS');
+    assert.ok(sentId, 'sendMessage terpanggil');
+    assert.strictEqual(rowsFor(sentId).length, 0, 'kiriman sendiri TIDAK boleh masuk buffer');
+    connectionManager.status = 'disconnected';
+    connectionManager.sock = null;
+    console.log('OK: append yang mendahului sendMessage() tersaring lewat ownSentRegistry.');
+
+    console.log('\n--- 6. AC-003: `append` fromMe (balasan dari HP saat Gateway mati) -> tersimpan sebagai outgoing ---');
+    await upsert('append', [makeMsg({ id: 'SIM-APP-HP-1', fromMe: true, text: 'dibalas dari HP' })]);
+    let rows = rowsFor('SIM-APP-HP-1');
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].direction, 'outgoing');
+    assert.strictEqual(rows[0].text, 'dibalas dari HP');
+    assert.strictEqual(ownSentRegistry.wasSentByUs('SIM-APP-HP-1'), false, 'bukan kiriman sendiri');
+    console.log('OK: tersimpan sebagai outgoing.');
+
+    console.log('\n--- 7. AC-004: pesan sama lewat notify lalu append -> satu baris, tanpa log error ---');
+    let logs = await captureLogs(async () => {
+      await upsert('notify', [makeMsg({ id: 'SIM-APP-DUP-1' })]);
+      await upsert('append', [makeMsg({ id: 'SIM-APP-DUP-1' })]);
+    });
+    assert.strictEqual(rowsFor('SIM-APP-DUP-1').length, 1, 'idempoten: satu baris');
+    assert.strictEqual(logs.error.length, 0, 'tidak boleh ada log error');
+    assert.strictEqual(logs.warn.length, 0, 'duplikat bukan peringatan');
+    console.log('OK: duplikat notify+append menjadi satu baris tanpa error.');
+
+    console.log('\n--- 8. AC-015: tipe selain notify/append -> tidak ada baris, hanya log debug ---');
+    for (const type of ['prepend', 'replace', undefined]) {
+      const id = `SIM-APP-TYPE-${type}`;
+      logs = await captureLogs(() => upsert(type, [makeMsg({ id })]));
+      assert.strictEqual(rowsFor(id).length, 0, `${type}: tidak boleh tersimpan`);
+      assert.strictEqual(logs.debug.length, 1, `${type}: satu log debug`);
+      assert.strictEqual(logs.info.length + logs.warn.length + logs.error.length, 0, `${type}: hanya debug`);
+    }
+    console.log('OK: prepend/replace/tanpa tipe diabaikan dengan log debug saja.');
+
+    console.log('\n--- 9. AC-017: append alamat unknown dilewati (log info); pn/lid/group tersimpan; notify unknown tetap diproses ---');
+    logs = await captureLogs(() => upsert('append', [makeMsg({ id: 'SIM-APP-CH-1', jid: CHANNEL })]));
+    assert.strictEqual(rowsFor('SIM-APP-CH-1').length, 0, 'append unknown dilewati');
+    assert.strictEqual(logs.info.length, 1);
+    assert.strictEqual(logs.info[0].meta.remoteJid, CHANNEL, 'log info berisi JID');
+    assert.strictEqual(logs.info[0].meta.messageId, 'SIM-APP-CH-1', 'log info berisi ID pesan');
+
+    for (const [id, jid, expected] of [
+      ['SIM-APP-PN-1', PN, 'pn'],
+      ['SIM-APP-LID-1', LID, 'lid'],
+      ['SIM-APP-GRP-1', GROUP, 'group'],
+    ]) {
+      await upsert('append', [makeMsg({ id, jid })]);
+      rows = rowsFor(id);
+      assert.strictEqual(rows.length, 1, `${expected}: tersimpan`);
+      assert.strictEqual(rows[0].jid_type, expected);
+    }
+
+    await upsert('notify', [makeMsg({ id: 'SIM-APP-CH-NOTIFY', jid: CHANNEL })]);
+    rows = rowsFor('SIM-APP-CH-NOTIFY');
+    assert.strictEqual(rows.length, 1, 'notify unknown tetap diproses seperti sebelum perubahan');
+    assert.strictEqual(rows[0].jid_type, 'unknown');
+    console.log('OK: unknown dilewati hanya untuk append; pn/lid/group tersimpan; notify tidak berubah.');
+
+    console.log('\n--- 10. Batch campuran append: yang tersaring tidak menghalangi yang lain ---');
+    ownSentRegistry.register('SIM-APP-MIX-OWN');
+    await upsert('append', [
+      makeMsg({ id: 'SIM-APP-MIX-OWN', fromMe: true }),
+      makeMsg({ id: 'SIM-APP-MIX-CH', jid: CHANNEL }),
+      makeMsg({ id: 'SIM-APP-MIX-OK' }),
+    ]);
+    assert.strictEqual(rowsFor('SIM-APP-MIX-OWN').length, 0);
+    assert.strictEqual(rowsFor('SIM-APP-MIX-CH').length, 0);
+    assert.strictEqual(rowsFor('SIM-APP-MIX-OK').length, 1, 'pesan sah dalam batch yang sama tetap tersimpan');
+    console.log('OK: satu batch, hanya yang sah tersimpan.');
+
+    console.log('\nSemua assert simulate-append-handling (pencatatan ID + filter append) lolos.');
   } finally {
     connectionManager.status = originalStatus;
     connectionManager.sock = originalSock;

@@ -390,20 +390,27 @@ class ConnectionManager {
 
   async _onMessagesUpsert({ messages, type }, myGeneration) {
     if (myGeneration !== this.generation) return;
-    // E-01 DIREVERT (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md):
-    // sempat diubah untuk menerima type='append', tapi plan resmi
-    // (plan/plan-process-m1-wave1-incoming-reliability-v1.0.md, ALT-002)
-    // menemukan Baileys JUGA memancarkan 'append' untuk kiriman Gateway
-    // SENDIRI (lewat /send) sebelum sendMessage() selesai -- tanpa
-    // ownSentRegistry (TASK-008/009/010 di plan resmi) untuk menyaringnya,
-    // menerima 'append' di sini berisiko membuat setiap pesan yang dikirim
-    // dari POS ikut masuk ulang sebagai pesan keluar duplikat. Ditahan ke
-    // 'notify' saja sampai eksekusi plan resmi (dengan ownSentRegistry)
-    // selesai.
-    if (type !== 'notify') return;
+    // M1 Wave 1 TASK-010 (REQ-001, E-01): proses 'notify' (real-time) DAN
+    // 'append' (pesan titipan yang WhatsApp kirim ulang setelah Gateway
+    // offline). Filter lama `type !== 'notify'` menghilangkan pesan yang tiba
+    // saat Gateway mati (terukur hilang 3/14 dan 3/15, spec Bagian 10).
+    // Tipe lain diabaikan dengan log debug.
+    //
+    // Filter 'append' JANGAN dilepas tanpa _shouldAcceptAppend(): Baileys juga
+    // memancarkan 'append' untuk kiriman Gateway SENDIRI (ALT-002), jadi tanpa
+    // penyaringan setiap balasan kasir masuk ulang sebagai pesan keluar ganda.
+    if (type !== 'notify' && type !== 'append') {
+      logger.debug('[CHAT] messages.upsert bertipe selain notify/append diabaikan', {
+        type,
+        jumlah: messages?.length ?? 0,
+      });
+      return;
+    }
 
     for (const msg of messages) {
       try {
+        if (type === 'append' && !this._shouldAcceptAppend(msg)) continue;
+
         // await SATU per SATU (bukan Promise.all) -- _handleIncomingMessage
         // sekarang bisa melakukan 1 query jaringan (onWhatsApp(), lihat
         // _resolveLidForPhoneJid()) untuk pesan PN pertama dari sebuah
@@ -422,6 +429,39 @@ class ConnectionManager {
         // (perilaku lama) sampai dead-letter (gelombang 3 plan resmi) ada.
       }
     }
+  }
+
+  /**
+   * M1 Wave 1 TASK-010: penyaring HANYA untuk event bertipe 'append'.
+   * Perilaku 'notify' TIDAK melewati fungsi ini dan tidak berubah.
+   *
+   * 1. Kiriman Gateway sendiri (ID ada di ownSentRegistry) -> dilewati, TIDAK
+   *    masuk buffer (REQ-002, D-01).
+   * 2. Alamat selain pn/lid/group (mis. channel yang terklasifikasi 'unknown')
+   *    -> dilewati dan dicatat info berisi JID + ID pesan (REQ-018, D-04).
+   * 3. Sisanya diproses seperti 'notify'; arah incoming/outgoing mengikuti
+   *    `fromMe` di _handleIncomingMessage() (REQ-004, termasuk balasan yang
+   *    diketik dari HP saat Gateway mati). Duplikat dengan 'notify' aman:
+   *    enqueue() idempoten lewat wa_message_id (REQ-005).
+   *
+   * @returns {boolean} true kalau pesan harus diproses.
+   */
+  _shouldAcceptAppend(msg) {
+    const messageId = msg.key?.id;
+
+    if (messageId && ownSentRegistry.wasSentByUs(messageId)) {
+      logger.debug('[CHAT] append kiriman Gateway sendiri dilewati (sudah tercatat di POS)', { messageId });
+      return false;
+    }
+
+    const remoteJid = msg.key?.remoteJid;
+    const jidType = classifyJid(remoteJid);
+    if (jidType !== 'pn' && jidType !== 'lid' && jidType !== 'group') {
+      logger.info('[CHAT] append beralamat non-pelanggan dilewati', { remoteJid, messageId, jidType });
+      return false;
+    }
+
+    return true;
   }
 
   /**
