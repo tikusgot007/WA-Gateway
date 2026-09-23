@@ -539,45 +539,48 @@ class ConnectionManager {
       this._lidFailureCache.delete(phoneJid);
     }
 
+    // Refactor TASK-203 (REQ-002, CR-13): belum connected -> tidak ada query,
+    // dan null TIDAK di-cache: itu bukan hasil query, jadi JID ini dicoba lagi
+    // begitu tersambung (bukan hilang sampai restart).
+    if (!this.isConnected()) return null;
+
     let resolvedLid = null;
 
-    if (this.isConnected()) {
-      let timer;
-      try {
-        // E-05 / REQ-014 (AC-010): query ini di-`await` di dalam loop pesan
-        // yang berurutan (_onMessagesUpsert), jadi satu query yang tersangkut
-        // menahan SEMUA pesan berikutnya dalam batch sebelum sempat tersimpan.
-        // Batas waktu config.lidLookupTimeoutMs (bawaan 2 detik) membatasi
-        // jendela itu; resolusi LID tetap best-effort (non-fatal). Timer
-        // dibersihkan di `finally` supaya tidak menahan proses saat query cepat.
-        const timeout = new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`onWhatsApp() timeout (${config.lidLookupTimeoutMs}ms)`)),
-            config.lidLookupTimeoutMs
-          );
-        });
-        const results = await Promise.race([this.sock.onWhatsApp(phoneJid), timeout]);
-        const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
+    let timer;
+    try {
+      // E-05 / REQ-014 (AC-010): query ini di-`await` di dalam loop pesan
+      // yang berurutan (_onMessagesUpsert), jadi satu query yang tersangkut
+      // menahan SEMUA pesan berikutnya dalam batch sebelum sempat tersimpan.
+      // Batas waktu config.lidLookupTimeoutMs (bawaan 2 detik) membatasi
+      // jendela itu; resolusi LID tetap best-effort (non-fatal). Timer
+      // dibersihkan di `finally` supaya tidak menahan proses saat query cepat.
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`onWhatsApp() timeout (${config.lidLookupTimeoutMs}ms)`)),
+          config.lidLookupTimeoutMs
+        );
+      });
+      const results = await Promise.race([this.sock.onWhatsApp(phoneJid), timeout]);
+      const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
 
-        if (match?.lid) {
-          const rawLid = String(match.lid);
-          // Normalisasi defensif -- lihat catatan kejujuran di atas.
-          resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
-        }
-      } catch (err) {
-        // KEGAGALAN (timeout/error): pesan tetap disimpan tanpa identity_hint,
-        // dicatat sebagai peringatan, dan JID ini masuk cache negatif -- TIDAK
-        // masuk _lidResolutionCache, jadi bisa dicoba lagi setelah TTL.
-        logger.warn('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp(); pesan disimpan tanpa identity_hint', {
-          phoneJid,
-          error: err.message,
-          negativeCacheMs: config.lidLookupNegativeTtlMs,
-        });
-        this._lidFailureCache.set(phoneJid, Date.now());
-        return null;
-      } finally {
-        clearTimeout(timer);
+      if (match?.lid) {
+        const rawLid = String(match.lid);
+        // Normalisasi defensif -- lihat catatan kejujuran di atas.
+        resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
       }
+    } catch (err) {
+      // KEGAGALAN (timeout/error): pesan tetap disimpan tanpa identity_hint,
+      // dicatat sebagai peringatan, dan JID ini masuk cache negatif -- TIDAK
+      // masuk _lidResolutionCache, jadi bisa dicoba lagi setelah TTL.
+      logger.warn('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp(); pesan disimpan tanpa identity_hint', {
+        phoneJid,
+        error: err.message,
+        negativeCacheMs: config.lidLookupNegativeTtlMs,
+      });
+      this._lidFailureCache.set(phoneJid, Date.now());
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
 
     this._lidResolutionCache.set(phoneJid, resolvedLid);

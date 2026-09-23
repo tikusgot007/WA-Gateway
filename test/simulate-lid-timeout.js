@@ -177,11 +177,18 @@ function cleanup() {
     console.log('\n--- Belum connected -> tidak ada query, tidak dianggap kegagalan ---');
     connectionManager.status = 'disconnected';
     const before = calls.length;
-    logs = await captureLogs(() => connectionManager._resolveLidForPhoneJid('628111000604@s.whatsapp.net'));
+    const PN_OFFLINE = '628111000604@s.whatsapp.net';
+    behavior[PN_OFFLINE] = 'ok';
+    logs = await captureLogs(() => connectionManager._resolveLidForPhoneJid(PN_OFFLINE));
     assert.strictEqual(calls.length, before, 'tidak memanggil onWhatsApp()');
     assert.strictEqual(logs.warn.length, 0);
+    // Refactor TASK-203 (REQ-002, CR-13): null saat belum connected TIDAK boleh di-cache permanen.
+    assert.strictEqual(connectionManager._lidResolutionCache.has(PN_OFFLINE), false, 'null tidak masuk cache permanen');
+    assert.strictEqual(connectionManager._lidFailureCache.has(PN_OFFLINE), false, 'bukan kegagalan query, tidak masuk cache negatif');
     connectionManager.status = 'connected';
-    console.log('OK: tanpa koneksi, tanpa query dan tanpa peringatan.');
+    assert.strictEqual(await connectionManager._resolveLidForPhoneJid(PN_OFFLINE), '99999999@lid', 'setelah connected hasil LID didapat');
+    assert.strictEqual(calls.length, before + 1, 'setelah connected onWhatsApp() dipanggil tepat sekali');
+    console.log('OK: tanpa koneksi, tanpa query/peringatan/cache; setelah connected query dijalankan.');
 
     console.log('\n--- Konfigurasi LID_LOOKUP_TIMEOUT_MS / LID_LOOKUP_NEGATIVE_TTL_MS (GUD-001) ---');
     const repoRoot = path.resolve(__dirname, '..');
