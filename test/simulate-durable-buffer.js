@@ -353,6 +353,94 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.strictEqual(readConfig({ ENQUEUE_OVERFLOW_MAX: 'x' })[1], 500, 'tidak valid -> bawaan');
   console.log('OK: bawaan, kustom, dan nilai tidak valid ditangani.');
 
+  // ---- Refactor Fase 1 (SEC-001, SEC-002, CR-01): database sehat TERKUNCI saat start ----
+  // Kunci eksklusif dari koneksi lain meniru CR-01 (instance Gateway kedua, DB browser, antivirus).
+  const lockDatabase = (dbPath) => {
+    const locker = new Database(dbPath);
+    locker.pragma('locking_mode = EXCLUSIVE');
+    locker.exec('BEGIN EXCLUSIVE');
+    return () => {
+      locker.exec('COMMIT');
+      locker.close();
+    };
+  };
+  // Timeout kecil HANYA di sisi uji (bawaan better-sqlite3 5 s); source tidak diubah (CR-05 di luar scope).
+  const FastDatabase = function FastDatabase(file, options) {
+    return new Database(file, { timeout: 100, ...options });
+  };
+
+  console.log('\n--- 18. SEC-001: database sehat TERKUNCI saat start -> melempar SQLITE_BUSY, TIDAK dikarantina ---');
+  const lockedPath = path.join(integrityDir, 'locked.sqlite');
+  sqliteBuf = new IncomingBufferSqlite(Database, lockedPath);
+  sqliteBuf.enqueue({ ...wiredEvent, messageId: 'SIM-DUR-L1' });
+  sqliteBuf.close();
+  let unlock = lockDatabase(lockedPath);
+  try {
+    logs = captureLogs(() => {
+      assert.throws(
+        () => new IncomingBufferSqlite(FastDatabase, lockedPath),
+        (err) => {
+          // Bukan EBUSY dari renameSync karantina: berkas tidak boleh disentuh sama sekali.
+          assert.strictEqual(err.code, 'SQLITE_BUSY', `error asli SQLite yang dilempar ulang (didapat ${err.code})`);
+          return true;
+        }
+      );
+    });
+  } finally {
+    unlock();
+  }
+  assert.deepStrictEqual(corruptFilesOf(lockedPath), [], 'database sehat tidak boleh dipindah ke .corrupt-');
+  assert.strictEqual(logs.error.length, 0, 'tidak ada log "korup"');
+  sqliteBuf = new IncomingBufferSqlite(Database, lockedPath);
+  assert.strictEqual(sqliteBuf.countPending(), 1, 'baris pending tetap di antrean aktif setelah kunci dilepas');
+  sqliteBuf.close();
+  console.log('OK: database terkunci dilempar ulang apa adanya, tidak dipindah, data utuh setelah kunci lepas.');
+
+  console.log('\n--- 19. SEC-001 regresi: berkas bukan database (SQLITE_NOTADB) -> TETAP dikarantina ---');
+  const notDbPath = path.join(integrityDir, 'notadb.sqlite');
+  fs.writeFileSync(notDbPath, 'ini bukan database SQLite');
+  logs = captureLogs(() => {
+    sqliteBuf = new IncomingBufferSqlite(Database, notDbPath);
+  });
+  assert.strictEqual(corruptFilesOf(notDbPath).length, 1, 'berkas dipindah ke .corrupt-, bukan dihapus');
+  assert.strictEqual(logs.error.length, 1, 'error keras tercatat');
+  assert.match(logs.error[0].meta.detail, /not a database/, 'jalur kode SQLITE_NOTADB');
+  assert.deepStrictEqual(sqliteBuf.enqueue({ ...wiredEvent, messageId: 'SIM-DUR-N1' }), { status: 'inserted' }, 'database baru berfungsi');
+  sqliteBuf.close();
+  console.log('OK: berkas bukan database tetap dikarantina dan database baru dibuat.');
+
+  console.log('\n--- 20. SEC-002: singleton pada database terkunci -> proses berhenti, log [CRITICAL], TANPA buffer JSON ---');
+  const childDir = path.join(tmpDir, 'singleton-locked');
+  fs.mkdirSync(childDir);
+  const childDbPath = path.join(childDir, 'gateway.sqlite');
+  sqliteBuf = new IncomingBufferSqlite(Database, childDbPath);
+  sqliteBuf.close();
+  // Anak MENYIMPAN satu pesan: bila singleton diam-diam pindah ke JSON, gateway.json pasti tertulis.
+  const childScript = `const b = require('./src/store/incomingBuffer');
+    b.enqueue(${JSON.stringify({ ...wiredEvent, messageId: 'SIM-DUR-CHILD-1' })});`;
+  let child;
+  unlock = lockDatabase(childDbPath);
+  try {
+    execFileSync(process.execPath, ['-e', childScript], {
+      cwd: repoRoot,
+      // LOG_FOLDER kosong: log ke stdout (yang ditangkap PM2) supaya asersi deterministik.
+      env: { ...process.env, SQLITE_PATH: childDbPath, CI4_BASE_URL: '', CI4_GATEWAY_TOKEN: '', LOG_FOLDER: '' },
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 60000,
+    });
+    child = { status: 0, output: '' };
+  } catch (err) {
+    child = { status: err.status, output: `${err.stdout}${err.stderr}` };
+  } finally {
+    unlock();
+  }
+  assert.ok(child.status !== 0 && child.status !== null, `proses anak harus exit non-zero (status=${child.status})`);
+  assert.match(child.output, /\[CRITICAL\] gagal membuka database SQLite incoming buffer/, 'log [CRITICAL] tercatat');
+  assert.deepStrictEqual(fs.readdirSync(childDir).filter((name) => name.includes('.json')), [], 'tidak ada berkas .json (tidak pindah ke JSON)');
+  assert.deepStrictEqual(corruptFilesOf(childDbPath), [], 'database terkunci tidak dikarantina');
+  console.log(`OK: proses anak exit ${child.status}, [CRITICAL] tercatat, tidak ada berkas .json.`);
+
   console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring + integritas) lolos.');
   cleanup(incomingBuffer);
 })().catch((err) => {
