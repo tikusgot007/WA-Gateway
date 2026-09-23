@@ -441,6 +441,47 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   assert.deepStrictEqual(corruptFilesOf(childDbPath), [], 'database terkunci tidak dikarantina');
   console.log(`OK: proses anak exit ${child.status}, [CRITICAL] tercatat, tidak ada berkas .json.`);
 
+  // ---- Refactor Fase 2 (PRN-001, CR-02): drain overflow tidak tertahan siklus kirim CI4 ----
+  console.log('\n--- 21. PRN-001: siklus kirim ke CI4 masih berjalan (isRunning) -> overflow TETAP terkuras ---');
+  const config = require('../src/config');
+  const realCi4 = { ...config.ci4 };
+  const realFetch = global.fetch;
+  const fetchCalls = [];
+  let releaseFetch;
+  // Kirim pertama ke CI4 menggantung sampai dilepas; kiriman sesudahnya langsung sukses.
+  global.fetch = () => {
+    fetchCalls.push(Date.now());
+    const reply = () => new Response(JSON.stringify({ status: 'success' }), { status: 200 });
+    if (fetchCalls.length > 1) return Promise.resolve(reply());
+    return new Promise((resolve) => {
+      releaseFetch = () => resolve(reply());
+    });
+  };
+  config.ci4.baseUrl = 'http://ci4.test.invalid';
+  config.ci4.gatewayToken = 'token-uji';
+  let firstTick;
+  try {
+    assert.ok(incomingBuffer.countPending() >= 1, 'prasyarat: ada event jatuh tempo untuk dikirim');
+    firstTick = incomingDelivery.tick(); // TIDAK di-await: berhenti di dalam fetch yang menggantung
+    assert.strictEqual(fetchCalls.length, 1, 'siklus pertama sedang menunggu CI4 (isRunning)');
+
+    overflowBuffer.push({ ...wiredEvent, messageId: 'SIM-DUR-DRAIN-BUSY' });
+    await incomingDelivery.tick(); // siklus kedua saat siklus pertama belum selesai
+    assert.strictEqual(overflowBuffer.size(), 0, 'overflow terkuras walau siklus kirim masih berjalan');
+    assert.ok(
+      incomingBuffer.db.prepare('SELECT 1 FROM incoming_queue WHERE wa_message_id = ?').get('SIM-DUR-DRAIN-BUSY'),
+      'event tersimpan di buffer utama'
+    );
+    assert.strictEqual(fetchCalls.length, 1, 'siklus kedua tidak ikut mengirim (cek isRunning tetap berlaku)');
+  } finally {
+    if (releaseFetch) releaseFetch();
+    await firstTick;
+    global.fetch = realFetch;
+    Object.assign(config.ci4, realCi4);
+    overflowBuffer.items = [];
+  }
+  console.log('OK: overflow terkuras ke buffer utama saat siklus kirim ke CI4 masih menggantung.');
+
   console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring + integritas) lolos.');
   cleanup(incomingBuffer);
 })().catch((err) => {
