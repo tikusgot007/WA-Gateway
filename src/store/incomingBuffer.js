@@ -70,12 +70,19 @@ function assertRequiredFields(event) {
  * SQLite dan pastikan integritasnya. `PRAGMA quick_check` dijalankan SEBELUM
  * pragma lain (berkas yang bukan database membuat pragma apa pun melempar),
  * lewat koneksi read-only (lihat checkIntegrity()).
- * Gagal (hasil bukan "ok", atau pragma melempar) -> berkas beserta `-wal` /
- * `-shm` DIPINDAH (bukan dihapus) ke `<nama>.corrupt-<waktu>` supaya bisa
- * diperiksa manual, database baru dibuat, dan error keras dicatat -- Gateway
- * tetap bisa start. `synchronous = FULL` selalu diatur (durabilitas penuh
- * setiap commit) pada database yang lolos maupun yang baru dibuat.
+ * Korup (hasil bukan "ok", atau error berkode SQLITE_CORRUPT/SQLITE_NOTADB)
+ * -> berkas beserta `-wal` / `-shm` DIPINDAH (bukan dihapus) ke
+ * `<nama>.corrupt-<waktu>` supaya bisa diperiksa manual, database baru dibuat,
+ * dan error keras dicatat -- Gateway tetap bisa start. `synchronous = FULL`
+ * selalu diatur (durabilitas penuh setiap commit) pada database yang lolos
+ * maupun yang baru dibuat.
+ * Error LAIN (mis. SQLITE_BUSY saat database sehat sedang dikunci proses lain,
+ * EPERM, EBUSY) BUKAN tanda korup: dilempar ulang tanpa memindah berkas apa
+ * pun (refactor SEC-001, CR-01), supaya antrean pending yang sehat tidak
+ * keluar dari antrean aktif.
  */
+const CORRUPT_ERROR_CODES = new Set(['SQLITE_CORRUPT', 'SQLITE_NOTADB']);
+
 function checkIntegrity(Database, dbPath) {
   // Berkas belum ada -> database baru akan dibuat, tidak ada yang diperiksa.
   if (!fs.existsSync(dbPath)) return { healthy: true };
@@ -89,7 +96,8 @@ function checkIntegrity(Database, dbPath) {
     const result = probe.pragma('quick_check', { simple: true });
     return result === 'ok' ? { healthy: true } : { healthy: false, detail: String(result) };
   } catch (err) {
-    return { healthy: false, detail: err.message };
+    if (CORRUPT_ERROR_CODES.has(err.code)) return { healthy: false, detail: err.message };
+    throw err;
   } finally {
     try {
       if (probe) probe.close();
