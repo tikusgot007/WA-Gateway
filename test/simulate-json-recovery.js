@@ -187,6 +187,23 @@ try {
   assert.deepStrictEqual(idsOf(f.json), ['A', 'B'], 'penulisan utama tetap berhasil');
   console.log('OK: kegagalan cadangan non-fatal.');
 
+  // Refactor TASK-205/206 (PRN-002, CR-03): dipindah dari simulate-e09-json-recovery.js #1
+  // (skrip lama itu menulis ke data/ repo, bukan folder sementara).
+  console.log('\n--- 9. Round trip normal: instance baru membaca berkas utama yang SEHAT apa adanya ---');
+  f = fixture();
+  buf = f.open();
+  buf.enqueue(makeEvent('A'));
+  buf.enqueue(makeEvent('B'));
+  logs = captureLogs(() => {
+    buf = f.open();
+  });
+  assert.strictEqual(buf.countPending(), 2, 'instance baru membaca {A,B} dari berkas utama, bukan dari .bak {A}');
+  assert.strictEqual(logs.warn.length + logs.error.length, 0, 'berkas sehat dibuka senyap');
+  assert.strictEqual(corruptFilesOf(f.dir).length, 0, 'berkas sehat tidak dikarantina');
+  buf.enqueue(makeEvent('C'));
+  assert.deepStrictEqual(idsOf(f.json), ['A', 'B', 'C'], 'penulisan berikutnya melanjutkan antrean yang dibaca');
+  console.log('OK: berkas sehat dibaca ulang {A,B} tanpa peringatan, lalu berlanjut {A,B,C}.');
+
   console.log('\nSemua assert simulate-json-recovery lolos.');
   cleanup();
 } catch (err) {

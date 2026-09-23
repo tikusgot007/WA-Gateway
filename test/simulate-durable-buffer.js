@@ -519,7 +519,9 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   console.log('OK: tersimpan pada percobaan ke-3, penampung sementara kosong.');
 
   console.log('\n--- 23. AC-008: enqueue gagal terus -> masuk overflow dengan TEPAT SATU log error ---');
+  let failingCalls = 0;
   incomingBuffer.enqueue = () => {
+    failingCalls += 1;
     throw new Error('simulasi database terkunci terus');
   };
   try {
@@ -527,7 +529,10 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   } finally {
     incomingBuffer.enqueue = realEnqueue;
   }
+  // Dari simulate-enqueue-failure.js #6 (TASK-205/206): jumlah percobaan lewat jalur terima asli.
+  assert.strictEqual(failingCalls, 4, '1 percobaan awal + 3 ulangan (REQ-009) lewat _persistIncoming()');
   assert.strictEqual(overflowBuffer.size(), 1, 'event masuk penampung sementara');
+  assert.strictEqual(overflowBuffer.items[0].messageId, 'SIM-DUR-AC008', 'event yang benar yang tertampung');
   // enqueueRetry juga mencatat error "setelah dicoba ulang"; yang diuji di sini log milik jalur overflow.
   const overflowErrors = logs.error.filter((l) => /GAGAL menyimpan pesan ke buffer utama/.test(l.message));
   assert.strictEqual(overflowErrors.length, 1, 'tepat satu log error "GAGAL menyimpan pesan ke buffer utama"');
