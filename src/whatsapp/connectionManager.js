@@ -14,6 +14,10 @@ const config = require('../config');
 const logger = require('../logging');
 const messageStore = require('./messageStore');
 const incomingBuffer = require('../store/incomingBuffer');
+const { enqueueWithRetry } = require('../store/enqueueRetry');
+const { EnqueueValidationError } = require('../store/enqueueValidationError');
+const { overflowBuffer } = require('../store/overflowBuffer');
+const { ownSentRegistry } = require('./ownSentRegistry');
 const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
 
@@ -72,6 +76,14 @@ class ConnectionManager {
     // (string), Value: JID LID hasil resolve (string) ATAU null kalau
     // tidak ada/gagal.
     this._lidResolutionCache = new Map();
+
+    // M1 Wave 1 TASK-013 (REQ-019): cache NEGATIF untuk KEGAGALAN query LID
+    // (timeout/error). Key: JID PN, Value: waktu gagal (ms epoch). Berbeda
+    // dari _lidResolutionCache di atas: entri di sini KEDALUWARSA setelah
+    // config.lidLookupNegativeTtlMs, supaya kegagalan sesaat tidak membuat JID
+    // itu tidak pernah dicoba lagi, tapi pesan-pesan beruntun dari JID yang
+    // sama tidak menunggu timeout berulang kali.
+    this._lidFailureCache = new Map();
   }
 
   getStatusSnapshot() {
@@ -382,10 +394,27 @@ class ConnectionManager {
 
   async _onMessagesUpsert({ messages, type }, myGeneration) {
     if (myGeneration !== this.generation) return;
-    if (type !== 'notify') return; // hanya proses pesan baru real-time
+    // M1 Wave 1 TASK-010 (REQ-001, E-01): proses 'notify' (real-time) DAN
+    // 'append' (pesan titipan yang WhatsApp kirim ulang setelah Gateway
+    // offline). Filter lama `type !== 'notify'` menghilangkan pesan yang tiba
+    // saat Gateway mati (terukur hilang 3/14 dan 3/15, spec Bagian 10).
+    // Tipe lain diabaikan dengan log debug.
+    //
+    // Filter 'append' JANGAN dilepas tanpa _shouldAcceptAppend(): Baileys juga
+    // memancarkan 'append' untuk kiriman Gateway SENDIRI (ALT-002), jadi tanpa
+    // penyaringan setiap balasan kasir masuk ulang sebagai pesan keluar ganda.
+    if (type !== 'notify' && type !== 'append') {
+      logger.debug('[CHAT] messages.upsert bertipe selain notify/append diabaikan', {
+        type,
+        jumlah: messages?.length ?? 0,
+      });
+      return;
+    }
 
     for (const msg of messages) {
       try {
+        if (type === 'append' && !this._shouldAcceptAppend(msg)) continue;
+
         // await SATU per SATU (bukan Promise.all) -- _handleIncomingMessage
         // sekarang bisa melakukan 1 query jaringan (onWhatsApp(), lihat
         // _resolveLidForPhoneJid()) untuk pesan PN pertama dari sebuah
@@ -393,10 +422,75 @@ class ConnectionManager {
         // WhatsApp dengan query paralel kalau banyak pesan masuk sekaligus.
         await this._handleIncomingMessage(msg);
       } catch (err) {
-        // Satu pesan gagal diproses tidak boleh menjatuhkan gateway.
-        logger.error('Gagal memproses satu pesan masuk, dilewati', { error: err.message });
+        // Satu pesan gagal diproses tidak boleh menjatuhkan gateway, dan pesan
+        // LAIN dalam batch yang sama tetap diproses (loop lanjut ke pesan
+        // berikutnya). M1 Wave 1 TASK-014 (REQ-015, GUD-002): catat cukup
+        // konteks untuk melacak pesan mana yang hilang -- ID pesan, JID, dan
+        // tipe konten -- karena Baileys sudah mengirim tanda terima sehingga
+        // pesan ini TIDAK akan datang lagi.
+        logger.error('Gagal memproses satu pesan masuk, dilewati', {
+          messageId: msg?.key?.id ?? null,
+          jid: msg?.key?.remoteJid ?? null,
+          contentType: this._describeContentType(msg),
+          upsertType: type,
+          error: err.message,
+        });
+        // E-06 DIREVERT: sempat ditambah fallback yang menyimpan pesan
+        // "minimal" (tanpa teks/media) di sini. Plan resmi
+        // (plan/plan-process-m1-wave1-incoming-reliability-v1.0.md,
+        // ALT-004) menolak eksplisit pendekatan ini -- kontrak AuliaPos
+        // menolak event tidak lengkap, jadi pesan minimal jadi poison
+        // message yang dicoba ulang tanpa batas. Ditahan ke sekadar log
+        // (perilaku lama) sampai dead-letter (gelombang 3 plan resmi) ada.
       }
     }
+  }
+
+  /**
+   * M1 Wave 1 TASK-014: tipe konten pesan Baileys (kunci pertama `msg.message`,
+   * mis. 'conversation', 'imageMessage', 'ephemeralMessage') untuk log error.
+   * Tidak pernah melempar: dipanggil DI DALAM catch, jadi kegagalannya sendiri
+   * tidak boleh menutupi error asli atau menghentikan batch.
+   */
+  _describeContentType(msg) {
+    try {
+      return Object.keys(msg?.message || {})[0] ?? null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * M1 Wave 1 TASK-010: penyaring HANYA untuk event bertipe 'append'.
+   * Perilaku 'notify' TIDAK melewati fungsi ini dan tidak berubah.
+   *
+   * 1. Kiriman Gateway sendiri (ID ada di ownSentRegistry) -> dilewati, TIDAK
+   *    masuk buffer (REQ-002, D-01).
+   * 2. Alamat selain pn/lid/group (mis. channel yang terklasifikasi 'unknown')
+   *    -> dilewati dan dicatat info berisi JID + ID pesan (REQ-018, D-04).
+   * 3. Sisanya diproses seperti 'notify'; arah incoming/outgoing mengikuti
+   *    `fromMe` di _handleIncomingMessage() (REQ-004, termasuk balasan yang
+   *    diketik dari HP saat Gateway mati). Duplikat dengan 'notify' aman:
+   *    enqueue() idempoten lewat wa_message_id (REQ-005).
+   *
+   * @returns {boolean} true kalau pesan harus diproses.
+   */
+  _shouldAcceptAppend(msg) {
+    const messageId = msg.key?.id;
+
+    if (messageId && ownSentRegistry.wasSentByUs(messageId)) {
+      logger.debug('[CHAT] append kiriman Gateway sendiri dilewati (sudah tercatat di POS)', { messageId });
+      return false;
+    }
+
+    const remoteJid = msg.key?.remoteJid;
+    const jidType = classifyJid(remoteJid);
+    if (jidType !== 'pn' && jidType !== 'lid' && jidType !== 'group') {
+      logger.info('[CHAT] append beralamat non-pelanggan dilewati', { remoteJid, messageId, jidType });
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -436,28 +530,102 @@ class ConnectionManager {
       return this._lidResolutionCache.get(phoneJid);
     }
 
+    // M1 Wave 1 TASK-013 (REQ-019, AC-018): JID yang query-nya BARU gagal
+    // dilewati TANPA memanggil onWhatsApp() dan tanpa menunggu timeout, selama
+    // masa cache negatif belum lewat. Sesudahnya dicoba lagi.
+    const failedAt = this._lidFailureCache.get(phoneJid);
+    if (failedAt !== undefined) {
+      if (Date.now() - failedAt < config.lidLookupNegativeTtlMs) return null;
+      this._lidFailureCache.delete(phoneJid);
+    }
+
+    // Refactor TASK-203 (REQ-002, CR-13): belum connected -> tidak ada query,
+    // dan null TIDAK di-cache: itu bukan hasil query, jadi JID ini dicoba lagi
+    // begitu tersambung (bukan hilang sampai restart).
+    if (!this.isConnected()) return null;
+
     let resolvedLid = null;
 
-    if (this.isConnected()) {
-      try {
-        const results = await this.sock.onWhatsApp(phoneJid);
-        const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
+    let timer;
+    try {
+      // E-05 / REQ-014 (AC-010): query ini di-`await` di dalam loop pesan
+      // yang berurutan (_onMessagesUpsert), jadi satu query yang tersangkut
+      // menahan SEMUA pesan berikutnya dalam batch sebelum sempat tersimpan.
+      // Batas waktu config.lidLookupTimeoutMs (bawaan 2 detik) membatasi
+      // jendela itu; resolusi LID tetap best-effort (non-fatal). Timer
+      // dibersihkan di `finally` supaya tidak menahan proses saat query cepat.
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`onWhatsApp() timeout (${config.lidLookupTimeoutMs}ms)`)),
+          config.lidLookupTimeoutMs
+        );
+      });
+      const results = await Promise.race([this.sock.onWhatsApp(phoneJid), timeout]);
+      const match = Array.isArray(results) ? results.find((r) => r?.lid) : null;
 
-        if (match?.lid) {
-          const rawLid = String(match.lid);
-          // Normalisasi defensif -- lihat catatan kejujuran di atas.
-          resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
-        }
-      } catch (err) {
-        logger.debug('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp() (non-fatal, dilewati)', {
-          phoneJid,
-          error: err.message,
-        });
+      if (match?.lid) {
+        const rawLid = String(match.lid);
+        // Normalisasi defensif -- lihat catatan kejujuran di atas.
+        resolvedLid = rawLid.includes('@') ? rawLid : `${rawLid}@lid`;
       }
+    } catch (err) {
+      // KEGAGALAN (timeout/error): pesan tetap disimpan tanpa identity_hint,
+      // dicatat sebagai peringatan, dan JID ini masuk cache negatif -- TIDAK
+      // masuk _lidResolutionCache, jadi bisa dicoba lagi setelah TTL.
+      logger.warn('[IDENTITY] gagal resolve LID untuk PN via onWhatsApp(); pesan disimpan tanpa identity_hint', {
+        phoneJid,
+        error: err.message,
+        negativeCacheMs: config.lidLookupNegativeTtlMs,
+      });
+      this._lidFailureCache.set(phoneJid, Date.now());
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
 
     this._lidResolutionCache.set(phoneJid, resolvedLid);
     return resolvedLid;
+  }
+
+  /**
+   * M1 Wave 1 TASK-004 (REQ-006, REQ-009, REQ-010, REQ-011; menggantikan
+   * `_enqueueWithRetry` ad-hoc E-04). Menyimpan satu event ke buffer utama:
+   *
+   * 1. Coba `enqueueWithRetry()` (1 percobaan + ulangan berjeda, TASK-002).
+   * 2. Semua percobaan gagal (kegagalan penyimpanan) -> event DITAMPUNG di
+   *    `overflowBuffer` dan error keras dicatat; siklus worker berikutnya
+   *    (incomingDelivery.js) mengurasnya kembali ke buffer utama.
+   * 3. Event TIDAK LENGKAP (EnqueueValidationError) tidak akan pernah
+   *    berhasil, jadi TIDAK ditampung -- hanya dicatat error keras berisi
+   *    alasan dan kunci pesan (REQ-006).
+   *
+   * Baileys sudah mengirim tanda terima untuk pesan yang sedang diproses di
+   * sini, jadi pesan ini TIDAK akan datang lagi (E-13) -- karena itu kegagalan
+   * tidak boleh senyap. Tidak pernah melempar: satu pesan yang gagal tidak
+   * boleh menjatuhkan penerimaan pesan WhatsApp lainnya.
+   */
+  async _persistIncoming(event) {
+    try {
+      await enqueueWithRetry(incomingBuffer, event, config.enqueueRetryDelaysMs);
+    } catch (err) {
+      if (err instanceof EnqueueValidationError) {
+        logger.error('[DELIVERY] pesan DITOLAK sebelum tersimpan: field wajib kosong -- pesan ini hilang', {
+          messageId: event.messageId,
+          chatId: event.chatId,
+          missing: err.missing,
+        });
+        return;
+      }
+
+      const dropped = overflowBuffer.push(event);
+      logger.error('[DELIVERY] GAGAL menyimpan pesan ke buffer utama setelah dicoba ulang -- berisiko tidak sampai ke POS', {
+        messageId: event.messageId,
+        direction: event.direction,
+        overflowSize: overflowBuffer.size(),
+        droppedFromOverflow: dropped,
+        error: err.message,
+      });
+    }
   }
 
   async _handleIncomingMessage(msg) {
@@ -627,21 +795,12 @@ class ConnectionManager {
     //   merefleksikan kenyataan percakapan walau balasannya tidak
     //   lewat POS, mencegah kasir lain mengira belum dibalas dan
     //   balas dobel.
-    try {
-      incomingBuffer.enqueue({
-        ...normalized,
-        direction: fromMe ? 'outgoing' : 'incoming',
-      });
-    } catch (err) {
-      // Gagal simpan ke SQLite tidak boleh menjatuhkan proses penerimaan
-      // pesan WhatsApp itu sendiri -- cukup log sekeras mungkin karena ini
-      // berarti pesan BERISIKO tidak sampai ke POS.
-      logger.error('[DELIVERY] GAGAL menyimpan pesan ke SQLite buffer -- pesan ini berisiko tidak sampai ke POS', {
-        messageId: normalized.messageId,
-        direction: fromMe ? 'outgoing' : 'incoming',
-        error: err.message,
-      });
-    }
+    // Kegagalan simpan ditangani di _persistIncoming() (retry -> overflow
+    // buffer, TASK-004); metode itu tidak pernah melempar.
+    await this._persistIncoming({
+      ...normalized,
+      direction: fromMe ? 'outgoing' : 'incoming',
+    });
 
     logger.info('[CHAT] pesan masuk diterima', {
       chatId: normalized.chatId,
@@ -657,6 +816,25 @@ class ConnectionManager {
 
   isConnected() {
     return this.status === 'connected' && Boolean(this.sock);
+  }
+
+  /**
+   * M1 Wave 1 TASK-009 (REQ-003, D-03): tentukan ID pesan SEBELUM kirim dan
+   * catat ke ownSentRegistry. WAJIB dipanggil SEBELUM `await sock.sendMessage()`
+   * (RISK-001): Baileys memancarkan `append` untuk kiriman sendiri lewat
+   * process.nextTick TEPAT SEBELUM sendMessage() kembali, jadi mencatat ID
+   * setelah kirim kalah balapan dan filter `append` (TASK-010) akan mencatat
+   * ulang balasan kasir sebagai pesan ganda.
+   *
+   * ID diteruskan ke Baileys lewat opsi `messageId`, yang menimpa ID otomatis
+   * (dibaca dari messages-send.js: `messageId: generateMessageIDV2(...),
+   * ...options`). ID tetap tercatat walau pengiriman gagal -- tidak berbahaya.
+   */
+  _registerOwnSentId() {
+    const { generateMessageIDV2 } = getBaileys();
+    const messageId = generateMessageIDV2(this.sock?.user?.id);
+    ownSentRegistry.register(messageId);
+    return messageId;
   }
 
   /**
@@ -679,7 +857,8 @@ class ConnectionManager {
     logger.info('[SEND] mengirim pesan keluar', { targetJid: jid, jidType });
 
     try {
-      const result = await this.sock.sendMessage(jid, { text });
+      const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
+      const result = await this.sock.sendMessage(jid, { text }, { messageId: ownMessageId });
       logger.info('[SEND] pesan berhasil dikirim', {
         targetJid: jid,
         jidType,
@@ -797,7 +976,8 @@ class ConnectionManager {
     });
 
     try {
-      const result = await this.sock.sendMessage(jid, content);
+      const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
+      const result = await this.sock.sendMessage(jid, content, { messageId: ownMessageId });
 
       // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
       // directPath/mediaKey asli dari server WhatsApp untuk file yang baru

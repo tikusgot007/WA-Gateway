@@ -3,6 +3,7 @@
 const config = require('../config');
 const logger = require('../logging');
 const incomingBuffer = require('../store/incomingBuffer');
+const { overflowBuffer } = require('../store/overflowBuffer');
 const { postToCI4 } = require('./ci4Client');
 
 /**
@@ -66,7 +67,19 @@ async function deliverOne(event) {
 }
 
 async function tick() {
-  if (isRunning) return; // batch sebelumnya masih jalan, lewati siklus ini
+  // M1 Wave 1 TASK-004 (REQ-011): kuras penampung sementara ke buffer utama
+  // di AWAL siklus, sebelum mengambil event yang jatuh tempo. Satu percobaan
+  // per event tanpa jeda; yang masih gagal tetap tertampung untuk siklus
+  // berikutnya. Refactor TASK-201 (CR-02): sengaja SEBELUM cek `isRunning`
+  // dan cek konfigurasi CI4 -- ini hanya penyimpanan lokal (sinkron), jadi
+  // tidak boleh tertahan oleh siklus kirim ke CI4 yang sedang lambat.
+  try {
+    overflowBuffer.drain((event) => incomingBuffer.enqueue(event));
+  } catch (err) {
+    logger.error('[DELIVERY] error tak terduga saat menguras penampung sementara', { error: err.message });
+  }
+
+  if (isRunning) return; // batch sebelumnya masih jalan, lewati pengiriman siklus ini
   isRunning = true;
 
   try {
@@ -107,4 +120,6 @@ function stop() {
   }
 }
 
-module.exports = { start, stop };
+// `tick` diekspos supaya test/simulate-*.js bisa memanggil satu siklus worker
+// secara langsung (deterministik, tanpa menunggu timer nyata).
+module.exports = { start, stop, tick };

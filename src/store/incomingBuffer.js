@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const logger = require('../logging');
+const { EnqueueValidationError } = require('./enqueueValidationError');
 
 /**
  * Reliability buffer untuk pesan MASUK **maupun** pesan KELUAR yang
@@ -40,13 +41,108 @@ const logger = require('../logging');
  *   lebih dari cukup.
  */
 
+/**
+ * E-03 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md): sebelum
+ * fix ini, `INSERT OR IGNORE` (SQLite) dan pengecekan duplikat manual
+ * (JSON fallback) membuang pelanggaran NOT NULL secara diam-diam --
+ * enqueue() tetap kembali normal padahal baris TIDAK tersimpan. Validasi
+ * field wajib di sini SEBELUM insert supaya kegagalan itu jadi Error yang
+ * dilempar (ditangkap oleh caller di connectionManager.js, lihat E-04),
+ * bukan hilang tanpa jejak. Duplikat wa_message_id (idempotensi normal,
+ * lihat E-10) TETAP diabaikan seperti sebelumnya -- itu bukan kegagalan.
+ */
+
+function assertRequiredFields(event) {
+  const missing = [];
+  if (!event.messageId) missing.push('messageId');
+  if (!event.chatId) missing.push('chatId');
+  if (!event.jidType) missing.push('jidType');
+  if (!event.messageType) missing.push('messageType');
+  if (!event.timestamp) missing.push('timestamp');
+  if (missing.length > 0) {
+    throw new EnqueueValidationError(missing);
+  }
+}
+
+/**
+ * M1 Wave 1 TASK-005 (REQ-013, AC-011, ASSUMPTION "pesan di database korup
+ * dianggap hilang dari antrean aktif tapi berkasnya dipindah"): buka database
+ * SQLite dan pastikan integritasnya. `PRAGMA quick_check` dijalankan SEBELUM
+ * pragma lain (berkas yang bukan database membuat pragma apa pun melempar),
+ * lewat koneksi read-only (lihat checkIntegrity()).
+ * Korup (hasil bukan "ok", atau error berkode SQLITE_CORRUPT/SQLITE_NOTADB)
+ * -> berkas beserta `-wal` / `-shm` DIPINDAH (bukan dihapus) ke
+ * `<nama>.corrupt-<waktu>` supaya bisa diperiksa manual, database baru dibuat,
+ * dan error keras dicatat -- Gateway tetap bisa start. `synchronous = FULL`
+ * selalu diatur (durabilitas penuh setiap commit) pada database yang lolos
+ * maupun yang baru dibuat.
+ * Error LAIN (mis. SQLITE_BUSY saat database sehat sedang dikunci proses lain,
+ * EPERM, EBUSY) BUKAN tanda korup: dilempar ulang tanpa memindah berkas apa
+ * pun (refactor SEC-001, CR-01), supaya antrean pending yang sehat tidak
+ * keluar dari antrean aktif.
+ */
+const CORRUPT_ERROR_CODES = new Set(['SQLITE_CORRUPT', 'SQLITE_NOTADB']);
+
+function checkIntegrity(Database, dbPath) {
+  // Berkas belum ada -> database baru akan dibuat, tidak ada yang diperiksa.
+  if (!fs.existsSync(dbPath)) return { healthy: true };
+
+  // Koneksi READ-ONLY sengaja: koneksi tulis yang ditutup membuat SQLite
+  // membersihkan (menghapus) `-wal`/`-shm` sendiri, padahal untuk database
+  // korup berkas itu harus tetap ada supaya bisa dipindah utuh (REQ-013).
+  let probe;
+  try {
+    probe = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const result = probe.pragma('quick_check', { simple: true });
+    return result === 'ok' ? { healthy: true } : { healthy: false, detail: String(result) };
+  } catch (err) {
+    if (CORRUPT_ERROR_CODES.has(err.code)) return { healthy: false, detail: err.message };
+    throw err;
+  } finally {
+    try {
+      if (probe) probe.close();
+    } catch (err) {
+      // abaikan
+    }
+  }
+}
+
+function openVerifiedDatabase(Database, dbPath) {
+  const { healthy, detail } = checkIntegrity(Database, dbPath);
+
+  if (!healthy) {
+    const stamp = Date.now();
+    const moved = [];
+    for (const suffix of ['', '-wal', '-shm']) {
+      const source = `${dbPath}${suffix}`;
+      if (!fs.existsSync(source)) continue;
+      const target = `${source}.corrupt-${stamp}`;
+      fs.renameSync(source, target);
+      moved.push(target);
+    }
+    logger.error('[CRITICAL] database SQLite incoming buffer korup -- dipindahkan untuk diperiksa manual, database baru dibuat', {
+      severity: 'critical',
+      dbPath,
+      moved,
+      detail,
+    });
+  }
+
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL'); // lebih tahan terhadap crash mendadak
+  db.pragma('synchronous = FULL');
+  return db;
+}
+
 class IncomingBufferSqlite {
-  constructor(Database) {
-    const dir = path.dirname(config.sqlitePath);
+  // dbPath bisa disuntik supaya kelas ini testable terisolasi (TASK-001);
+  // pemakaian normal aplikasi tetap memakai config.sqlitePath.
+  constructor(Database, dbPath = config.sqlitePath) {
+    const dir = path.dirname(dbPath);
     fs.mkdirSync(dir, { recursive: true });
 
-    this.db = new Database(config.sqlitePath);
-    this.db.pragma('journal_mode = WAL'); // lebih tahan terhadap crash mendadak
+    this.dbPath = dbPath;
+    this.db = openVerifiedDatabase(Database, dbPath);
 
     this._migrate();
 
@@ -59,6 +155,10 @@ class IncomingBufferSqlite {
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid,
          @message_type, @text, @media_json, @identity_hint_json, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
+    `);
+
+    this.existsStmt = this.db.prepare(`
+      SELECT 1 FROM incoming_queue WHERE wa_message_id = @wa_message_id
     `);
 
     this.getDueStmt = this.db.prepare(`
@@ -84,7 +184,7 @@ class IncomingBufferSqlite {
     `);
 
     logger.info('SQLite incoming buffer siap', {
-      path: config.sqlitePath,
+      path: dbPath,
       pendingSaatStartup: this.countPending(),
     });
   }
@@ -164,17 +264,26 @@ class IncomingBufferSqlite {
    * ringan ({mimetype, fileLength}, TANPA referensi download -- binary-
    * nya tidak pernah diambil sama sekali, lihat _handleIncomingMessage()).
    * null untuk teks.
+   *
+   * TASK-001 (REQ-006/007/008): event tidak lengkap -> EnqueueValidationError
+   * (tanpa insert). Hasil insert diperiksa: kalau tidak ada baris baru dan
+   * wa_message_id sudah ada -> {status:'duplicate'} (sah, idempoten); kalau
+   * belum ada -> Error tak terduga (baris hilang senyap tidak boleh lolos).
+   * Sukses -> {status:'inserted'}.
+   *
+   * @returns {{status: 'inserted'|'duplicate'}}
    */
   enqueue(event) {
+    assertRequiredFields(event);
     const now = new Date().toISOString();
-    this.insertStmt.run({
+    const info = this.insertStmt.run({
       wa_message_id: event.messageId,
       chat_id: event.chatId,
       jid_type: event.jidType,
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
       sender_jid: event.sender?.jid ?? null,
-      message_type: event.messageType || 'text',
+      message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
@@ -183,6 +292,16 @@ class IncomingBufferSqlite {
       next_attempt_at: now, // langsung boleh dicoba kirim saat itu juga
       now,
     });
+
+    if (info.changes > 0) return { status: 'inserted' };
+
+    if (this.existsStmt.get({ wa_message_id: event.messageId })) {
+      return { status: 'duplicate' };
+    }
+
+    throw new Error(
+      `incomingBuffer.enqueue: INSERT tidak menghasilkan baris padahal wa_message_id ${event.messageId} belum ada -- kondisi tak terduga`
+    );
   }
 
   /** Ambil event yang sudah waktunya dicoba kirim (pending atau failed yang sudah lewat backoff-nya). */
@@ -231,11 +350,11 @@ class IncomingBufferSqlite {
  * mati (mis. Android mematikan proses) di tengah penulisan.
  */
 class IncomingBufferJsonFile {
-  constructor() {
-    const dir = path.dirname(config.sqlitePath);
+  constructor(sqlitePath = config.sqlitePath) {
+    const dir = path.dirname(sqlitePath);
     fs.mkdirSync(dir, { recursive: true });
 
-    this.filePath = config.sqlitePath.replace(/\.sqlite$/i, '') + '.json';
+    this.filePath = sqlitePath.replace(/\.sqlite$/i, '') + '.json';
     this.nextId = 1;
     this.rows = [];
 
@@ -247,26 +366,112 @@ class IncomingBufferJsonFile {
     });
   }
 
+  /**
+   * E-09 (docs/decisions/2026-09-21-m1-ticket02-audit-enqueue.md, P0 #2):
+   * sebelum fix ini, file utama yang korup langsung menyebabkan antrean
+   * dimulai dari kosong TANPA cadangan -- penulisan berikutnya lalu
+   * menimpa file lama yang sebenarnya masih ada isinya. Sekarang: file
+   * utama yang korup dipindahkan (dikarantina) alih-alih dibiarkan
+   * ditimpa, lalu dicoba dipulihkan dari cadangan (`.bak`, ditulis di
+   * `_persist()` sebelum file utama ditimpa). Kalau cadangan juga tidak
+   * ada/korup, baru mulai dari kosong seperti perilaku lama.
+   */
   _load() {
-    try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf8');
-        const parsed = JSON.parse(raw);
-        this.rows = Array.isArray(parsed.rows) ? parsed.rows : [];
-        this.nextId = Number.isFinite(parsed.nextId) ? parsed.nextId : this._computeNextId();
+    const loaded = this._tryLoadFrom(this.filePath);
+    if (loaded) {
+      this.rows = loaded.rows;
+      this.nextId = loaded.nextId;
+      return;
+    }
+
+    // M1 Wave 1 TASK-015 (REQ-017, AC-012): berkas utama tidak terbaca (korup,
+    // bentuk salah, atau hilang). Urutan: karantina berkas utama (bila ada) ->
+    // coba `.bak` -> kalau keduanya gagal, mulai kosong dengan error keras.
+    //
+    // Berkas utama yang korup dipindah LEBIH DULU, juga saat `.bak` berhasil
+    // memulihkan (spec hanya mewajibkan pemindahan bila keduanya gagal):
+    // itu menjaga bukti untuk diperiksa manual dan mencegah berkas korup itu
+    // disalin menimpa `.bak` yang masih baik pada penulisan berikutnya.
+    const mainExists = fs.existsSync(this.filePath);
+    let sizeBytes = null;
+    let quarantinePath = null;
+
+    if (mainExists) {
+      try {
+        sizeBytes = fs.statSync(this.filePath).size; // diukur SEBELUM dipindah
+      } catch (err) {
+        // ukuran tidak terbaca -- tetap lanjut karantina
       }
-    } catch (err) {
-      // File korup/tidak terbaca -- jangan crash, mulai dari kosong.
-      // Lebih baik kehilangan antrian retry lama daripada Gateway tidak
-      // bisa start sama sekali.
-      logger.error('Gagal membaca file JSON incoming buffer, memulai dari kosong', { error: err.message });
+      const target = `${this.filePath}.corrupt-${Date.now()}`;
+      try {
+        fs.renameSync(this.filePath, target);
+        quarantinePath = target;
+      } catch (err) {
+        logger.error('File JSON incoming buffer tidak terbaca dan gagal dipindahkan', {
+          filePath: this.filePath,
+          sizeBytes,
+          error: err.message,
+        });
+      }
+    }
+
+    const recovered = this._tryLoadFrom(`${this.filePath}.bak`);
+    if (recovered) {
+      logger.warn(
+        mainExists
+          ? 'File JSON incoming buffer tidak terbaca, dipulihkan dari cadangan (.bak)'
+          : 'File JSON incoming buffer hilang, dipulihkan dari cadangan (.bak)',
+        {
+          filePath: this.filePath,
+          sizeBytes,
+          quarantinePath,
+          pendingSetelahPemulihan: recovered.rows.length,
+        }
+      );
+      this.rows = recovered.rows;
+      this.nextId = recovered.nextId;
+      return;
+    }
+
+    if (!mainExists) {
+      // Belum pernah ada file sama sekali (bukan kasus korup) -- mulai kosong.
       this.rows = [];
       this.nextId = 1;
+      return;
     }
+
+    // Berkas utama DAN cadangan sama-sama tidak bisa dipakai. Jangan crash:
+    // lebih baik kehilangan antrian retry lama daripada Gateway tidak bisa
+    // start sama sekali -- tapi harus terlihat keras, dengan ukuran berkas
+    // asli supaya tahu seberapa banyak yang mungkin hilang.
+    logger.error('[CRITICAL] File JSON incoming buffer DAN cadangannya (.bak) tidak bisa dipakai -- antrean dimulai dari kosong', {
+      severity: 'critical',
+      filePath: this.filePath,
+      sizeBytes,
+      quarantinePath,
+    });
+    this.rows = [];
+    this.nextId = 1;
   }
 
-  _computeNextId() {
-    return this.rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+  /** @returns {{rows: object[], nextId: number}|null} null kalau file tidak ada/tidak terbaca/korup/bentuk salah. */
+  _tryLoadFrom(filePath) {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      // JSON yang valid tapi bentuknya salah ({}, [], null, ...) BUKAN berkas
+      // sehat: dianggap sehat, isinya akan dianggap "antrean kosong" dan
+      // hilang diam-diam. _persist() selalu menulis { nextId, rows: [...] }.
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.rows)) return null;
+      const rows = parsed.rows;
+      const nextId = Number.isFinite(parsed.nextId)
+        ? parsed.nextId
+        : rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+      return { rows, nextId };
+    } catch (err) {
+      return null;
+    }
   }
 
   _persist() {
@@ -281,14 +486,37 @@ class IncomingBufferJsonFile {
       return new Date(row.updated_at).getTime() > cutoff;
     });
 
+    // E-09 / REQ-016: cadangkan isi file yang MASIH valid sebelum ditimpa,
+    // supaya ada sesuatu untuk dipulihkan kalau penulisan berikutnya korup di
+    // tengah jalan (mis. proses/HP mati tepat saat menulis). Berkas utama
+    // diperiksa dulu: kalau ternyata sudah tidak valid (rusak di tengah
+    // operasi), TIDAK disalin -- kalau disalin, satu-satunya cadangan yang
+    // baik ikut tertimpa. Best-effort & non-fatal -- kegagalan menyalin
+    // cadangan tidak boleh menghalangi penulisan utama.
+    try {
+      if (fs.existsSync(this.filePath)) {
+        if (this._tryLoadFrom(this.filePath)) {
+          fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+        } else {
+          logger.warn('File JSON incoming buffer tidak valid saat akan dicadangkan; cadangan (.bak) lama TIDAK ditimpa', {
+            filePath: this.filePath,
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn('Gagal menyalin cadangan (.bak) file JSON incoming buffer (non-fatal)', { error: err.message });
+    }
+
     const tmpPath = `${this.filePath}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify({ nextId: this.nextId, rows: this.rows }));
     fs.renameSync(tmpPath, this.filePath);
   }
 
   enqueue(event) {
+    assertRequiredFields(event);
+
     if (this.rows.some((row) => row.wa_message_id === event.messageId)) {
-      return; // INSERT OR IGNORE -- sudah pernah tercatat, abaikan (idempoten)
+      return { status: 'duplicate' }; // sudah pernah tercatat, abaikan (idempoten)
     }
 
     const now = new Date().toISOString();
@@ -300,7 +528,7 @@ class IncomingBufferJsonFile {
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
       sender_jid: event.sender?.jid ?? null,
-      message_type: event.messageType || 'text',
+      message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
@@ -314,6 +542,7 @@ class IncomingBufferJsonFile {
       updated_at: now,
     });
     this._persist();
+    return { status: 'inserted' };
   }
 
   getDueEvents(limit = 20) {
@@ -359,15 +588,35 @@ class IncomingBufferJsonFile {
   }
 }
 
-let instance;
+// Dua kondisi dipisah (refactor SEC-002, CR-01): modul TIDAK ADA boleh
+// degradasi ke JSON (build Android), tetapi database yang GAGAL DIBUKA harus
+// terlihat keras -- proses berhenti dan PM2 menyalakannya ulang. Pindah diam-
+// diam ke JSON di kasus kedua membuat pesan baru masuk ke berkas yang tidak
+// pernah dibaca lagi setelah SQLite normal kembali (kehilangan pesan senyap).
+let Database = null;
 try {
   // eslint-disable-next-line global-require
-  const Database = require('better-sqlite3');
-  instance = new IncomingBufferSqlite(Database);
+  Database = require('better-sqlite3');
 } catch (err) {
   logger.warn('better-sqlite3 tidak tersedia, memakai fallback JSON file untuk incoming buffer.', {
     error: err.message,
   });
+}
+
+let instance;
+if (Database) {
+  try {
+    instance = new IncomingBufferSqlite(Database);
+  } catch (err) {
+    logger.error('[CRITICAL] gagal membuka database SQLite incoming buffer -- Gateway berhenti, TIDAK pindah ke JSON', {
+      severity: 'critical',
+      path: config.sqlitePath,
+      error: err.message,
+      code: err.code,
+    });
+    throw err;
+  }
+} else {
   instance = new IncomingBufferJsonFile();
 }
 
@@ -380,3 +629,12 @@ process.on('exit', () => {
 });
 
 module.exports = instance;
+// Diekspos terpisah HANYA supaya test/simulate-*.js bisa menguji pemulihan
+// file JSON korup (E-09) secara langsung tanpa bergantung pada ada/tidaknya
+// better-sqlite3 di lingkungan yang menjalankan test. Pemakaian normal
+// aplikasi tetap lewat `instance` singleton di atas.
+module.exports.IncomingBufferJsonFile = IncomingBufferJsonFile;
+// Idem: diekspos supaya test bisa membuat instance SQLite terisolasi (path DB
+// disuntik) dan mengenali error validasi (TASK-001, TASK-002).
+module.exports.IncomingBufferSqlite = IncomingBufferSqlite;
+module.exports.EnqueueValidationError = EnqueueValidationError;

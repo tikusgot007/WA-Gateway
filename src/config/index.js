@@ -10,6 +10,16 @@ function toInt(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// Daftar angka dipisah koma (mis. "50,200,800"). Nilai kosong/tidak valid
+// (bukan angka, atau negatif) -> pakai fallback utuh, bukan sebagian, supaya
+// salah ketik di .env tidak menghasilkan jeda retry yang aneh.
+function toIntList(value, fallback) {
+  if (!value || !value.trim()) return fallback;
+  const parts = value.split(',').map((s) => s.trim());
+  const nums = parts.map((s) => (/^\d+$/.test(s) ? parseInt(s, 10) : NaN));
+  return nums.every(Number.isFinite) ? nums : fallback;
+}
+
 const config = {
   host: process.env.HOST || '127.0.0.1',
   port: toInt(process.env.PORT, 3000),
@@ -75,6 +85,30 @@ const config = {
     maxDelayMs: toInt(process.env.DELIVERY_RETRY_MAX_DELAY_MS, 120000),
     backoffFactor: parseFloat(process.env.DELIVERY_RETRY_BACKOFF_FACTOR || '2') || 2,
   },
+
+  // M1 Wave 1 TASK-005 (GUD-001): batas durable buffer.
+  // - enqueueRetryDelaysMs: jeda antar percobaan ulang enqueue() ke buffer
+  //   utama (REQ-009). Panjang daftar = jumlah percobaan ULANG; bawaan sama
+  //   dengan DEFAULT_RETRY_DELAYS_MS di src/store/enqueueRetry.js.
+  // - enqueueOverflowMax: kapasitas penampung sementara in-memory (REQ-010).
+  enqueueRetryDelaysMs: toIntList(process.env.ENQUEUE_RETRY_DELAYS_MS, [50, 200, 800]),
+  enqueueOverflowMax: Math.max(1, toInt(process.env.ENQUEUE_OVERFLOW_MAX, 500)), // min 1: 0 = buang semua event
+
+  // M1 Wave 1 TASK-008 (REQ-003, GUD-001): daftar ID pesan yang Gateway kirim
+  // sendiri, dipakai menyaring event `append` kiriman sendiri (D-01/D-03).
+  // - ownSentTtlMs: masa berlaku ID (bawaan 10 menit).
+  // - ownSentMax: jumlah ID maksimum (bawaan 1000); min 1 supaya daftar tidak
+  //   pernah mengeluarkan ID yang baru dicatat.
+  ownSentTtlMs: Math.max(1, toInt(process.env.OWN_SENT_TTL_MS, 600000)), // min 1: <=0 mematikan filter kiriman sendiri
+  ownSentMax: Math.max(1, toInt(process.env.OWN_SENT_MAX, 1000)),
+
+  // M1 Wave 1 TASK-013 (REQ-014, REQ-019, GUD-001): query LID (onWhatsApp).
+  // - lidLookupTimeoutMs: batas waktu satu query (bawaan 2 detik); min 1.
+  // - lidLookupNegativeTtlMs: berapa lama KEGAGALAN query untuk sebuah JID
+  //   di-cache supaya pesan berikutnya dari JID yang sama tidak menunggu
+  //   timeout lagi (bawaan 60 detik); 0 = tanpa cache negatif.
+  lidLookupTimeoutMs: Math.max(1, toInt(process.env.LID_LOOKUP_TIMEOUT_MS, 2000)),
+  lidLookupNegativeTtlMs: Math.max(0, toInt(process.env.LID_LOOKUP_NEGATIVE_TTL_MS, 60000)),
 
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
