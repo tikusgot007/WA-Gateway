@@ -84,6 +84,9 @@ assert.deepStrictEqual(readConfig({}), [600000, 1000], 'bawaan 10 menit dan 1000
 assert.deepStrictEqual(readConfig({ OWN_SENT_TTL_MS: '30000', OWN_SENT_MAX: '50' }), [30000, 50], 'kustom');
 assert.deepStrictEqual(readConfig({ OWN_SENT_TTL_MS: 'x', OWN_SENT_MAX: 'x' }), [600000, 1000], 'tidak valid -> bawaan');
 assert.strictEqual(readConfig({ OWN_SENT_MAX: '0' })[1], 1, '0 dijaga minimal 1');
+// Refactor TASK-202 (REQ-001, CR-04): TTL <= 0 akan mematikan filter kiriman sendiri (D-01).
+assert.strictEqual(readConfig({ OWN_SENT_TTL_MS: '0' })[0], 1, 'TTL 0 dijaga minimal 1');
+assert.strictEqual(readConfig({ OWN_SENT_TTL_MS: '-5' })[0], 1, 'TTL negatif dijaga minimal 1');
 console.log('OK: bawaan, kustom, tidak valid, dan batas bawah.');
 
 console.log('\nSemua assert simulate-own-sent-registry lolos.');

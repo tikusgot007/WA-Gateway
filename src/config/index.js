@@ -99,7 +99,7 @@ const config = {
   // - ownSentTtlMs: masa berlaku ID (bawaan 10 menit).
   // - ownSentMax: jumlah ID maksimum (bawaan 1000); min 1 supaya daftar tidak
   //   pernah mengeluarkan ID yang baru dicatat.
-  ownSentTtlMs: toInt(process.env.OWN_SENT_TTL_MS, 600000),
+  ownSentTtlMs: Math.max(1, toInt(process.env.OWN_SENT_TTL_MS, 600000)), // min 1: <=0 mematikan filter kiriman sendiri
   ownSentMax: Math.max(1, toInt(process.env.OWN_SENT_MAX, 1000)),
 
   // M1 Wave 1 TASK-013 (REQ-014, REQ-019, GUD-001): query LID (onWhatsApp).
