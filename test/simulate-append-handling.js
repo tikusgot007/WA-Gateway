@@ -244,6 +244,44 @@ function cleanup() {
     assert.strictEqual(rowsFor('SIM-APP-MIX-OK').length, 1, 'pesan sah dalam batch yang sama tetap tersimpan');
     console.log('OK: satu batch, hanya yang sah tersimpan.');
 
+    // Refactor TASK-204 (PRN-004, CR-16): lanjutan AC-003 (#6) sampai ke body POST ke CI4.
+    // Kontrak deliverOne tidak punya field identitas staff (CI4 mengisi sent_by_user_id NULL
+    // sendiri); satu-satunya identitas akun sendiri yang bisa bocor adalah pushName.
+    console.log('\n--- 11. AC-003: body POST ke CI4 untuk baris outgoing #6 -> tanpa identitas staff ---');
+    // Stub SEBELUM incomingDelivery di-require: modul itu men-destructure postToCI4 saat load.
+    const ci4Client = require('../src/delivery/ci4Client');
+    const config = require('../src/config');
+    const realPostToCI4 = ci4Client.postToCI4;
+    const realCi4 = { ...config.ci4 };
+    const posted = [];
+    ci4Client.postToCI4 = async (pathSuffix, body) => {
+      posted.push({ pathSuffix, body });
+      return { ok: true, status: 200, json: { status: 'success' }, error: null };
+    };
+    config.ci4.baseUrl = 'http://ci4.test.invalid';
+    config.ci4.gatewayToken = 'token-uji';
+    try {
+      await require('../src/delivery/incomingDelivery').tick();
+    } finally {
+      ci4Client.postToCI4 = realPostToCI4;
+      Object.assign(config.ci4, realCi4);
+    }
+    const bodyFor = (id) => posted.find((p) => p.body.wa_message_id === id)?.body;
+    const outgoingBody = bodyFor('SIM-APP-HP-1');
+    const incomingBody = bodyFor('SIM-APP-DUP-1');
+    assert.ok(outgoingBody && incomingBody, 'baris outgoing (#6) dan incoming (#7) dikirim ke CI4');
+    assert.strictEqual(outgoingBody.direction, 'outgoing');
+    assert.strictEqual(incomingBody.direction, 'incoming');
+    assert.deepStrictEqual(Object.keys(outgoingBody).sort(), Object.keys(incomingBody).sort(), 'key body outgoing sama dengan incoming');
+    assert.deepStrictEqual(
+      Object.keys(outgoingBody).filter((key) => /staff|user|sent_by|agent|operator/i.test(key)),
+      [],
+      'tidak ada field identitas staff'
+    );
+    assert.strictEqual(outgoingBody.contact_name, null, 'pushName akun sendiri (staff) tidak diteruskan');
+    assert.strictEqual(incomingBody.contact_name, 'Pelanggan Tes', 'pembanding: incoming membawa nama pelanggan');
+    console.log('OK: body outgoing berkontrak sama dengan incoming, tanpa identitas staff.');
+
     console.log('\nSemua assert simulate-append-handling (pencatatan ID + filter append) lolos.');
   } finally {
     connectionManager.status = originalStatus;

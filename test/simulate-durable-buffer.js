@@ -482,6 +482,60 @@ const FAST = [1, 2, 3]; // jeda kecil supaya tes cepat
   }
   console.log('OK: overflow terkuras ke buffer utama saat siklus kirim ke CI4 masih menggantung.');
 
+  // ---- Refactor Fase 2 (PRN-004, CR-16): AC-007 dan AC-008 lewat jalur terima pesan asli ----
+  /** Seperti captureLogs, tetapi untuk fn async. */
+  async function captureLogsAsync(fn) {
+    const captured = { info: [], warn: [], error: [] };
+    const original = {};
+    for (const level of Object.keys(captured)) {
+      original[level] = logger[level];
+      logger[level] = (message, meta) => captured[level].push({ message, meta });
+    }
+    try {
+      await fn();
+    } finally {
+      for (const level of Object.keys(captured)) logger[level] = original[level];
+    }
+    return captured;
+  }
+  const rowExists = (id) => Boolean(incomingBuffer.db.prepare('SELECT 1 FROM incoming_queue WHERE wa_message_id = ?').get(id));
+
+  console.log('\n--- 22. AC-007 lewat _persistIncoming(): gagal 2x lalu berhasil -> tersimpan, overflow kosong ---');
+  let enqueueCalls = 0;
+  incomingBuffer.enqueue = (evt) => {
+    enqueueCalls += 1;
+    if (enqueueCalls <= 2) throw new Error('simulasi database terkunci sesaat');
+    return realEnqueue.call(incomingBuffer, evt);
+  };
+  try {
+    logs = await captureLogsAsync(() => connectionManager._persistIncoming({ ...wiredEvent, messageId: 'SIM-DUR-AC007' }));
+  } finally {
+    incomingBuffer.enqueue = realEnqueue;
+  }
+  assert.strictEqual(enqueueCalls, 3, '2 gagal + 1 sukses');
+  assert.ok(rowExists('SIM-DUR-AC007'), 'pesan tersimpan setelah coba ulang');
+  assert.strictEqual(overflowBuffer.size(), 0, 'penampung sementara kosong');
+  assert.strictEqual(logs.error.length, 0, 'pulih lewat coba ulang bukan error');
+  console.log('OK: tersimpan pada percobaan ke-3, penampung sementara kosong.');
+
+  console.log('\n--- 23. AC-008: enqueue gagal terus -> masuk overflow dengan TEPAT SATU log error ---');
+  incomingBuffer.enqueue = () => {
+    throw new Error('simulasi database terkunci terus');
+  };
+  try {
+    logs = await captureLogsAsync(() => connectionManager._persistIncoming({ ...wiredEvent, messageId: 'SIM-DUR-AC008' }));
+  } finally {
+    incomingBuffer.enqueue = realEnqueue;
+  }
+  assert.strictEqual(overflowBuffer.size(), 1, 'event masuk penampung sementara');
+  // enqueueRetry juga mencatat error "setelah dicoba ulang"; yang diuji di sini log milik jalur overflow.
+  const overflowErrors = logs.error.filter((l) => /GAGAL menyimpan pesan ke buffer utama/.test(l.message));
+  assert.strictEqual(overflowErrors.length, 1, 'tepat satu log error "GAGAL menyimpan pesan ke buffer utama"');
+  assert.strictEqual(overflowErrors[0].meta.messageId, 'SIM-DUR-AC008');
+  assert.strictEqual(overflowErrors[0].meta.overflowSize, 1);
+  overflowBuffer.items = []; // bersihkan singleton
+  console.log('OK: event tertampung dan satu error keras tercatat.');
+
   console.log('\nSemua assert simulate-durable-buffer (retry + overflow + wiring + integritas) lolos.');
   cleanup(incomingBuffer);
 })().catch((err) => {
