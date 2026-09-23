@@ -588,15 +588,35 @@ class IncomingBufferJsonFile {
   }
 }
 
-let instance;
+// Dua kondisi dipisah (refactor SEC-002, CR-01): modul TIDAK ADA boleh
+// degradasi ke JSON (build Android), tetapi database yang GAGAL DIBUKA harus
+// terlihat keras -- proses berhenti dan PM2 menyalakannya ulang. Pindah diam-
+// diam ke JSON di kasus kedua membuat pesan baru masuk ke berkas yang tidak
+// pernah dibaca lagi setelah SQLite normal kembali (kehilangan pesan senyap).
+let Database = null;
 try {
   // eslint-disable-next-line global-require
-  const Database = require('better-sqlite3');
-  instance = new IncomingBufferSqlite(Database);
+  Database = require('better-sqlite3');
 } catch (err) {
   logger.warn('better-sqlite3 tidak tersedia, memakai fallback JSON file untuk incoming buffer.', {
     error: err.message,
   });
+}
+
+let instance;
+if (Database) {
+  try {
+    instance = new IncomingBufferSqlite(Database);
+  } catch (err) {
+    logger.error('[CRITICAL] gagal membuka database SQLite incoming buffer -- Gateway berhenti, TIDAK pindah ke JSON', {
+      severity: 'critical',
+      path: config.sqlitePath,
+      error: err.message,
+      code: err.code,
+    });
+    throw err;
+  }
+} else {
   instance = new IncomingBufferJsonFile();
 }
 
