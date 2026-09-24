@@ -34,9 +34,17 @@ const connectionManager = require('../src/whatsapp/connectionManager');
 const incomingBuffer = require('../src/store/incomingBuffer'); // ikut terbuka lewat connectionManager; ditutup saat cleanup
 
 // --- tangkap semua log (dan tidak mencetaknya) untuk pemindaian SEC-001 / hitungan warn ---
+// Bawaan: log ditangkap dan TIDAK dicetak. Dengan OUTGOING_TEST_LOG_PASSTHROUGH=1 log
+// juga diteruskan ke logger asli (pino -> berkas LOG_FOLDER), dipakai
+// test/check-outgoing-log-scan.js untuk memindai berkas log sungguhan (AC-039).
 const logs = [];
+const passthrough = process.env.OUTGOING_TEST_LOG_PASSTHROUGH === '1';
 for (const level of ['info', 'warn', 'error', 'debug']) {
-  logger[level] = (message, meta) => logs.push({ level, message, meta });
+  const original = logger[level];
+  logger[level] = (message, meta) => {
+    logs.push({ level, message, meta });
+    if (passthrough) original(message, meta);
+  };
 }
 const logText = () => JSON.stringify(logs);
 
@@ -543,7 +551,9 @@ const section = (title) => console.log(`\n--- ${title} ---`);
 
   section('SEC-001: log dan basis data tidak memuat isi pesan');
   resetStub();
-  const SECRET = 'RAHASIA-ISI-PESAN-PELANGGAN-123';
+  // Rahasia bisa disuplai pemindai berkas log lewat env; bila tidak, memakai nilai bawaan.
+  const SECRET = process.env.OUTGOING_TEST_SECRET_TEXT || 'RAHASIA-ISI-PESAN-PELANGGAN-123';
+  const MEDIA_MARKER = process.env.OUTGOING_TEST_SECRET_MEDIA || 'RAHASIA-ISI-MEDIA-PELANGGAN-456-';
   stub.impl = async () => {
     throw new Error('Gagal mengirim pesan: socket putus');
   };
@@ -553,7 +563,7 @@ const section = (title) => console.log(`\n--- ${title} ---`);
   await post('/send', { chat_id: CHAT, text: `${SECRET} beda`, operation_id: 'OP-SEC-OK' }); // reused
   await post('/send', { chat_id: CHAT, text: SECRET }); // tanpa operation_id
   // Media: gagal (ambigu), sukses, reused, dan tanpa operation_id -- semuanya membawa base64 rahasia.
-  const SECRET_MEDIA = Buffer.from('RAHASIA-ISI-MEDIA-PELANGGAN-456-'.repeat(4));
+  const SECRET_MEDIA = Buffer.from(MEDIA_MARKER.repeat(4));
   const SECRET_B64 = SECRET_MEDIA.toString('base64');
   stub.mediaImpl = async () => {
     throw new Error('Gagal mengirim media: socket putus');
@@ -568,10 +578,10 @@ const section = (title) => console.log(`\n--- ${title} ---`);
   assert.ok(!everything.includes(SECRET), 'isi pesan/caption tidak boleh muncul di log');
   assert.ok(!everything.includes(SECRET_B64), 'string media_base64 tidak boleh muncul di log');
   assert.ok(!everything.includes(SECRET_B64.slice(0, 20)), 'potongan media_base64 tidak boleh muncul di log');
-  assert.ok(!everything.includes('RAHASIA-ISI-MEDIA'), 'isi media hasil decode tidak boleh muncul di log');
+  assert.ok(!everything.includes(MEDIA_MARKER), 'isi media hasil decode tidak boleh muncul di log');
   const dump = JSON.stringify(store.db.prepare('SELECT * FROM outgoing_operations').all());
   assert.ok(!dump.includes(SECRET), 'isi pesan tidak boleh tersimpan di outgoing_operations');
-  assert.ok(!dump.includes(SECRET_B64) && !dump.includes('RAHASIA-ISI-MEDIA'), 'isi media tidak boleh tersimpan di outgoing_operations');
+  assert.ok(!dump.includes(SECRET_B64) && !dump.includes(MEDIA_MARKER), 'isi media tidak boleh tersimpan di outgoing_operations');
   console.log('OK');
 
   console.log('\nSEMUA ASSERT LULUS (0 gagal).');

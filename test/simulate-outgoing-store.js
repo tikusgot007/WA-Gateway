@@ -269,7 +269,7 @@ function runSuite(label, make) {
     console.log('OK: 13 kolom + indeks idx_outgoing_operations_state.');
   }
 
-  console.log('\n=== Singleton memakai SQLITE_PATH temp (bukan data/gateway.sqlite produksi) ===');
+  console.log('\n=== Singleton memakai SQLITE_PATH temp (bukan database produksi) ===');
   assert.ok(store instanceof OutgoingOperationsSqlite);
   assert.ok(store.dbPath.startsWith(tmpRoot), `singleton harus di folder temp: ${store.dbPath}`);
   console.log('OK');
