@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const config = require('../config');
 const logger = require('../logging');
 const outgoingOperations = require('../store/outgoingOperations');
 
@@ -77,16 +78,45 @@ function warnWithoutOperationIdOnce() {
 
 // Terminal state = hasil sudah pasti dan tersimpan; boleh dijawab ulang tanpa kirim.
 const TERMINAL_STATES = ['sent', 'failed', 'abandoned'];
+const MAX_LISTED_IDS = 20; // batas daftar operation_id di log start-up (REQ-031/REQ-032)
 
-function classifyExisting(row, payloadHash) {
+// REQ-028: `updated_at` diperbarui setiap kali baris disentuh (begin/registerRetry/
+// markUnresolved), jadi lease mengukur "sejak sentuhan terakhir". Selagi masih di
+// dalam lease, operasi in_flight dianggap sedang dikerjakan permintaan aktif dan
+// MUST dijawab 409 SEND_IN_PROGRESS tanpa kirim.
+function isLeaseExpired(row, nowMs) {
+  return (nowMs - Date.parse(row.updated_at)) > config.outgoingLeaseMs;
+}
+
+/**
+ * Klasifikasikan baris operasi yang SUDAH ADA (spec 4.2/4.3). Lima kemungkinan:
+ *   reused        -- payload_hash berbeda (REQ-023, 409 OPERATION_ID_REUSED)
+ *   replay        -- state terminal, hasil dijawab ulang dari catatan (REQ-022)
+ *   in_progress   -- in_flight & masih di dalam lease (REQ-028, 409 SEND_IN_PROGRESS)
+ *   retry         -- in_flight, lease lewat, attempts < cap -> boleh kirim ulang (REQ-028)
+ *   dead_lettered -- in_flight, lease lewat, attempts >= cap (REQ-029, 502 DEAD_LETTERED)
+ */
+function classifyExisting(row, payloadHash, nowMs) {
   // REQ-023: kunci yang sama, isi berbeda -> ditolak tanpa menyentuh Baileys.
   if (row.payload_hash !== payloadHash) return { outcome: 'reused', row };
   // REQ-022: hasil terminal dijawab ulang dari catatan (replay).
   if (TERMINAL_STATES.includes(row.state)) return { outcome: 'replay', row };
-  // in_flight: kiriman sebelumnya belum pasti hasilnya. Sampai lease + batas
-  // percobaan ditambahkan (Fase 2, TASK-007) jawaban aman satu-satunya adalah
-  // menolak tanpa kirim -- tidak pernah menggandakan pesan.
-  return { outcome: 'in_progress', row };
+  // in_flight: kiriman sebelumnya belum pasti hasilnya.
+  if (!isLeaseExpired(row, nowMs)) return { outcome: 'in_progress', row };
+  // R-2/REQ-029: cap diperiksa SEBELUM kirim ulang; `attempts` = jumlah kiriman
+  // yang sudah dijalankan, jadi cap 5 = maksimum 5 kiriman per operasi.
+  if (row.attempts >= config.outgoingMaxAttempts) return { outcome: 'dead_lettered', row };
+  return { outcome: 'retry', row };
+}
+
+/**
+ * REQ-029/R-2: cap tercapai -> operasi masuk dead-letter kirim keluar.
+ * Log `[CRITICAL]` ditulis store.abandon() (P-6) supaya jejaknya satu tempat;
+ * fungsi ini mengembalikan keputusan siap-respons (502 DEAD_LETTERED).
+ */
+function deadLetter(operationId) {
+  outgoingOperations.abandon(operationId, 'max_attempts');
+  return { outcome: 'dead_lettered', row: outgoingOperations.get(operationId) };
 }
 
 /**
@@ -97,26 +127,49 @@ function classifyExisting(row, payloadHash) {
  * @param {string} args.payloadHash dari computePayloadHash()
  * @param {'text'|'media'} args.kind
  * @param {string} args.chatId
- * @param {() => boolean} args.isReady false -> `not_connected`. Diperiksa hanya
- *   untuk operasi BARU, sebelum baris dibuat, supaya penolakan koneksi tidak
- *   meninggalkan `in_flight` palsu (REQ-030); replay tetap bisa dijawab walau
- *   WhatsApp sedang tidak connected.
+ * @param {() => boolean} args.isReady false -> `not_connected`. Diperiksa SEBELUM
+ *   baris operasi dibuat (REQ-030) dan sebelum kirim ulang pasca-lease supaya
+ *   penolakan koneksi tidak meninggalkan `in_flight` palsu maupun menghabiskan
+ *   percobaan; replay tetap bisa dijawab walau WhatsApp sedang tidak connected.
  * @param {() => Promise<{messageId: string|null, timestamp: string, mediaRef?: object|null}>} args.send
  *   pemanggilan Baileys; HANYA dipanggil setelah begin().
  * @returns {Promise<{outcome: string, row?: object, result?: object, error?: Error}>}
- *   outcome: sent | failed | unresolved | replay | in_progress | reused | not_connected | store_error
+ *   outcome: sent | failed | unresolved | replay | in_progress | dead_lettered |
+ *            reused | not_connected | store_error
  */
 async function runOperation({ operationId, payloadHash, kind, chatId, isReady, send }) {
   // --- tahap 1: catat niat kirim. Gagal di sini = TIDAK ADA yang dikirim, jadi
   // menolak (fail closed) aman; mengirim tanpa catatan justru membuka duplikat. ---
   try {
     const existing = outgoingOperations.get(operationId);
-    if (existing) return logOutcome(classifyExisting(existing, payloadHash), operationId, chatId);
+    if (existing) {
+      const decision = classifyExisting(existing, payloadHash, outgoingOperations.now());
+      if (decision.outcome === 'dead_lettered') return logOutcome(deadLetter(operationId), operationId, chatId);
+      if (decision.outcome !== 'retry') return logOutcome(decision, operationId, chatId);
+      // REQ-028: lease sudah lewat -> ini sisa percobaan yang mati, boleh dicoba
+      // ulang. REQ-030 tetap berlaku supaya 409 NOT_CONNECTED tidak menghabiskan
+      // percobaan (attempts = jumlah kiriman yang benar-benar dijalankan, REQ-029).
+      if (!isReady()) return { outcome: 'not_connected' };
+      // R-2/REQ-029: cap SUDAH dicek di classifyExisting() sebelum baris ini.
+      outgoingOperations.registerRetry(operationId);
+      logger.info('[SEND-OPERATION] lease lewat -- kirim ulang (attempts dicatat sebelum kirim)', {
+        operationId,
+        chatId,
+        attempts: outgoingOperations.get(operationId).attempts,
+      });
+    } else {
+      // REQ-030: periksa koneksi SEBELUM baris dibuat supaya 409 NOT_CONNECTED
+      // tidak meninggalkan `in_flight` palsu.
+      if (!isReady()) return { outcome: 'not_connected' };
 
-    if (!isReady()) return { outcome: 'not_connected' };
-
-    const begun = outgoingOperations.begin({ operationId, payloadHash, kind, chatId });
-    if (!begun.created) return logOutcome(classifyExisting(begun.row, payloadHash), operationId, chatId);
+      const begun = outgoingOperations.begin({ operationId, payloadHash, kind, chatId });
+      if (!begun.created) {
+        // Balapan: permintaan lain membuat baris ini beberapa milidetik lalu.
+        // Barisnya baru, jadi tidak mungkin stale; klasifikasikan lalu berhenti.
+        const raced = classifyExisting(begun.row, payloadHash, outgoingOperations.now());
+        return logOutcome(raced.outcome === 'dead_lettered' ? deadLetter(operationId) : raced, operationId, chatId);
+      }
+    }
   } catch (err) {
     logger.error('[SEND-OPERATION] gagal mencatat operasi -- pesan TIDAK dikirim', { operationId, chatId, error: err.message });
     return { outcome: 'store_error', error: err };
@@ -168,7 +221,8 @@ function logOutcome(decision, operationId, chatId) {
   const meta = { operationId, chatId, state: decision.row && decision.row.state };
   if (decision.outcome === 'reused') logger.warn('[SEND-OPERATION] operation_id dipakai ulang dengan payload berbeda -- ditolak, tidak dikirim', meta);
   else if (decision.outcome === 'replay') logger.info('[SEND-OPERATION] replay hasil tersimpan, tidak dikirim ulang', meta);
-  else logger.info('[SEND-OPERATION] operasi masih in_flight -- ditolak tanpa kirim (hasil belum pasti)', meta);
+  else if (decision.outcome === 'dead_lettered') logger.warn('[SEND-OPERATION] operasi sudah dead-letter (attempts >= cap) -- ditolak tanpa kirim', meta);
+  else logger.info('[SEND-OPERATION] operasi masih in_flight di dalam lease -- ditolak tanpa kirim (hasil belum pasti)', meta);
   return decision;
 }
 
@@ -232,6 +286,15 @@ function toHttpResponse(decision, { operationId, withMediaRef = false }) {
         replayed: true,
         error_code: 'SEND_IN_PROGRESS',
         message: UNRESOLVED_MESSAGE,
+      });
+    case 'dead_lettered':
+      // REQ-029/AC-029: cap tercapai -> terminal `abandoned`; TIDAK ada kiriman baru.
+      return respond(502, {
+        success: false,
+        state: 'abandoned',
+        replayed: true,
+        error_code: 'DEAD_LETTERED',
+        message: 'Operasi ini sudah mencapai batas percobaan dan tidak akan dikirim lagi.',
       });
     case 'reused':
       return respond(409, {
