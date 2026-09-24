@@ -7,6 +7,16 @@ const config = require('../config');
 const { isDecodableJid } = require('../whatsapp/jidUtils');
 const { requireCI4Token } = require('./authMiddleware');
 const { VALID_MEDIA_TYPES, decodeBase64Media, isValidWebp } = require('../whatsapp/mediaPayload');
+const outgoingOperationService = require('../delivery/outgoingOperationService');
+
+// M1 Wave 2 (REQ-020): respons 400 yang sama untuk /send dan /send-media.
+function invalidOperationIdResponse(res) {
+  return res.status(400).json({
+    success: false,
+    error_code: 'INVALID_OPERATION_ID',
+    message: 'operation_id harus string 1-64 karakter dengan pola [A-Za-z0-9._:-].',
+  });
+}
 
 /**
  * Router khusus endpoint yang dipanggil CI4 (Phase 3: outgoing text
@@ -38,6 +48,12 @@ const jsonMedia = express.json({ limit: config.mediaJsonBodyLimitBytes });
 router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   const { chat_id: chatId, text } = req.body || {};
 
+  // M1 Wave 2 (REQ-020): operation_id opsional; yang ada tapi tidak valid ditolak
+  // 400 SEBELUM apa pun menyentuh Baileys.
+  const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
+  if (!operation.ok) return invalidOperationIdResponse(res);
+  const { operationId } = operation;
+
   if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
     return res.status(400).json({
       success: false,
@@ -62,6 +78,33 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
     });
   }
 
+  // sendReply() dipilih (bukan sendTextMessage() langsung) supaya
+  // pesan yang dikirim dari POS JUGA tercatat di messageStore lokal
+  // Gateway -- dashboard test Gateway tetap konsisten menampilkan
+  // semua pesan keluar, dari mana pun asalnya.
+  // Satu-satunya titik panggilan sendReply() di route ini: jalur idempotensi
+  // memanggilnya HANYA lewat runOperation() (setelah baris in_flight tersimpan);
+  // jalur lama (tanpa operation_id) memanggilnya langsung.
+  const doSend = () => connectionManager.sendReply(chatId, text);
+
+  if (operationId) {
+    // M1 Wave 2 (REQ-021..REQ-027): kirim dengan idempotensi. payload_hash
+    // dihitung SETELAH seluruh validasi payload di atas lolos (A-7).
+    const decision = await outgoingOperationService.runOperation({
+      operationId,
+      payloadHash: outgoingOperationService.computePayloadHash({ kind: 'text', chatId, text }),
+      kind: 'text',
+      chatId,
+      isReady: () => connectionManager.isConnected(),
+      send: doSend,
+    });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId });
+    return res.status(status).json(body);
+  }
+
+  // --- jalur lama: tanpa operation_id, perilaku seperti sebelumnya (REQ-026) ---
+  outgoingOperationService.warnWithoutOperationIdOnce();
+
   if (!connectionManager.isConnected()) {
     logger.warn('[SEND-CI4] ditolak, WhatsApp belum connected', { chatId });
     return res.status(409).json({
@@ -72,11 +115,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   }
 
   try {
-    // sendReply() dipilih (bukan sendTextMessage() langsung) supaya
-    // pesan yang dikirim dari POS JUGA tercatat di messageStore lokal
-    // Gateway -- dashboard test Gateway tetap konsisten menampilkan
-    // semua pesan keluar, dari mana pun asalnya.
-    const result = await connectionManager.sendReply(chatId, text);
+    const result = await doSend();
 
     logger.info('[SEND-CI4] pesan keluar dari POS berhasil dikirim', {
       chatId,
@@ -85,6 +124,8 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
 
     return res.json({
       success: true,
+      state: 'sent',
+      replayed: false,
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
     });

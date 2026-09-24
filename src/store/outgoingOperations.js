@@ -123,7 +123,7 @@ class OutgoingOperationsSqlite {
     this.markSentStmt = this.db.prepare(`
       UPDATE outgoing_operations
       SET state = 'sent', wa_message_id = @waMessageId, media_ref_json = @mediaRefJson,
-          resolved_at = @now, updated_at = @now
+          resolved_at = @resolvedAt, updated_at = @now
       WHERE operation_id = @operationId AND state = 'in_flight'
     `);
     this.markFailedStmt = this.db.prepare(`
@@ -188,12 +188,16 @@ class OutgoingOperationsSqlite {
     return this.getStmt.get({ operationId }) || null;
   }
 
-  markSent(operationId, { waMessageId = null, mediaRef = null } = {}) {
+  // `sentAt` (ISO, opsional) = waktu kirim asli; disimpan sebagai resolved_at supaya
+  // replay mengembalikan `timestamp` yang sama dengan respons pertama.
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null } = {}) {
+    const now = this._nowIso();
     const info = this.markSentStmt.run({
       operationId,
       waMessageId,
       mediaRefJson: mediaRef ? JSON.stringify(mediaRef) : null,
-      now: this._nowIso(),
+      resolvedAt: sentAt || now,
+      now,
     });
     return info.changes === 1;
   }
@@ -319,12 +323,12 @@ class OutgoingOperationsJsonFile {
     return row ? { ...row } : null;
   }
 
-  markSent(operationId, { waMessageId = null, mediaRef = null } = {}) {
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null } = {}) {
     return this._updateInFlight(operationId, (row, now) => {
       row.state = 'sent';
       row.wa_message_id = waMessageId;
       row.media_ref_json = mediaRef ? JSON.stringify(mediaRef) : null;
-      row.resolved_at = now;
+      row.resolved_at = sentAt || now;
       row.updated_at = now;
     });
   }

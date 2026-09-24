@@ -126,10 +126,11 @@ function runSuite(label, make) {
   assert.strictEqual(s.get('OP-1').state, 'sent');
   console.log('OK');
 
-  console.log('--- markSent() tanpa mediaRef -> media_ref_json NULL ---');
+  console.log('--- markSent() tanpa mediaRef -> media_ref_json NULL; sentAt disimpan sebagai resolved_at ---');
   s.begin(base('OP-T'));
-  s.markSent('OP-T', { waMessageId: 'WA-T' });
+  s.markSent('OP-T', { waMessageId: 'WA-T', sentAt: '2026-09-24T09:59:59.000Z' });
   assert.strictEqual(s.get('OP-T').media_ref_json, null);
+  assert.strictEqual(s.get('OP-T').resolved_at, '2026-09-24T09:59:59.000Z');
   console.log('OK');
 
   console.log('--- markFailed(): terminal failed + last_error dipotong ---');
