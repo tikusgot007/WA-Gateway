@@ -11,6 +11,8 @@ const singletonPath = path.join(tmpDir, 'singleton.sqlite');
 const jsonPath = path.join(tmpDir, 'gateway.json');
 process.env.SQLITE_PATH = singletonPath;
 process.env.DELIVERY_DEAD_BURST_THRESHOLD = '2';
+process.env.CI4_BASE_URL = 'http://127.0.0.1:1';
+process.env.CI4_GATEWAY_TOKEN = 'test-token';
 
 const Database = require('better-sqlite3');
 const logger = require('../src/logging');
@@ -121,6 +123,90 @@ function exerciseStore(buffer, label) {
   }
 }
 
+async function exerciseDelivery() {
+  const { deliverOne } = require('../src/delivery/incomingDelivery');
+  const calls = [];
+  const baseEvent = {
+    id: 401,
+    wa_message_id: 'SIM-PERMANENT',
+    chat_id: '628111000401@s.whatsapp.net',
+    jid_type: 'pn',
+    message_type: 'text',
+    text: 'fixture',
+    message_timestamp: new Date().toISOString(),
+    direction: 'incoming',
+    attempts: 4,
+  };
+  const makeDependencies = (status) => {
+    const state = { status: 'pending', attempts: 4, lastError: null, nextAttemptAt: null };
+    return {
+      state,
+      deps: {
+        postToCI4: async (path) => {
+          calls.push({ path, body: baseEvent });
+          return { ok: false, status, json: null, error: `HTTP ${status}` };
+        },
+        incomingBuffer: {
+          markPermanentDead: (id, error) => {
+            state.status = 'dead';
+            state.lastError = error;
+          },
+          markFailedAttempt: (id, attempts, error) => {
+            state.status = 'failed';
+            state.attempts += 1;
+            state.lastError = error;
+            state.nextAttemptAt = new Date(Date.now() + 3000).toISOString();
+            return { delayMs: 3000, nextAttemptAt: state.nextAttemptAt, deadLettered: false };
+          },
+        },
+        logger: { info() {}, warn() {} },
+      },
+    };
+  };
+
+  for (const status of [400, 422]) {
+    const { state, deps } = makeDependencies(status);
+    await deliverOne(baseEvent, deps);
+    assert.strictEqual(state.status, 'dead', `HTTP ${status} harus dead`);
+    assert.strictEqual(state.attempts, 4, `HTTP ${status} tidak boleh menambah attempts`);
+    assert.strictEqual(state.lastError, `HTTP ${status}`);
+  }
+
+  for (const status of [401, 500]) {
+    const { state, deps } = makeDependencies(status);
+    await deliverOne(baseEvent, deps);
+    assert.strictEqual(state.status, 'failed', `HTTP ${status} harus retryable`);
+    assert.strictEqual(state.attempts, 5, `HTTP ${status} harus menambah attempts`);
+    assert.ok(state.nextAttemptAt, `HTTP ${status} harus dijadwalkan ulang`);
+  }
+
+  assert.ok(calls.every((call) => call.path === '/api/inbox/gateway/messages'));
+  console.log('OK delivery: AC-036 HTTP 400/422 permanen; HTTP 401/500 retryable.');
+}
+
+async function exerciseBurstTick() {
+  const { tick } = require('../src/delivery/incomingDelivery');
+  let deadCount = 0;
+  let burstLogged = false;
+  const buffer = {
+    countDeadLettered: () => deadCount,
+    getDueEvents: () => [{ id: 1 }, { id: 2 }, { id: 3 }],
+    logDeadLetterBurst: (before, after) => {
+      assert.strictEqual(before, 0);
+      assert.strictEqual(after, 3);
+      burstLogged = true;
+    },
+  };
+  await tick({
+    incomingBuffer: buffer,
+    deliverOne: async () => {
+      deadCount += 1;
+    },
+  });
+  assert.strictEqual(deadCount, 3);
+  assert.strictEqual(burstLogged, true);
+}
+
 let sqlite;
 let json;
 try {
@@ -136,10 +222,17 @@ try {
   json = null;
   console.log('OK JSON: AC-033, AC-034, AC-035, AC-037, AC-038.');
 
-  console.log(`SELURUH ASSERT LULUS; database sementara: ${tmpDir}`);
+  exerciseDelivery().then(exerciseBurstTick).then(() => {
+    console.log('OK burst tick: pertambahan dead > ambang memicu [CRITICAL].');
+    console.log(`SELURUH ASSERT LULUS; database sementara: ${tmpDir}`);
+  }).catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  }).finally(() => {
+    incomingBufferModule.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 } finally {
   if (sqlite) sqlite.close();
   if (json) json.close();
-  incomingBufferModule.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
 }
