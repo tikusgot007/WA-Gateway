@@ -51,6 +51,32 @@ const { EnqueueValidationError } = require('./enqueueValidationError');
  * bukan hilang tanpa jejak. Duplikat wa_message_id (idempotensi normal,
  * lihat E-10) TETAP diabaikan seperti sebelumnya -- itu bukan kegagalan.
  */
+const VALID_DEAD_LETTER_REASONS = new Set([
+  'max_attempts',
+  'max_age',
+  'permanent_rejection',
+]);
+
+function calculateRetryDelay(attempts) {
+  const { initialDelayMs, maxDelayMs, backoffFactor } = config.deliveryRetry;
+  return Math.min(initialDelayMs * Math.pow(backoffFactor, attempts), maxDelayMs);
+}
+
+function assertDeadLetterReason(reason) {
+  if (!VALID_DEAD_LETTER_REASONS.has(reason)) {
+    throw new Error(`Alasan dead-letter tidak valid: ${reason}`);
+  }
+}
+
+function logDeadLetter(event, reason) {
+  logger.error('[CRITICAL] event incoming dipindahkan ke dead-letter', {
+    severity: 'critical',
+    waMessageId: event.wa_message_id,
+    attempts: event.attempts,
+    lastError: event.last_error,
+    reason,
+  });
+}
 
 function assertRequiredFields(event) {
   const missing = [];
@@ -179,6 +205,34 @@ class IncomingBufferSqlite {
       WHERE id = @id
     `);
 
+    this.markFailedDeadStmt = this.db.prepare(`
+      UPDATE incoming_queue
+      SET status = 'dead', attempts = attempts + 1, last_error = @error,
+          dead_lettered_at = @now, next_attempt_at = @nextAttemptAt, updated_at = @now
+      WHERE id = @id
+    `);
+
+    this.markPermanentDeadStmt = this.db.prepare(`
+      UPDATE incoming_queue
+      SET status = 'dead', last_error = @error,
+          dead_lettered_at = @now, updated_at = @now
+      WHERE id = @id
+    `);
+
+    this.getByIdStmt = this.db.prepare(`
+      SELECT * FROM incoming_queue WHERE id = @id
+    `);
+
+    this.replayDeadStmt = this.db.prepare(`
+      UPDATE incoming_queue
+      SET status = 'failed', next_attempt_at = @now, updated_at = @now
+      WHERE id = @id AND status = 'dead'
+    `);
+
+    this.countDeadStmt = this.db.prepare(`
+      SELECT COUNT(*) AS n FROM incoming_queue WHERE status = 'dead'
+    `);
+
     this.countPendingStmt = this.db.prepare(`
       SELECT COUNT(*) AS n FROM incoming_queue WHERE status IN ('pending', 'failed')
     `);
@@ -222,6 +276,12 @@ class IncomingBufferSqlite {
     // dicek dulu sebelum ALTER).
     const columns = this.db.prepare(`PRAGMA table_info(incoming_queue)`).all();
     const columnNames = columns.map((col) => col.name);
+
+    if (!columnNames.includes('dead_lettered_at')) {
+      // TEXT, nullable -- diisi sekali saat event menjadi dead (D-07/REQ-033).
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN dead_lettered_at TEXT`);
+      logger.info('[MIGRASI] kolom dead_lettered_at ditambahkan ke incoming_queue (database SQLite lama).');
+    }
 
     if (!columnNames.includes('direction')) {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN direction TEXT NOT NULL DEFAULT 'incoming'`);
@@ -314,18 +374,68 @@ class IncomingBufferSqlite {
   }
 
   markFailedAttempt(id, attempts, errorMessage) {
-    const { initialDelayMs, maxDelayMs, backoffFactor } = config.deliveryRetry;
-    const delayMs = Math.min(initialDelayMs * Math.pow(backoffFactor, attempts), maxDelayMs);
+    const row = this.getByIdStmt.get({ id });
+    if (!row) return { delayMs: 0, nextAttemptAt: null, deadLettered: false };
+
+    const nextAttempts = Number(row.attempts) + 1;
+    const ageMs = Date.now() - Date.parse(row.created_at);
+    const exceedsAttempts = nextAttempts >= config.deliveryMaxAttempts;
+    const exceedsAge = config.deliveryDeadAfterMs > 0 && ageMs > config.deliveryDeadAfterMs;
+    const reason = exceedsAttempts ? 'max_attempts' : exceedsAge ? 'max_age' : null;
+    const delayMs = calculateRetryDelay(row.attempts);
     const nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
+    const now = new Date().toISOString();
 
-    this.markFailedStmt.run({
-      id,
-      error: String(errorMessage).slice(0, 1000),
-      nextAttemptAt,
-      now: new Date().toISOString(),
-    });
+    if (reason) {
+      assertDeadLetterReason(reason);
+      this.markFailedDeadStmt.run({ id, error: String(errorMessage).slice(0, 1000), nextAttemptAt, now });
+      const dead = this.getByIdStmt.get({ id });
+      logDeadLetter(dead, reason);
+      return { delayMs, nextAttemptAt, deadLettered: true };
+    }
 
-    return { delayMs, nextAttemptAt };
+    this.markFailedStmt.run({ id, error: String(errorMessage).slice(0, 1000), nextAttemptAt, now });
+    return { delayMs, nextAttemptAt, deadLettered: false };
+  }
+
+  markPermanentDead(id, errorMessage) {
+    const row = this.getByIdStmt.get({ id });
+    if (!row) return false;
+    const now = new Date().toISOString();
+    this.markPermanentDeadStmt.run({ id, error: String(errorMessage).slice(0, 1000), now });
+    logDeadLetter(this.getByIdStmt.get({ id }), 'permanent_rejection');
+    return true;
+  }
+
+  replayDeadLetter(id) {
+    const now = new Date().toISOString();
+    return this.replayDeadStmt.run({ id, now }).changes > 0;
+  }
+
+  countDeadLettered() {
+    return this.countDeadStmt.get().n;
+  }
+
+  logDeadLetterStartup() {
+    const count = this.countDeadLettered();
+    if (count > 0) {
+      logger.error('[DELIVERY] incoming queue memiliki event dead-letter', {
+        deadLettered: count,
+      });
+    }
+    return count;
+  }
+
+  logDeadLetterBurst(before, after) {
+    const added = Math.max(0, after - before);
+    if (added > config.deliveryDeadBurstThreshold) {
+      logger.error('[CRITICAL] lonjakan event dead-letter terdeteksi; hentikan replay otomatis dan periksa AuliaPos', {
+        severity: 'critical',
+        added,
+        threshold: config.deliveryDeadBurstThreshold,
+      });
+    }
+    return added;
   }
 
   countPending() {
@@ -562,21 +672,83 @@ class IncomingBufferJsonFile {
   }
 
   markFailedAttempt(id, attempts, errorMessage) {
-    const { initialDelayMs, maxDelayMs, backoffFactor } = config.deliveryRetry;
-    const delayMs = Math.min(initialDelayMs * Math.pow(backoffFactor, attempts), maxDelayMs);
-    const nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
-
     const row = this.rows.find((r) => r.id === id);
-    if (row) {
-      row.status = 'failed';
-      row.attempts += 1;
-      row.last_error = String(errorMessage).slice(0, 1000);
-      row.next_attempt_at = nextAttemptAt;
-      row.updated_at = new Date().toISOString();
-      this._persist();
-    }
+    if (!row) return { delayMs: 0, nextAttemptAt: null, deadLettered: false };
 
-    return { delayMs, nextAttemptAt };
+    const nextAttempts = Number(row.attempts) + 1;
+    const ageMs = Date.now() - Date.parse(row.created_at);
+    const exceedsAttempts = nextAttempts >= config.deliveryMaxAttempts;
+    const exceedsAge = config.deliveryDeadAfterMs > 0 && ageMs > config.deliveryDeadAfterMs;
+    const reason = exceedsAttempts ? 'max_attempts' : exceedsAge ? 'max_age' : null;
+    const delayMs = calculateRetryDelay(row.attempts);
+    const nextAttemptAt = new Date(Date.now() + delayMs).toISOString();
+    const now = new Date().toISOString();
+
+    row.status = reason ? 'dead' : 'failed';
+    row.attempts = nextAttempts;
+    row.last_error = String(errorMessage).slice(0, 1000);
+    row.next_attempt_at = nextAttemptAt;
+    row.updated_at = now;
+    if (reason) {
+      assertDeadLetterReason(reason);
+      row.dead_lettered_at = now;
+    }
+    this._persist();
+    if (reason) {
+      logDeadLetter(row, reason);
+      return { delayMs, nextAttemptAt, deadLettered: true };
+    }
+    return { delayMs, nextAttemptAt, deadLettered: false };
+  }
+
+  markPermanentDead(id, errorMessage) {
+    const row = this.rows.find((r) => r.id === id);
+    if (!row) return false;
+    const now = new Date().toISOString();
+    row.status = 'dead';
+    row.last_error = String(errorMessage).slice(0, 1000);
+    row.dead_lettered_at = now;
+    row.updated_at = now;
+    this._persist();
+    logDeadLetter(row, 'permanent_rejection');
+    return true;
+  }
+
+  replayDeadLetter(id) {
+    const row = this.rows.find((r) => r.id === id);
+    if (!row || row.status !== 'dead') return false;
+    const now = new Date().toISOString();
+    row.status = 'failed';
+    row.next_attempt_at = now;
+    row.updated_at = now;
+    this._persist();
+    return true;
+  }
+
+  countDeadLettered() {
+    return this.rows.filter((row) => row.status === 'dead').length;
+  }
+
+  logDeadLetterStartup() {
+    const count = this.countDeadLettered();
+    if (count > 0) {
+      logger.error('[DELIVERY] incoming queue memiliki event dead-letter', {
+        deadLettered: count,
+      });
+    }
+    return count;
+  }
+
+  logDeadLetterBurst(before, after) {
+    const added = Math.max(0, after - before);
+    if (added > config.deliveryDeadBurstThreshold) {
+      logger.error('[CRITICAL] lonjakan event dead-letter terdeteksi; hentikan replay otomatis dan periksa AuliaPos', {
+        severity: 'critical',
+        added,
+        threshold: config.deliveryDeadBurstThreshold,
+      });
+    }
+    return added;
   }
 
   countPending() {

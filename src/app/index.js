@@ -7,6 +7,7 @@ const connectionManager = require('../whatsapp/connectionManager');
 const { startServer } = require('../api/server');
 const incomingDelivery = require('../delivery/incomingDelivery');
 const heartbeat = require('../delivery/heartbeat');
+const incomingBuffer = require('../store/incomingBuffer');
 const outgoingOperationService = require('../delivery/outgoingOperationService');
 
 async function main() {
@@ -36,6 +37,11 @@ async function main() {
   // (lihat log level debug di masing-masing modul).
   incomingDelivery.start();
   heartbeat.start();
+
+  // M1 Wave 2 (REQ-038, TASK-011): beri operator visibility terhadap event
+  // yang sudah terminal. Pemeriksaan ini tidak mengubah antrean dan tidak
+  // memblokir start.
+  incomingBuffer.logDeadLetterStartup();
 
   // M1 Wave 2 (REQ-031/REQ-032, TASK-008): tugas start-up operasi kirim keluar --
   // catat operasi in_flight basi (hasil kirim belum pasti) dan pangkas baris
