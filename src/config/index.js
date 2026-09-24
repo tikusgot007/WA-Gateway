@@ -110,6 +110,28 @@ const config = {
   lidLookupTimeoutMs: Math.max(1, toInt(process.env.LID_LOOKUP_TIMEOUT_MS, 2000)),
   lidLookupNegativeTtlMs: Math.max(0, toInt(process.env.LID_LOOKUP_NEGATIVE_TTL_MS, 60000)),
 
+  // M1 Wave 2 TASK-002 (GUD-003, spec 4.6): batas idempotensi kirim keluar
+  // dan batas percobaan/dead-letter. Nilai tidak valid -> bawaan utuh (toInt);
+  // nilai di bawah minimum di-clamp (pola Math.max seperti ownSentTtlMs).
+  // - outgoingMaxAttempts: cap JUMLAH KIRIMAN satu operasi keluar sebelum
+  //   'abandoned' (diperiksa sebelum kirim ulang, D-11/R-2).
+  // - outgoingLeaseMs: usia `in_flight` yang masih dianggap "sedang dikerjakan".
+  //   Sengaja > timeout klien terpanjang AuliaPos (media 30 dtk) + margin (R-1).
+  // - outgoingOperationTtlMs: usia maksimum baris operasi terminal sebelum
+  //   dipangkas; sekaligus batas jaminan idempotensi (D-13/A-5).
+  // - deliveryMaxAttempts: cap JUMLAH KEGAGALAN satu event incoming_queue
+  //   sebelum 'dead' (basis mulai 0, beda dari outgoing -- A-8a).
+  // - deliveryDeadAfterMs: usia maksimum event sebelum dipaksa 'dead';
+  //   0 = tanpa batas usia.
+  // - deliveryDeadBurstThreshold: pertambahan baris 'dead' dalam satu siklus
+  //   yang memicu log [CRITICAL] (A-8c).
+  outgoingMaxAttempts: Math.max(1, toInt(process.env.OUTGOING_MAX_ATTEMPTS, 5)),
+  outgoingLeaseMs: Math.max(1, toInt(process.env.OUTGOING_LEASE_MS, 35000)),
+  outgoingOperationTtlMs: Math.max(1, toInt(process.env.OUTGOING_OPERATION_TTL_MS, 86400000)),
+  deliveryMaxAttempts: Math.max(1, toInt(process.env.DELIVERY_MAX_ATTEMPTS, 100)),
+  deliveryDeadAfterMs: Math.max(0, toInt(process.env.DELIVERY_DEAD_AFTER_MS, 86400000)),
+  deliveryDeadBurstThreshold: Math.max(1, toInt(process.env.DELIVERY_DEAD_BURST_THRESHOLD, 10)),
+
   // Heartbeat status ke CI4 (POST /api/inbox/gateway/status).
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
 
