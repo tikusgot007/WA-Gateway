@@ -57,11 +57,31 @@ connectionManager.sendReply = async (chatId, text) => {
   stub.seq += 1;
   return { messageId: `WA-${stub.seq}`, timestamp: `2026-09-24T10:00:0${stub.seq % 10}.000Z` };
 };
+// Stub jalur media: mencatat panggilan (termasuk buffer hasil decode) dan mengembalikan
+// mediaRef ala Baileys (directPath/mediaKeyBase64), sama seperti sendMediaReply() asli.
+stub.mediaCalls = [];
+stub.mediaImpl = null;
+stub.onMediaCall = null;
+connectionManager.sendMediaReply = async (chatId, mediaType, buffer, options) => {
+  const call = { chatId, mediaType, buffer, options };
+  stub.mediaCalls.push(call);
+  if (stub.onMediaCall) stub.onMediaCall(call);
+  if (stub.mediaImpl) return stub.mediaImpl(call);
+  stub.seq += 1;
+  return {
+    messageId: `WAM-${stub.seq}`,
+    timestamp: `2026-09-24T11:00:0${stub.seq % 10}.000Z`,
+    mediaRef: { directPath: `/v/t62/${stub.seq}`, mediaKeyBase64: 'a2V5LWJhc2U2NA==' },
+  };
+};
 function resetStub() {
   stub.connected = true;
   stub.calls = [];
   stub.impl = null;
   stub.onCall = null;
+  stub.mediaCalls = [];
+  stub.mediaImpl = null;
+  stub.onMediaCall = null;
 }
 
 // --- server nyata di port acak; restart = muat ulang modul store/service/router ---
@@ -102,6 +122,15 @@ async function post(route, body) {
 }
 
 const sendText = (extra = {}) => post('/send', { chat_id: CHAT, text: 'halo', ...extra });
+const IMG = Buffer.from('ISI-GAMBAR-UJI-AAAA');
+const sendMedia = (extra = {}) => post('/send-media', {
+  chat_id: CHAT,
+  media_type: 'image',
+  media_base64: IMG.toString('base64'),
+  mimetype: 'image/jpeg',
+  caption: 'foto produk',
+  ...extra,
+});
 const rowCount = () => store.db.prepare('SELECT COUNT(*) AS n FROM outgoing_operations').get().n;
 const section = (title) => console.log(`\n--- ${title} ---`);
 
@@ -373,6 +402,145 @@ const section = (title) => console.log(`\n--- ${title} ---`);
   assert.strictEqual(stub.calls.length, 1, 'tidak ada kiriman baru setelah restart');
   console.log('OK');
 
+  // ===================== TASK-004: /send-media =====================
+
+  section('Media, AC-019: operation_id tidak valid dan payload media tidak valid -> 400, tanpa baris/kirim');
+  resetStub();
+  const mediaRowsBefore = rowCount();
+  res = await sendMedia({ operation_id: 'a'.repeat(65) });
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual(res.body.error_code, 'INVALID_OPERATION_ID');
+  res = await sendMedia({ operation_id: 'OP-M-BAD-B64', media_base64: 'bukan base64 valid !!!' });
+  assert.strictEqual(res.body.error_code, 'INVALID_MEDIA_BASE64');
+  res = await sendMedia({ operation_id: 'OP-M-BAD-TYPE', media_type: 'video' });
+  assert.strictEqual(res.body.error_code, 'INVALID_MEDIA_TYPE');
+  res = await sendMedia({ operation_id: 'OP-M-BAD-DOC', media_type: 'document' });
+  assert.strictEqual(res.body.error_code, 'MISSING_FILE_NAME');
+  res = await sendMedia({ operation_id: 'OP-M-BAD-STK', media_type: 'sticker' }); // bukan WebP
+  assert.strictEqual(res.body.error_code, 'INVALID_STICKER_FORMAT');
+  res = await sendMedia({ operation_id: 'OP-M-BAD-CAP', caption: 'x'.repeat(1025) });
+  assert.strictEqual(res.body.error_code, 'CAPTION_TOO_LONG');
+  assert.strictEqual(stub.mediaCalls.length, 0, 'sendMediaReply TIDAK boleh dipanggil');
+  assert.strictEqual(rowCount(), mediaRowsBefore, 'payload media ditolak -> tidak ada baris in_flight (A-7)');
+  console.log('OK');
+
+  section('Media, AC-020: in_flight (kind=media) tersimpan SEBELUM sendMediaReply dipanggil');
+  resetStub();
+  let releaseMedia;
+  const mediaGate = new Promise((resolve) => {
+    releaseMedia = resolve;
+  });
+  let mediaStateAtCall = null;
+  stub.onMediaCall = () => {
+    mediaStateAtCall = store.get('OP-M-HANG');
+  };
+  stub.mediaImpl = async () => {
+    await mediaGate;
+    return { messageId: 'WAM-HANG', timestamp: '2026-09-24T11:05:00.000Z', mediaRef: null };
+  };
+  const hangingMedia = sendMedia({ operation_id: 'OP-M-HANG' });
+  while (stub.mediaCalls.length === 0) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(mediaStateAtCall, 'baris operasi HARUS sudah ada saat sendMediaReply terpanggil');
+  assert.strictEqual(mediaStateAtCall.state, 'in_flight');
+  assert.strictEqual(mediaStateAtCall.kind, 'media');
+  assert.strictEqual(mediaStateAtCall.attempts, 1);
+  res = await sendMedia({ operation_id: 'OP-M-HANG' });
+  assert.strictEqual(res.status, 409);
+  assert.strictEqual(res.body.error_code, 'SEND_IN_PROGRESS');
+  assert.strictEqual(stub.mediaCalls.length, 1, 'tanpa kiriman kedua');
+  releaseMedia();
+  const hangDone = await hangingMedia;
+  assert.strictEqual(hangDone.status, 200);
+  assert.strictEqual(hangDone.body.media_ref, null, 'mediaRef null tetap dijawab sebagai media_ref:null');
+  const hangReplay = await sendMedia({ operation_id: 'OP-M-HANG' });
+  assert.strictEqual(hangReplay.body.replayed, true);
+  assert.strictEqual(hangReplay.body.media_ref, null);
+  console.log('OK');
+
+  section('Media, AC-021/AC-024: replay -> 200 replayed:true, wa_message_id + media_ref identik, tanpa kirim');
+  resetStub();
+  res = await sendMedia({ operation_id: 'OP-M1' });
+  assert.strictEqual(res.status, 200);
+  assert.deepStrictEqual(
+    Object.keys(res.body).sort(),
+    ['media_ref', 'operation_id', 'replayed', 'state', 'success', 'timestamp', 'wa_message_id']
+  );
+  assert.strictEqual(res.body.replayed, false);
+  assert.deepStrictEqual(res.body.media_ref, { direct_path: res.body.media_ref.direct_path, media_key_base64: 'a2V5LWJhc2U2NA==' });
+  assert.ok(res.body.media_ref.direct_path.startsWith('/v/t62/'));
+  assert.strictEqual(stub.mediaCalls.length, 1);
+  assert.ok(stub.mediaCalls[0].buffer.equals(IMG), 'buffer hasil decode diteruskan apa adanya');
+  const mediaOriginal = res.body;
+  const mediaReplay = await sendMedia({ operation_id: 'OP-M1' });
+  assert.strictEqual(mediaReplay.status, 200);
+  assert.strictEqual(mediaReplay.body.replayed, true);
+  assert.strictEqual(mediaReplay.body.wa_message_id, mediaOriginal.wa_message_id);
+  assert.strictEqual(mediaReplay.body.timestamp, mediaOriginal.timestamp);
+  assert.deepStrictEqual(mediaReplay.body.media_ref, mediaOriginal.media_ref);
+  assert.strictEqual(stub.mediaCalls.length, 1, 'sendMediaReply TIDAK dipanggil lagi pada replay');
+  console.log('OK');
+
+  section('Media, AC-022: kunci sama, isi/metadata berbeda -> 409 OPERATION_ID_REUSED, tanpa kirim');
+  const sameSizeOtherBytes = Buffer.from('ISI-GAMBAR-UJI-BBBB'); // panjang sama, SHA-256 beda
+  assert.strictEqual(sameSizeOtherBytes.length, IMG.length);
+  const variants = [
+    ['konten beda (ukuran sama)', { media_base64: sameSizeOtherBytes.toString('base64') }],
+    ['caption beda', { caption: 'caption lain' }],
+    ['mimetype beda', { mimetype: 'image/png' }],
+    ['file_name beda', { file_name: 'lain.jpg' }],
+    ['is_animated beda', { is_animated: true }],
+    ['chat_id beda', { chat_id: '628999@s.whatsapp.net' }],
+  ];
+  for (const [label, extra] of variants) {
+    const r = await sendMedia({ operation_id: 'OP-M1', ...extra });
+    assert.strictEqual(r.status, 409, label);
+    assert.strictEqual(r.body.error_code, 'OPERATION_ID_REUSED', label);
+    assert.strictEqual(r.body.replayed, false, label);
+  }
+  assert.strictEqual(stub.mediaCalls.length, 1);
+  // Kunci yang dipakai jalur teks tidak bisa dipakai jalur media (kind masuk fingerprint).
+  res = await sendMedia({ operation_id: 'OP-R1' }); // OP-R1 sudah dipakai /send teks
+  assert.strictEqual(res.body.error_code, 'OPERATION_ID_REUSED');
+  assert.strictEqual(store.get('OP-M1').state, 'sent', 'baris asli tidak berubah');
+  console.log('OK');
+
+  section('Media, AC-025/AC-044: tanpa operation_id -> perilaku lama, tanpa baris, warn sekali per proses');
+  resetStub();
+  const mediaRowsLegacy = rowCount();
+  const warnsMediaBefore = logs.filter((l) => l.level === 'warn' && /tanpa operation_id/.test(l.message)).length;
+  const legacyMedia1 = await sendMedia();
+  const legacyMedia2 = await sendMedia();
+  for (const r of [legacyMedia1, legacyMedia2]) {
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(Object.keys(r.body).sort(), ['media_ref', 'replayed', 'state', 'success', 'timestamp', 'wa_message_id']);
+    assert.strictEqual(r.body.state, 'sent');
+    assert.strictEqual(r.body.replayed, false);
+    assert.ok(r.body.media_ref.direct_path && r.body.media_ref.media_key_base64, 'media_ref bentuk lama tetap ada');
+  }
+  assert.strictEqual(stub.mediaCalls.length, 2, 'setiap panggilan tetap mengirim');
+  assert.strictEqual(rowCount(), mediaRowsLegacy);
+  // Modul dimuat ulang oleh tes restart -> flag "sudah warn" baru: tepat 1 warn untuk 2 permintaan.
+  const warnsMediaAfter = logs.filter((l) => l.level === 'warn' && /tanpa operation_id/.test(l.message)).length;
+  assert.strictEqual(warnsMediaAfter - warnsMediaBefore, 1);
+  console.log('OK');
+
+  section('Media: kegagalan kirim tanpa operation_id tetap 500 seperti sebelumnya');
+  resetStub();
+  stub.mediaImpl = async () => {
+    const err = new Error('Gagal mengirim media: socket putus');
+    err.code = 'SEND_FAILED';
+    throw err;
+  };
+  res = await sendMedia();
+  assert.strictEqual(res.status, 500);
+  assert.deepStrictEqual(res.body, { success: false, error_code: 'SEND_FAILED', message: 'Gagal mengirim media: socket putus' });
+  // dan dengan operation_id: ambigu -> 504, tetap in_flight (stub-only, A-2)
+  res = await sendMedia({ operation_id: 'OP-M-AMB' });
+  assert.strictEqual(res.status, 504);
+  assert.strictEqual(res.body.error_code, 'SEND_UNRESOLVED');
+  assert.strictEqual(store.get('OP-M-AMB').state, 'in_flight');
+  console.log('OK');
+
   section('SEC-001: log dan basis data tidak memuat isi pesan');
   resetStub();
   const SECRET = 'RAHASIA-ISI-PESAN-PELANGGAN-123';
@@ -384,9 +552,26 @@ const section = (title) => console.log(`\n--- ${title} ---`);
   await post('/send', { chat_id: CHAT, text: SECRET, operation_id: 'OP-SEC-OK' });
   await post('/send', { chat_id: CHAT, text: `${SECRET} beda`, operation_id: 'OP-SEC-OK' }); // reused
   await post('/send', { chat_id: CHAT, text: SECRET }); // tanpa operation_id
-  assert.ok(!logText().includes(SECRET), 'isi pesan tidak boleh muncul di log');
+  // Media: gagal (ambigu), sukses, reused, dan tanpa operation_id -- semuanya membawa base64 rahasia.
+  const SECRET_MEDIA = Buffer.from('RAHASIA-ISI-MEDIA-PELANGGAN-456-'.repeat(4));
+  const SECRET_B64 = SECRET_MEDIA.toString('base64');
+  stub.mediaImpl = async () => {
+    throw new Error('Gagal mengirim media: socket putus');
+  };
+  await sendMedia({ operation_id: 'OP-SEC-M-FAIL', media_base64: SECRET_B64, caption: SECRET });
+  stub.mediaImpl = null;
+  await sendMedia({ operation_id: 'OP-SEC-M-OK', media_base64: SECRET_B64, caption: SECRET });
+  await sendMedia({ operation_id: 'OP-SEC-M-OK', media_base64: SECRET_B64, caption: `${SECRET} beda` }); // reused
+  await sendMedia({ media_base64: SECRET_B64, caption: SECRET }); // tanpa operation_id
+  await sendMedia({ operation_id: 'OP-SEC-M-BAD', media_base64: `${SECRET_B64.slice(0, 20)} !!!` }); // base64 rusak
+  const everything = logText();
+  assert.ok(!everything.includes(SECRET), 'isi pesan/caption tidak boleh muncul di log');
+  assert.ok(!everything.includes(SECRET_B64), 'string media_base64 tidak boleh muncul di log');
+  assert.ok(!everything.includes(SECRET_B64.slice(0, 20)), 'potongan media_base64 tidak boleh muncul di log');
+  assert.ok(!everything.includes('RAHASIA-ISI-MEDIA'), 'isi media hasil decode tidak boleh muncul di log');
   const dump = JSON.stringify(store.db.prepare('SELECT * FROM outgoing_operations').all());
   assert.ok(!dump.includes(SECRET), 'isi pesan tidak boleh tersimpan di outgoing_operations');
+  assert.ok(!dump.includes(SECRET_B64) && !dump.includes('RAHASIA-ISI-MEDIA'), 'isi media tidak boleh tersimpan di outgoing_operations');
   console.log('OK');
 
   console.log('\nSEMUA ASSERT LULUS (0 gagal).');

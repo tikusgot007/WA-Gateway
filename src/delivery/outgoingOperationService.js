@@ -48,6 +48,24 @@ function computePayloadHash({ kind, chatId, text = null, mediaMeta = null }) {
     .digest('hex');
 }
 
+/**
+ * Metadata media untuk fingerprint (ASSUMPTION-005, SEC-001): dihitung dari konten
+ * HASIL DECODE base64, bukan dari string base64-nya -- string itu tidak pernah
+ * di-hash apa adanya maupun ditulis ke log. Dua media berbeda dengan kunci yang
+ * sama tetap terdeteksi lewat `sha256` isinya.
+ */
+function buildMediaMeta({ mediaType, buffer, mimetype, fileName, caption, isAnimated }) {
+  return {
+    media_type: mediaType,
+    size: buffer.length,
+    sha256: crypto.createHash('sha256').update(buffer).digest('hex'),
+    mimetype: mimetype || null,
+    file_name: fileName || null,
+    caption: caption || null,
+    is_animated: Boolean(isAnimated),
+  };
+}
+
 // REQ-026: satu `warn` per PROSES (bukan per permintaan) supaya transisi AuliaPos
 // terlihat tanpa membanjiri log.
 let warnedWithoutOperationId = false;
@@ -274,6 +292,7 @@ module.exports = {
   OPERATION_ID_PATTERN,
   validateOperationId,
   computePayloadHash,
+  buildMediaMeta,
   warnWithoutOperationIdOnce,
   runOperation,
   toHttpResponse,

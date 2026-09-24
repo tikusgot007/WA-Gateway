@@ -160,6 +160,12 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     is_animated: isAnimated,
   } = req.body || {};
 
+  // M1 Wave 2 (REQ-020): dicek paling awal -- sebelum decode base64 yang mahal --
+  // dan tanpa menyentuh Baileys.
+  const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
+  if (!operation.ok) return invalidOperationIdResponse(res);
+  const { operationId } = operation;
+
   if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
     return res.status(400).json({
       success: false,
@@ -219,6 +225,55 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     });
   }
 
+  // sendMediaReply() dipilih (bukan sendMediaMessage() langsung) supaya
+  // media yang dikirim dari POS JUGA tercatat di messageStore lokal
+  // Gateway, konsisten dengan /send (yang memakai sendReply()).
+  // media_ref (kalau ada) memakai nama field YANG SAMA dengan payload
+  // referensi media MASUK (direct_path/media_key_base64) supaya CI4 bisa
+  // menyimpan & memakainya lewat alur POST /media/download yang sudah ada,
+  // tanpa endpoint/logic baru -- media KELUAR jadi bisa dibuka ulang nanti
+  // persis seperti media MASUK. Kalau Baileys tidak mengembalikan
+  // referensi lengkap (mediaRef null), field ini cukup diabaikan CI4.
+  // Satu-satunya titik panggilan sendMediaReply() di route ini (lihat /send).
+  const doSend = async () => {
+    const result = await connectionManager.sendMediaReply(chatId, mediaType, decoded.buffer, {
+      caption: caption || undefined,
+      mimetype: mimetype || undefined,
+      fileName: fileName || undefined,
+      isAnimated: Boolean(isAnimated),
+    });
+    return {
+      messageId: result.messageId,
+      timestamp: result.timestamp,
+      mediaRef: result.mediaRef ? {
+        direct_path: result.mediaRef.directPath,
+        media_key_base64: result.mediaRef.mediaKeyBase64,
+      } : null,
+    };
+  };
+
+  if (operationId) {
+    // M1 Wave 2 (REQ-021..REQ-027): kirim dengan idempotensi. Fingerprint dari
+    // metadata + SHA-256 konten hasil decode (bukan string base64, SEC-001),
+    // dihitung SETELAH seluruh validasi payload di atas lolos (A-7).
+    const mediaMeta = outgoingOperationService.buildMediaMeta({
+      mediaType, buffer: decoded.buffer, mimetype, fileName, caption, isAnimated,
+    });
+    const decision = await outgoingOperationService.runOperation({
+      operationId,
+      payloadHash: outgoingOperationService.computePayloadHash({ kind: 'media', chatId, mediaMeta }),
+      kind: 'media',
+      chatId,
+      isReady: () => connectionManager.isConnected(),
+      send: doSend,
+    });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withMediaRef: true });
+    return res.status(status).json(body);
+  }
+
+  // --- jalur lama: tanpa operation_id, perilaku seperti sebelumnya (REQ-026) ---
+  outgoingOperationService.warnWithoutOperationIdOnce();
+
   if (!connectionManager.isConnected()) {
     logger.warn('[SEND-MEDIA-CI4] ditolak, WhatsApp belum connected', { chatId, mediaType });
     return res.status(409).json({
@@ -229,15 +284,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
   }
 
   try {
-    // sendMediaReply() dipilih (bukan sendMediaMessage() langsung) supaya
-    // media yang dikirim dari POS JUGA tercatat di messageStore lokal
-    // Gateway, konsisten dengan /send (yang memakai sendReply()).
-    const result = await connectionManager.sendMediaReply(chatId, mediaType, decoded.buffer, {
-      caption: caption || undefined,
-      mimetype: mimetype || undefined,
-      fileName: fileName || undefined,
-      isAnimated: Boolean(isAnimated),
-    });
+    const result = await doSend();
 
     logger.info('[SEND-MEDIA-CI4] media keluar dari POS berhasil dikirim', {
       chatId,
@@ -246,20 +293,13 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       mediaRefTersedia: Boolean(result.mediaRef),
     });
 
-    // media_ref (kalau ada) memakai nama field YANG SAMA dengan payload
-    // referensi media MASUK (direct_path/media_key_base64) supaya CI4 bisa
-    // menyimpan & memakainya lewat alur POST /media/download yang sudah ada,
-    // tanpa endpoint/logic baru -- media KELUAR jadi bisa dibuka ulang nanti
-    // persis seperti media MASUK. Kalau Baileys tidak mengembalikan
-    // referensi lengkap (mediaRef null), field ini cukup diabaikan CI4.
     return res.json({
       success: true,
+      state: 'sent',
+      replayed: false,
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
-      media_ref: result.mediaRef ? {
-        direct_path: result.mediaRef.directPath,
-        media_key_base64: result.mediaRef.mediaKeyBase64,
-      } : null,
+      media_ref: result.mediaRef,
     });
   } catch (err) {
     logger.error('[SEND-MEDIA-CI4] gagal mengirim media dari POS', { chatId, mediaType, error: err.message });
