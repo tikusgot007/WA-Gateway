@@ -7,6 +7,7 @@ const connectionManager = require('../whatsapp/connectionManager');
 const { startServer } = require('../api/server');
 const incomingDelivery = require('../delivery/incomingDelivery');
 const heartbeat = require('../delivery/heartbeat');
+const outgoingOperationService = require('../delivery/outgoingOperationService');
 
 async function main() {
   logger.info('Gateway starting', {
@@ -35,6 +36,12 @@ async function main() {
   // (lihat log level debug di masing-masing modul).
   incomingDelivery.start();
   heartbeat.start();
+
+  // M1 Wave 2 (REQ-031/REQ-032, TASK-008): tugas start-up operasi kirim keluar --
+  // catat operasi in_flight basi (hasil kirim belum pasti) dan pangkas baris
+  // terminal yang melewati TTL. Tidak memblokir start: kegagalan dicatat, bukan
+  // dilempar (lihat outgoingOperationService.runStartupRecovery()).
+  outgoingOperationService.runStartupRecovery();
 
   const shutdown = async (signal) => {
     logger.info(`Menerima sinyal ${signal}, shutting down gateway...`);

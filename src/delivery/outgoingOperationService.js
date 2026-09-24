@@ -351,6 +351,49 @@ function toHttpResponse(decision, { operationId, withMediaRef = false }) {
   }
 }
 
+/**
+ * Tugas start-up operasi kirim keluar (M1 Wave 2 TASK-008, REQ-031/REQ-032).
+ *
+ * Dipanggil sekali saat Gateway start (src/app/index.js). SENGAJA tidak melempar:
+ * pemeriksaan/pemangkasan yang gagal dicatat sebagai error, BUKAN menghalangi
+ * Gateway melayani permintaan (REQ-031 "MUST tidak memblokir start").
+ *
+ * 1. REQ-031: operasi `in_flight` yang lebih tua dari `OUTGOING_LEASE_MS` dicatat
+ *    level error (jumlah + maksimum 20 operation_id) -- sinyal paling awal bahwa
+ *    ada kirim yang hasilnya tidak pasti (ASSUMPTION-009).
+ * 2. REQ-032: `pruneTerminal()` menghapus baris terminal yang lebih tua dari
+ *    `OUTGOING_OPERATION_TTL_MS` (`in_flight` TIDAK PERNAH dihapus) dan mencatat
+ *    `[CRITICAL]` untuk tiap baris `abandoned` sebelum dihapus. Pemangkasan inilah
+ *    yang MENETAPKAN batas jaminan idempotensi: setelah baris terminal dipangkas,
+ *    `operation_id` yang sama dianggap operasi BARU (D-13/A-5, AC-043).
+ *
+ * @returns {{stale: object[], pruned: number}} untuk diuji dan dilaporkan
+ */
+function runStartupRecovery() {
+  let stale = [];
+  let pruned = 0;
+
+  try {
+    stale = outgoingOperations.listStaleInFlight(config.outgoingLeaseMs);
+    if (stale.length > 0) {
+      logger.error('[SEND-OPERATION] operasi in_flight basi ditemukan saat start -- hasil kirim belum pasti', {
+        jumlah: stale.length,
+        operationIds: stale.slice(0, MAX_LISTED_IDS).map((row) => row.operation_id),
+      });
+    }
+  } catch (err) {
+    logger.error('[SEND-OPERATION] gagal memeriksa operasi in_flight basi saat start', { error: err.message });
+  }
+
+  try {
+    pruned = outgoingOperations.pruneTerminal(config.outgoingOperationTtlMs);
+  } catch (err) {
+    logger.error('[SEND-OPERATION] gagal memangkas baris operasi terminal tua saat start', { error: err.message });
+  }
+
+  return { stale, pruned };
+}
+
 module.exports = {
   OPERATION_ID_PATTERN,
   validateOperationId,
@@ -359,4 +402,5 @@ module.exports = {
   warnWithoutOperationIdOnce,
   runOperation,
   toHttpResponse,
+  runStartupRecovery,
 };

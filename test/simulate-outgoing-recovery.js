@@ -311,6 +311,85 @@ const wipeStore = () => {
   }
   console.log('OK');
 
+  // =========================================================================
+  // TASK-008: tugas start-up (REQ-031, REQ-032)
+  // =========================================================================
+  const TTL_MS = 86400000; // spec 4.6 bawaan
+  const seed = (operationId, hash) => store.begin({
+    operationId, payloadHash: hash || `hash-${operationId}`, kind: 'text', chatId: CHAT,
+  });
+
+  section('AC-031: operasi in_flight basi dicatat level error saat start (maks 20 id, tanpa memblokir)');
+  wipeStore();
+  nowMs = Date.parse('2026-09-24T06:00:00.000Z');
+  seed('OP-STALE');
+  nowMs += HOUR; // 1 jam > lease 35 dtk
+  drainLogs();
+  let recovered = svc.runStartupRecovery();
+  let startupLogs = drainLogs();
+  let staleLog = startupLogs.find((l) => l.level === 'error' && /in_flight basi/i.test(l.message));
+  assert.ok(staleLog, 'log error in_flight basi saat start harus ada');
+  assert.strictEqual(staleLog.meta.jumlah, 1);
+  assert.deepStrictEqual(staleLog.meta.operationIds, ['OP-STALE']);
+  assert.deepStrictEqual(recovered.stale.map((r) => r.operation_id), ['OP-STALE']);
+  assert.ok(store.get('OP-STALE'), 'in_flight TIDAK boleh dipangkas');
+  assert.strictEqual(store.get('OP-STALE').state, 'in_flight');
+  console.log('OK: 1 baris in_flight basi dicatat (jumlah + daftar), start tidak terblokir.');
+
+  // Daftar dibatasi 20 operation_id walau jumlahnya lebih banyak (REQ-031).
+  wipeStore();
+  nowMs = Date.parse('2026-09-24T06:00:00.000Z');
+  for (let i = 1; i <= 25; i += 1) seed(`OP-B-${String(i).padStart(2, '0')}`);
+  nowMs += HOUR;
+  drainLogs();
+  recovered = svc.runStartupRecovery();
+  staleLog = drainLogs().find((l) => l.level === 'error' && /in_flight basi/i.test(l.message));
+  assert.strictEqual(staleLog.meta.jumlah, 25, 'jumlah total dilaporkan utuh');
+  assert.strictEqual(staleLog.meta.operationIds.length, 20, 'daftar id dibatasi 20');
+  assert.strictEqual(recovered.stale.length, 25);
+  console.log('OK: 25 baris -> jumlah 25, daftar id dibatasi 20.');
+
+  section('AC-032: pruneTerminal -- baris sent 25 jam dihapus, baris in_flight 25 jam TETAP');
+  wipeStore();
+  nowMs = Date.parse('2026-09-24T06:00:00.000Z');
+  seed('OLD-SENT');
+  store.markSent('OLD-SENT', { waMessageId: 'W-OLD', sentAt: new Date(nowMs).toISOString() });
+  seed('OLD-NFLIGHT');
+  assert.strictEqual(store.countInFlight(), 1);
+  nowMs += TTL_MS + HOUR; // 25 jam, di atas TTL 24 jam
+  recovered = svc.runStartupRecovery();
+  assert.strictEqual(recovered.pruned, 1, 'hanya baris sent yang dipangkas');
+  assert.strictEqual(store.get('OLD-SENT'), null, 'baris terminal tua dibersihkan');
+  assert.ok(store.get('OLD-NFLIGHT'), 'baris in_flight TIDAK pernah dipangkas');
+  assert.strictEqual(store.get('OLD-NFLIGHT').state, 'in_flight');
+  console.log('OK: sent tua dipangkas, in_flight tua tetap.');
+
+  section('AC-043: baris abandoned tua dicatat [CRITICAL] lalu dihapus; operation_id sama jadi operasi BARU');
+  wipeStore();
+  nowMs = Date.parse('2026-09-24T06:00:00.000Z');
+  seed('OP-ABANDONED-OLD');
+  store.abandon('OP-ABANDONED-OLD', 'max_attempts'); // log [CRITICAL] saat pembuatan -> dibuang di drainLogs berikut
+  nowMs += TTL_MS + HOUR; // 25 jam, di atas TTL 24 jam
+  drainLogs();
+  recovered = svc.runStartupRecovery();
+  const prunedLogs = drainLogs();
+  const prunedCritical = prunedLogs.filter((l) => l.level === 'error' && /^\[CRITICAL\]/.test(l.message) && /abandoned/i.test(l.message));
+  assert.strictEqual(prunedCritical.length, 1, 'baris abandoned yang dipangkas dicatat [CRITICAL] lebih dulu');
+  assert.ok(prunedCritical[0].meta.operationIds.includes('OP-ABANDONED-OLD'));
+  assert.strictEqual(recovered.pruned, 1);
+  assert.strictEqual(store.get('OP-ABANDONED-OLD'), null, 'baris abandoned dihapus setelah dicatat');
+
+  // Jaminan idempotensi berakhir di TTL: operation_id yang sama = operasi BARU.
+  resetStub();
+  res = await sendText({ operation_id: 'OP-ABANDONED-OLD' });
+  assert.strictEqual(res.status, 200, 'operation_id lama dianggap operasi baru setelah dipangkas (A-5)');
+  assert.strictEqual(res.body.replayed, false);
+  row = store.get('OP-ABANDONED-OLD');
+  assert.strictEqual(row.state, 'sent');
+  assert.strictEqual(row.attempts, 1, 'operasi baru -> attempts mulai 1 lagi');
+  assert.strictEqual(stub.calls.length, 1, 'kulit operation_id lama dikirim ulang karena jaminan <= TTL berakhir');
+  console.log('OK: abandoned dicatat lalu dipangkas; operation_id sama = operasi baru (batas <= TTL).');
+
   console.log('\nSEMUA ASSERT LULUS (0 gagal).');
 })()
   .catch((err) => {
