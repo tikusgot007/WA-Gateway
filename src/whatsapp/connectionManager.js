@@ -250,6 +250,23 @@ class ConnectionManager {
         this.setStatus('logged_out');
         this.connectedNumber = null;
         logger.error('WhatsApp logout terdeteksi. Session tidak valid, perlu scan QR ulang.');
+
+        // Bug-fix REQ-001 (plan-bugfix-wa-gateway-pairing-code-logged-out-v1.0):
+        // socket ini sudah mati (WebSocket-nya sudah ditutup server WhatsApp),
+        // tapi objeknya sendiri masih tersimpan di this.sock kalau tidak
+        // dibersihkan di sini -- menyebabkan requestPairingCode() melihat
+        // this.sock yang "ada" padahal zombie. Bersihkan dengan pola yang
+        // sama seperti logout() (lines 356-370) di bawah.
+        if (this.sock) {
+          try {
+            this.sock.ev.removeAllListeners();
+            this.sock.end(undefined);
+          } catch (err) {
+            // abaikan -- socket memang sudah mati, kegagalan cleanup di sini tidak fatal
+          }
+          this.sock = null;
+        }
+
         // Tidak auto-reconnect setelah logout: harus reset session dulu via /api/logout
         // supaya operator sadar dan melakukan scan QR baru secara sengaja.
         return;
@@ -324,6 +341,15 @@ class ConnectionManager {
   async requestPairingCode(phoneNumber) {
     if (typeof phoneNumber !== 'string' || !/^\d{8,15}$/.test(phoneNumber)) {
       throw new Error('Nomor telepon tidak valid. Gunakan format internasional tanpa "+"/spasi/0 di depan, contoh: 62812xxxxxxx.');
+    }
+    // Bug-fix REQ-002 (plan-bugfix-wa-gateway-pairing-code-logged-out-v1.0):
+    // dicek SEBELUM guard !this.sock -- setelah logged_out, this.sock memang
+    // sudah di-null-kan (lihat isLoggedOut branch di _onConnectionUpdate()),
+    // tapi guard ini tetap fail-fast dengan pesan yang jelas dan spesifik
+    // (bukan pesan generik "Koneksi belum siap") supaya operator langsung
+    // tahu harus /api/logout dulu, bukan sekadar menunggu lebih lama.
+    if (this.status === 'logged_out') {
+      throw new Error('Session sudah logout. Panggil /api/logout untuk mereset session sebelum meminta pairing code baru.');
     }
     if (!this.sock) {
       throw new Error('Koneksi belum siap. Tunggu status "connecting" muncul lalu coba lagi.');

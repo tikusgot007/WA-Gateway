@@ -62,6 +62,12 @@ fun MonitorScreen(
     var requestTrigger by remember { mutableStateOf(0) }
     var showQr by remember { mutableStateOf(false) }
     var qrDataUrl by remember { mutableStateOf<String?>(null) }
+    // Bug-fix REQ-003 (plan-bugfix-wa-gateway-pairing-code-logged-out-v1.0):
+    // aksi "Reset Session" untuk status logged_out, mirip pola trigger yang
+    // sudah dipakai isRequestingCode/requestTrigger di atas.
+    var isResettingSession by remember { mutableStateOf(false) }
+    var resetError by remember { mutableStateOf<String?>(null) }
+    var resetTrigger by remember { mutableStateOf(0) }
 
     LaunchedEffect(port) {
         while (true) {
@@ -96,6 +102,36 @@ fun MonitorScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             StatusCard(status)
+
+            // Bug-fix REQ-003 (plan-bugfix-wa-gateway-pairing-code-logged-out-v1.0):
+            // aksi utama saat logged_out -- socket lama di Gateway sudah mati
+            // (zombie), operator HARUS menekan tombol ini (memanggil
+            // /api/logout yang sudah ada & sudah terbukti bekerja) sebelum
+            // pairing code baru bisa diminta lagi.
+            if (status?.status == "logged_out") {
+                Button(
+                    onClick = {
+                        isResettingSession = true
+                        resetError = null
+                        resetTrigger++
+                    },
+                    enabled = !isResettingSession,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (isResettingSession) "Mereset session..." else "Reset Session")
+                }
+
+                LaunchedEffect(resetTrigger) {
+                    if (resetTrigger == 0) return@LaunchedEffect
+                    GatewayApiClient.logout(port)
+                        .onFailure { resetError = it.message }
+                    isResettingSession = false
+                }
+
+                resetError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
 
             if (status?.status != "connected") {
                 Text("Login dengan Pairing Code", style = MaterialTheme.typography.titleMedium)
