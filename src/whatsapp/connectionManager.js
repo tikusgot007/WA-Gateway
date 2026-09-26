@@ -92,6 +92,12 @@ class ConnectionManager {
     // di-refresh hanya saat cache miss atau setelah config.groupNameCacheTtlMs.
     this._groupNameCache = new Map();
 
+    // Grup Tahap 2 CORR-02: negative cache KEGAGALAN groupMetadata() per JID
+    // grup. Key: JID grup, Value: waktu gagal (ms epoch). Entri menahan refresh
+    // selama config.groupNameFailureCooldownMs, supaya kegagalan/timeout
+    // berulang TIDAK berubah menjadi satu panggilan jaringan per pesan.
+    this._groupNameFailureCache = new Map();
+
     // JID grup yang refresh groupMetadata()-nya sedang berjalan (fire-and-forget).
     // Mencegah banyak pesan beruntun dari grup yang sama memicu query paralel.
     this._groupNameFetchInFlight = new Set();
@@ -646,6 +652,44 @@ class ConnectionManager {
   }
 
   /**
+   * Grup Tahap 2 CORR-02: simpan subject grup yang berhasil diambil dan
+   * bersihkan penanda gagal untuk JID itu. Entri dipindahkan ke urutan
+   * terbaru supaya eviction `_evictOldest()` mendekati LRU.
+   */
+  _rememberGroupName(jid, subject) {
+    if (this._groupNameCache.has(jid)) {
+      this._groupNameCache.delete(jid);
+    }
+    this._groupNameCache.set(jid, { subject, fetchedAt: Date.now() });
+    this._groupNameFailureCache.delete(jid);
+    this._evictOldest(this._groupNameCache, config.groupNameCacheMaxEntries);
+  }
+
+  /**
+   * Grup Tahap 2 CORR-02: catat kegagalan groupMetadata() untuk sebuah JID
+   * supaya refresh berikutnya ditahan selama config.groupNameFailureCooldownMs.
+   */
+  _markGroupNameFailure(jid) {
+    if (this._groupNameFailureCache.has(jid)) {
+      this._groupNameFailureCache.delete(jid);
+    }
+    this._groupNameFailureCache.set(jid, Date.now());
+    this._evictOldest(this._groupNameFailureCache, config.groupNameCacheMaxEntries);
+  }
+
+  /**
+   * Batasi jumlah entri Map (PERF-01): buang entri TERTUA (urutan insert/akses
+   * pertama) sampai di bawah `maxEntries`. Map JS mempertahankan urutan
+   * kemasukan, jadi `keys().next()` adalah yang terlama.
+   */
+  _evictOldest(map, maxEntries) {
+    while (map.size > maxEntries) {
+      const oldest = map.keys().next().value;
+      map.delete(oldest);
+    }
+  }
+
+  /**
    * Grup Tahap 2 (REQ-002/REQ-003, GUD-001): isi/segarkan cache subject grup
    * dengan `groupMetadata(jid)`.
    *
@@ -656,9 +700,17 @@ class ConnectionManager {
    *
    * Best-effort & non-fatal: kegagalan/timeout cukup dicatat, TIDAK PERNAH
    * melempar ke pemanggil dan TIDAK menahan/menggagalkan pesan itu sendiri.
+   *
+   * CORR-02: kalau JID ini gagal diambil belum lama ini (negative cache),
+   * refresh DILEWATI sampai cooldown lewat -- mencegah retry jaringan per pesan.
    */
   _refreshGroupName(jid) {
     if (this._groupNameFetchInFlight.has(jid)) return;
+
+    const failedAt = this._groupNameFailureCache.get(jid);
+    if (failedAt !== undefined && Date.now() - failedAt < config.groupNameFailureCooldownMs) {
+      return;
+    }
 
     const sock = this.sock;
     if (!this.isConnected() || !sock) return;
@@ -669,12 +721,14 @@ class ConnectionManager {
       .then((metadata) => {
         const subject = metadata?.subject;
         if (typeof subject === 'string' && subject.length > 0) {
-          this._groupNameCache.set(jid, { subject, fetchedAt: Date.now() });
+          this._rememberGroupName(jid, subject);
         } else {
           logger.debug('[CHAT] groupMetadata() tidak mengembalikan subject -- group_name dibiarkan kosong', { jid });
+          this._markGroupNameFailure(jid);
         }
       })
       .catch((err) => {
+        this._markGroupNameFailure(jid);
         logger.warn('[CHAT] gagal mengambil groupMetadata() untuk group_name; pesan grup tetap diteruskan tanpa group_name', {
           jid,
           error: err.message,

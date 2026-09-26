@@ -115,6 +115,14 @@ const config = {
   // tiap pesan -- hanya saat cache miss atau setelah TTL lewat (bawaan 1 jam).
   groupNameCacheTtlMs: Math.max(1, toInt(process.env.GROUP_NAME_CACHE_TTL_MS, 3600000)),
 
+  // Grup Tahap 2 CORR-02: negative cache KEGAGALAN groupMetadata() per JID grup.
+  // Selama cooldown, kegagalan/timeout berulang TIDAK memicu panggilan jaringan
+  // baru untuk setiap pesan (bawaan 60 detik); 0 = tanpa negative cache.
+  // groupNameCacheMaxEntries: batas jumlah entri cache subject & cache gagal per
+  // JID (eviction entri tertua) supaya Map tidak tumbuh tanpa batas (PERF-01).
+  groupNameFailureCooldownMs: Math.max(0, toInt(process.env.GROUP_NAME_FAILURE_COOLDOWN_MS, 60000)),
+  groupNameCacheMaxEntries: Math.max(1, toInt(process.env.GROUP_NAME_CACHE_MAX_ENTRIES, 500)),
+
   // M1 Wave 2 TASK-002 (GUD-003, spec 4.6): batas idempotensi kirim keluar
   // dan batas percobaan/dead-letter. Nilai tidak valid -> bawaan utuh (toInt);
   // nilai di bawah minimum di-clamp (pola Math.max seperti ownSentTtlMs).

@@ -11,7 +11,10 @@
  *   (c)  groupMetadata() TIDAK dipanggil ulang selama cache masih segar;
  *   (d)  groupMetadata() gagal -> group_name absen, pesan tetap diteruskan;
  *   (e)  grup keluar (fromMe) -> JID grup TIDAK dipakai sebagai sender_jid;
- *   (f)  setiap payload grup memuat `direction` yang benar (fromMe -> outgoing).
+ *   (f)  setiap payload grup memuat `direction` yang benar (fromMe -> outgoing);
+ *   (CORR-02a) kegagalan groupMetadata() berulang -> TIDAK jadi satu panggilan
+ *        jaringan per pesan selama cooldown (negative cache);
+ *   (CORR-02b) setelah cooldown lewat, refresh dicoba lagi.
  *
  * PENTING -- KEJUJURAN: `sock.groupMetadata()` di-MOCK di sini (tidak ada
  * koneksi WhatsApp sungguhan di lingkungan ini). Test ini membuktikan LOGIKA
@@ -36,10 +39,13 @@ process.env.CI4_GATEWAY_TOKEN = 'token-uji';
 
 const assert = require('assert');
 const logger = require('../src/logging');
+const config = require('../src/config');
 const { ensureBaileysLoaded } = require('../src/whatsapp/baileysLoader');
 const connectionManager = require('../src/whatsapp/connectionManager');
 const incomingBuffer = require('../src/store/incomingBuffer');
 const { deliverOne } = require('../src/delivery/incomingDelivery');
+
+const originalCooldown = config.groupNameFailureCooldownMs;
 
 // Tangkap semua log (tidak dicetak) supaya peringatan "kegagalan terlihat" bisa diperiksa.
 const logs = [];
@@ -165,6 +171,49 @@ const keysOf = (obj) => Object.keys(obj);
   assert.strictEqual(keysOf(sent5.body).includes('group_name'), false, '(d) kegagalan metadata -> group_name absen');
   assert.ok(warnMatch(/groupMetadata/), '(d) kegagalan groupMetadata() dicatat sebagai warn (bukan senyap)');
   console.log('OK (d): kegagalan metadata non-fatal, pesan tetap diteruskan tanpa group_name.');
+
+  // ---------------- CORR-02 (a): kegagalan berulang -> TIDAK satu panggilan per pesan ----------------
+  // Setelah GROUP_B gagal (skenario d), pesan-pesan berikutnya dalam jendela
+  // cooldown TIDAK boleh memicu panggilan jaringan baru (negative cache).
+  config.groupNameFailureCooldownMs = 60000;
+  const groupBCallsBeforeBurst = metaStub.calls.filter((jid) => jid === GROUP_B).length;
+  const burstIds = [];
+  for (let i = 0; i < 3; i += 1) {
+    burstIds.push(await simulateIncoming({ remoteJid: GROUP_B, participant: PARTICIPANT_B }));
+  }
+  await flush();
+  await flush();
+  const groupBCallsAfterBurst = metaStub.calls.filter((jid) => jid === GROUP_B).length;
+  assert.strictEqual(
+    groupBCallsAfterBurst,
+    groupBCallsBeforeBurst,
+    '(CORR-02a) dalam cooldown, groupMetadata() TIDAK boleh dipanggil untuk tiap pesan'
+  );
+  for (const burstId of burstIds) {
+    const sentBurst = await deliverCaptured(burstId);
+    assert.strictEqual(
+      keysOf(sentBurst.body).includes('group_name'),
+      false,
+      '(CORR-02a) group_name tetap absen saat metadata gagal'
+    );
+  }
+  console.log('OK (CORR-02a): kegagalan berulang memakai negative cache, bukan panggilan per pesan.');
+
+  // ---------------- CORR-02 (b): setelah cooldown lewat, refresh dicoba lagi ----------------
+  const failedAtEntry = connectionManager._groupNameFailureCache.get(GROUP_B);
+  assert.ok(failedAtEntry, '(CORR-02b) kegagalan harus tercatat di negative cache');
+  connectionManager._groupNameFailureCache.set(GROUP_B, failedAtEntry - config.groupNameFailureCooldownMs - 1000);
+  const idCooldown = await simulateIncoming({ remoteJid: GROUP_B, participant: PARTICIPANT_A });
+  await flush();
+  await flush();
+  assert.strictEqual(
+    metaStub.calls.filter((jid) => jid === GROUP_B).length,
+    groupBCallsAfterBurst + 1,
+    '(CORR-02b) setelah cooldown lewat, refresh dicoba lagi tepat sekali'
+  );
+  await deliverCaptured(idCooldown);
+  console.log('OK (CORR-02b): setelah cooldown, groupMetadata() dicoba ulang.');
+  config.groupNameFailureCooldownMs = originalCooldown;
 
   // ---------------- (e) grup KELUAR (fromMe) -> JID grup tidak dipakai sebagai sender_jid ----------------
   const id6 = await simulateIncoming({ remoteJid: GROUP_A, fromMe: true, participant: PARTICIPANT_A });

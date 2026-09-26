@@ -108,55 +108,67 @@ object NodeBridge {
             return
         }
 
-        Log.i(TAG, "Menyalin nodejs-project dari assets APK ke storage app...")
-
         // Selamatkan auth/ (sesi WhatsApp) & data/ (buffer retry) -- keduanya
         // dibuat Node saat runtime, TIDAK ada di assets, dan hidup DI DALAM
         // nodejs-project. Tanpa langkah ini, deleteRecursively() di bawah
         // ikut menghapusnya (bug: setiap update APK memaksa login WhatsApp
         // ulang + membuang buffer retry).
-        val preservedNames = listOf("auth", "data")
         val preservedRoot = File(context.filesDir, "$PROJECT_ASSET_DIR-preserved-tmp")
-        preservedRoot.deleteRecursively() // bersihkan sisa percobaan sebelumnya yang gagal
+
+        // (1) REKONSILIASI sisa percobaan sebelumnya SEBELUM menyentuh apa pun.
+        // Kalau percobaan sebelumnya sempat memindahkan auth/ data/ keluar dari
+        // `dir` lalu gagal di tengah, salinan di `preservedRoot` bisa jadi
+        // SATU-SATUNYA salinan sesi. JANGAN hapus `preservedRoot` sebelum
+        // semuanya berhasil dipulihkan (bug CORR-01).
+        val reconcileFailures = RuntimeDataPreserver.reconcile(dir, preservedRoot)
+        if (reconcileFailures.isNotEmpty()) {
+            for (failure in reconcileFailures) {
+                Log.e(TAG, "Gagal memulihkan sisa data runtime '${failure.name}' dari percobaan sebelumnya.", failure.error)
+            }
+            Log.e(TAG, "Penyalinan ulang project DIBATALKAN: auth/data belum pulih sepenuhnya; tidak ada yang dihapus.")
+            return
+        }
+
+        Log.i(TAG, "Menyalin nodejs-project dari assets APK ke storage app...")
 
         if (dir.exists()) {
-            preservedRoot.mkdirs()
-            for (name in preservedNames) {
-                val saved = File(dir, name)
-                if (saved.exists()) {
-                    // renameTo cepat & tidak menggandakan data (satu filesystem);
-                    // fallback salin kalau rename gagal.
-                    if (!saved.renameTo(File(preservedRoot, name))) {
-                        saved.copyRecursively(File(preservedRoot, name), overwrite = true)
-                    }
+            // (2) FASE SIMPAN -- exception-safe. Kalau gagal, BATALKAN dan
+            // JANGAN hapus `dir`: data yang belum terselamatkan tidak boleh
+            // ikut terhapus.
+            val saveFailures = RuntimeDataPreserver.preserve(dir, preservedRoot)
+            if (saveFailures.isNotEmpty()) {
+                for (failure in saveFailures) {
+                    Log.e(TAG, "Gagal menyelamatkan data runtime '${failure.name}' sebelum salin ulang.", failure.error)
                 }
+                Log.e(TAG, "Penyalinan ulang project DIBATALKAN sebelum menghapus apa pun; akan dicoba lagi start berikutnya.")
+                return
             }
-            dir.deleteRecursively()
+
+            val deleted = dir.deleteRecursively()
+            if (!deleted) {
+                Log.w(TAG, "Sebagian isi nodejs-project gagal dihapus sebelum salin ulang -- melanjutkan.")
+            }
         }
         dir.mkdirs()
 
         val ok = copyAssetFolder(context, PROJECT_ASSET_DIR, dir.absolutePath)
 
-        // Kembalikan auth/ & data/ yang diselamatkan.
-        for (name in preservedNames) {
-            val saved = File(preservedRoot, name)
-            if (saved.exists()) {
-                val target = File(dir, name)
-                if (target.exists()) {
-                    target.deleteRecursively()
-                }
-                if (!saved.renameTo(target)) {
-                    saved.copyRecursively(target, overwrite = true)
-                }
-            }
+        // (3) FASE KEMBALIKAN -- exception-safe. `preservedRoot` hanya dihapus
+        // kalau semua berhasil dipulihkan (lihat RuntimeDataPreserver.restore).
+        val restoreFailures = RuntimeDataPreserver.restore(dir, preservedRoot)
+        for (failure in restoreFailures) {
+            Log.e(TAG, "Gagal mengembalikan data runtime '${failure.name}' setelah salin ulang.", failure.error)
         }
-        preservedRoot.deleteRecursively()
 
         if (!ok) {
             Log.e(TAG, "Sebagian file nodejs-project GAGAL disalin -- Gateway mungkin tidak bisa start dengan benar.")
         }
 
-        prefs.edit().putLong("assets_installed_for_update", lastUpdateTime).apply()
+        if (restoreFailures.isEmpty()) {
+            prefs.edit().putLong("assets_installed_for_update", lastUpdateTime).apply()
+        } else {
+            Log.e(TAG, "auth/data belum sepenuhnya dikembalikan; penyalinan ditandai BELUM selesai agar dicoba lagi start berikutnya.")
+        }
     }
 
     private fun copyAssetFolder(context: Context, fromAssetPath: String, toPath: String): Boolean {
@@ -272,5 +284,132 @@ object NodeBridge {
         }, "node-runtime").apply {
             isDaemon = true
         }.start()
+    }
+}
+
+/**
+ * Logika murni (`java.io.File`) untuk mempertahankan `auth/`/`data/` melewati
+ * salin ulang aset APK. Dipisahkan dari [NodeBridge] supaya bisa diuji di JVM
+ * tanpa Android `Context`.
+ *
+ * Exception-safe: kegagalan I/O dikembalikan sebagai daftar [Failure], BUKAN
+ * dilempar ke pemanggil. Salinan terakhir yang belum dipulihkan TIDAK PERNAH
+ * dihapus -- `preservedRoot` hanya dibersihkan setelah semua nama berhasil
+ * dipulihkan (mencegah hilangnya sesi WhatsApp / buffer retry saat I/O gagal
+ * di tengah, mis. disk penuh -- temuan CORR-01).
+ */
+internal object RuntimeDataPreserver {
+    val PRESERVED_NAMES = listOf("auth", "data")
+
+    /**
+     * Operasi berkas yang dapat disuntik di test (mis. memaksa [move] gagal
+     * atau [copy] melempar `IOException`) untuk membuktikan jalur gagal aman.
+     */
+    internal class Ops(
+        val move: (File, File) -> Boolean = { src, dst -> src.renameTo(dst) },
+        val copy: (File, File) -> Boolean = { src, dst -> src.copyRecursively(dst, overwrite = true) },
+    )
+
+    internal data class Failure(val name: String, val error: Throwable)
+
+    private fun moveOrCopy(src: File, dst: File, ops: Ops) {
+        if (ops.move(src, dst)) return
+        dst.parentFile?.mkdirs()
+        if (!ops.copy(src, dst)) {
+            throw IOException("renameTo + copyRecursively gagal: ${src.absolutePath} -> ${dst.absolutePath}")
+        }
+    }
+
+    /**
+     * Pulihkan sisa percobaan sebelumnya: untuk setiap nama, kalau salinan di
+     * `projectDir` TIDAK ada sedangkan salinan di `preservedRoot` ada,
+     * kembalikan dulu. `preservedRoot` hanya dihapus kalau tidak ada kegagalan.
+     *
+     * @return daftar kegagalan (kosong = semua aman untuk lanjut).
+     */
+    fun reconcile(projectDir: File, preservedRoot: File, ops: Ops = Ops()): List<Failure> {
+        if (!preservedRoot.exists()) return emptyList()
+        val failures = mutableListOf<Failure>()
+        var unrestored = 0
+        for (name in PRESERVED_NAMES) {
+            val saved = File(preservedRoot, name)
+            if (!saved.exists()) continue
+            val target = File(projectDir, name)
+            if (target.exists()) {
+                // Keduanya ada: salinan `target` mungkin parsial (peninggalan
+                // restore yang gagal). JANGAN hapus `preservedRoot` -- biarkan
+                // fase simpan/kembalikan berikutnya merekonsiliasi dengan aman.
+                unrestored += 1
+                continue
+            }
+            try {
+                moveOrCopy(saved, target, ops)
+            } catch (e: IOException) {
+                failures.add(Failure(name, e))
+            }
+        }
+        if (failures.isEmpty() && unrestored == 0) {
+            preservedRoot.deleteRecursively()
+        }
+        return failures
+    }
+
+    /**
+     * FASE SIMPAN: pindahkan `projectDir/<name>` ke `preservedRoot/<name>`.
+     * Tidak melempar; kegagalan dikembalikan supaya pemanggil dapat membatalkan
+     * salin ulang SEBELUM menghapus apa pun.
+     */
+    fun preserve(projectDir: File, preservedRoot: File, ops: Ops = Ops()): List<Failure> {
+        val failures = mutableListOf<Failure>()
+        var rootCreated = false
+        for (name in PRESERVED_NAMES) {
+            val source = File(projectDir, name)
+            if (!source.exists()) continue
+            if (!rootCreated) {
+                preservedRoot.mkdirs()
+                rootCreated = true
+            }
+            try {
+                moveOrCopy(source, File(preservedRoot, name), ops)
+            } catch (e: IOException) {
+                failures.add(Failure(name, e))
+            }
+        }
+        return failures
+    }
+
+    /**
+     * FASE KEMBALIKAN: pindahkan `preservedRoot/<name>` kembali ke
+     * `projectDir/<name>`. Tidak melempar. `preservedRoot` hanya dihapus kalau
+     * SEMUA nama berhasil dipulihkan -- kalau ada kegagalan, salinan di sana
+     * dipertahankan sebagai satu-satunya sumber pemulihan.
+     */
+    fun restore(projectDir: File, preservedRoot: File, ops: Ops = Ops()): List<Failure> {
+        val failures = mutableListOf<Failure>()
+        for (name in PRESERVED_NAMES) {
+            val saved = File(preservedRoot, name)
+            if (!saved.exists()) continue
+            val target = File(projectDir, name)
+            try {
+                if (target.exists() && !target.deleteRecursively()) {
+                    throw IOException("gagal menghapus target lama: ${target.absolutePath}")
+                }
+                moveOrCopy(saved, target, ops)
+            } catch (e: IOException) {
+                // Jangan tinggalkan target SETENGAH JADI: kalau dibiarkan, ia
+                // bisa menimpa salinan lengkap di `preservedRoot` pada start
+                // berikutnya (saat fase simpan menyalin target parsial balik
+                // ke `preservedRoot`). Hapus best-effort supaya salinan lengkap
+                // tetap satu-satunya sumber pemulihan.
+                if (target.exists()) {
+                    target.deleteRecursively()
+                }
+                failures.add(Failure(name, e))
+            }
+        }
+        if (failures.isEmpty()) {
+            preservedRoot.deleteRecursively()
+        }
+        return failures
     }
 }

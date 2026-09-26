@@ -98,4 +98,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Unit test JVM murni (tanpa Android/emulator) untuk logika berkas
+    // RuntimeDataPreserver -- test dependency standar, tidak menambah
+    // pustaka runtime ke APK.
+    testImplementation("junit:junit:4.13.2")
 }
