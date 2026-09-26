@@ -84,9 +84,13 @@ object NodeBridge {
      * app HANYA kalau belum pernah, atau APK sudah di-update sejak
      * salinan terakhir (pola sama seperti sample resmi nodejs-mobile:
      * bandingkan PackageInfo.lastUpdateTime dengan timestamp tersimpan).
-     * Auth/session (folder `auth/`) dan buffer retry (folder `data/`)
-     * SENGAJA dibuat oleh Node sendiri di luar assets (tidak pernah ada
-     * di APK), jadi tidak pernah tertimpa oleh proses salin ulang ini.
+     *
+     * PENTING: `auth/` (sesi WhatsApp) dan `data/` (buffer retry) dibuat
+     * oleh Node saat runtime dan TIDAK ADA di assets APK, jadi keduanya
+     * HARUS dipertahankan melewati salin ulang ini. Sebelum perbaikan ini
+     * seluruh direktori dihapus rekursif, sehingga setiap update APK
+     * memaksa login WhatsApp ulang (scan QR / pairing code) dan membuang
+     * isi buffer retry.
      */
     fun ensureProjectFilesInstalled(context: Context) {
         val dir = projectDir(context)
@@ -105,12 +109,49 @@ object NodeBridge {
         }
 
         Log.i(TAG, "Menyalin nodejs-project dari assets APK ke storage app...")
+
+        // Selamatkan auth/ (sesi WhatsApp) & data/ (buffer retry) -- keduanya
+        // dibuat Node saat runtime, TIDAK ada di assets, dan hidup DI DALAM
+        // nodejs-project. Tanpa langkah ini, deleteRecursively() di bawah
+        // ikut menghapusnya (bug: setiap update APK memaksa login WhatsApp
+        // ulang + membuang buffer retry).
+        val preservedNames = listOf("auth", "data")
+        val preservedRoot = File(context.filesDir, "$PROJECT_ASSET_DIR-preserved-tmp")
+        preservedRoot.deleteRecursively() // bersihkan sisa percobaan sebelumnya yang gagal
+
         if (dir.exists()) {
+            preservedRoot.mkdirs()
+            for (name in preservedNames) {
+                val saved = File(dir, name)
+                if (saved.exists()) {
+                    // renameTo cepat & tidak menggandakan data (satu filesystem);
+                    // fallback salin kalau rename gagal.
+                    if (!saved.renameTo(File(preservedRoot, name))) {
+                        saved.copyRecursively(File(preservedRoot, name), overwrite = true)
+                    }
+                }
+            }
             dir.deleteRecursively()
         }
         dir.mkdirs()
 
         val ok = copyAssetFolder(context, PROJECT_ASSET_DIR, dir.absolutePath)
+
+        // Kembalikan auth/ & data/ yang diselamatkan.
+        for (name in preservedNames) {
+            val saved = File(preservedRoot, name)
+            if (saved.exists()) {
+                val target = File(dir, name)
+                if (target.exists()) {
+                    target.deleteRecursively()
+                }
+                if (!saved.renameTo(target)) {
+                    saved.copyRecursively(target, overwrite = true)
+                }
+            }
+        }
+        preservedRoot.deleteRecursively()
+
         if (!ok) {
             Log.e(TAG, "Sebagian file nodejs-project GAGAL disalin -- Gateway mungkin tidak bisa start dengan benar.")
         }
