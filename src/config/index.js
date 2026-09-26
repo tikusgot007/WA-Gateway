@@ -110,6 +110,11 @@ const config = {
   lidLookupTimeoutMs: Math.max(1, toInt(process.env.LID_LOOKUP_TIMEOUT_MS, 2000)),
   lidLookupNegativeTtlMs: Math.max(0, toInt(process.env.LID_LOOKUP_NEGATIVE_TTL_MS, 60000)),
 
+  // Grup Tahap 2 (REQ-002/REQ-003, GUD-001): masa berlaku cache in-memory
+  // subject grup per JID grup. groupMetadata() TIDAK dipanggil di jalur kritis
+  // tiap pesan -- hanya saat cache miss atau setelah TTL lewat (bawaan 1 jam).
+  groupNameCacheTtlMs: Math.max(1, toInt(process.env.GROUP_NAME_CACHE_TTL_MS, 3600000)),
+
   // M1 Wave 2 TASK-002 (GUD-003, spec 4.6): batas idempotensi kirim keluar
   // dan batas percobaan/dead-letter. Nilai tidak valid -> bawaan utuh (toInt);
   // nilai di bawah minimum di-clamp (pola Math.max seperti ownSentTtlMs).

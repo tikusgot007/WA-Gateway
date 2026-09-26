@@ -84,6 +84,17 @@ class ConnectionManager {
     // itu tidak pernah dicoba lagi, tapi pesan-pesan beruntun dari JID yang
     // sama tidak menunggu timeout berulang kali.
     this._lidFailureCache = new Map();
+
+    // Grup Tahap 2 (REQ-002/REQ-003, GUD-001/ASSUMPTION-003): cache in-memory
+    // subject grup per JID grup. Key: JID grup (@g.us), Value:
+    // { subject: string, fetchedAt: number (ms epoch) }. Dipakai supaya
+    // groupMetadata() TIDAK dipanggil di jalur kritis penerimaan tiap pesan;
+    // di-refresh hanya saat cache miss atau setelah config.groupNameCacheTtlMs.
+    this._groupNameCache = new Map();
+
+    // JID grup yang refresh groupMetadata()-nya sedang berjalan (fire-and-forget).
+    // Mencegah banyak pesan beruntun dari grup yang sama memicu query paralel.
+    this._groupNameFetchInFlight = new Set();
   }
 
   getStatusSnapshot() {
@@ -614,6 +625,67 @@ class ConnectionManager {
   }
 
   /**
+   * Grup Tahap 2 (REQ-002, GUD-001/ASSUMPTION-003): baca subject grup dari
+   * cache in-memory. Sinkron & TIDAK pernah memanggil jaringan -- dipakai di
+   * jalur kritis penerimaan pesan supaya group_name bisa disertakan hanya
+   * kalau sudah tersedia.
+   *
+   * @param {string} jid JID grup (@g.us).
+   * @returns {string|null} subject bila masih segar, atau null bila belum ada/kadaluarsa.
+   */
+  _getCachedGroupName(jid) {
+    const entry = this._groupNameCache.get(jid);
+    if (!entry) return null;
+
+    if (Date.now() - entry.fetchedAt > config.groupNameCacheTtlMs) {
+      this._groupNameCache.delete(jid);
+      return null;
+    }
+
+    return entry.subject;
+  }
+
+  /**
+   * Grup Tahap 2 (REQ-002/REQ-003, GUD-001): isi/segarkan cache subject grup
+   * dengan `groupMetadata(jid)`.
+   *
+   * FIRE-AND-FORGET dengan sengaja: pemanggil TIDAK meng-await fungsi ini,
+   * sehingga (a) pesan grup yang sedang diproses tetap diteruskan SEGERA tanpa
+   * group_name saat cache miss, dan (b) cache terisi di latar untuk pesan grup
+   * berikutnya. Tidak ada opsi "menunggu inline" di jalur kritis (ASSUMPTION-003).
+   *
+   * Best-effort & non-fatal: kegagalan/timeout cukup dicatat, TIDAK PERNAH
+   * melempar ke pemanggil dan TIDAK menahan/menggagalkan pesan itu sendiri.
+   */
+  _refreshGroupName(jid) {
+    if (this._groupNameFetchInFlight.has(jid)) return;
+
+    const sock = this.sock;
+    if (!this.isConnected() || !sock) return;
+
+    this._groupNameFetchInFlight.add(jid);
+    Promise.resolve()
+      .then(() => sock.groupMetadata(jid))
+      .then((metadata) => {
+        const subject = metadata?.subject;
+        if (typeof subject === 'string' && subject.length > 0) {
+          this._groupNameCache.set(jid, { subject, fetchedAt: Date.now() });
+        } else {
+          logger.debug('[CHAT] groupMetadata() tidak mengembalikan subject -- group_name dibiarkan kosong', { jid });
+        }
+      })
+      .catch((err) => {
+        logger.warn('[CHAT] gagal mengambil groupMetadata() untuk group_name; pesan grup tetap diteruskan tanpa group_name', {
+          jid,
+          error: err.message,
+        });
+      })
+      .finally(() => {
+        this._groupNameFetchInFlight.delete(jid);
+      });
+  }
+
+  /**
    * M1 Wave 1 TASK-004 (REQ-006, REQ-009, REQ-010, REQ-011; menggantikan
    * `_enqueueWithRetry` ad-hoc E-04). Menyimpan satu event ke buffer utama:
    *
@@ -791,6 +863,51 @@ class ConnectionManager {
       ? { lid: await this._resolveLidForPhoneJid(remoteJid) }
       : null;
 
+    // ===== Grup Tahap 2 (plan/plan-feature-grup-tahap2-wa-gateway-v1.0.md) =====
+    // Identitas pengirim pesan GRUP adalah key.participant (JID anggota), BUKAN
+    // remoteJid (= JID grup). Sebelum ini sender.jid selalu = chatId, sehingga
+    // pesan grup membawa JID grup sebagai sender_jid -- salah.
+    //
+    // REQ-001/CON-001: sender_jid hanya diubah untuk jidType==='group'; jalur
+    // pn/lid sama sekali tidak berubah (sender_jid tetap sender.jid seperti
+    // sebelumnya, additive/tidak breaking untuk kontrak pesan pribadi).
+    // Keputusan pemilik 2026-09-26: untuk grup KELUAR (fromMe) participant
+    // TIDAK diekstrak (semantik Baileys untuk fromMe tidak diandalkan);
+    // AuliaPos menerima outgoing grup tanpa sender_jid, jadi nilainya null.
+    //
+    // REQ-002/REQ-003: group_name diambil dari subject grup TER-CACHE. Pada
+    // cache miss, refresh dijalankan FIRE-AND-FORGET di _refreshGroupName()
+    // supaya pesan tetap diteruskan segera tanpa group_name; retry terjadi
+    // otomatis pada pesan grup berikutnya saat cache sudah terisi.
+    const isGroup = jidType === 'group';
+    const isGroupIncoming = isGroup && !fromMe;
+    let groupSenderJid; // undefined -> jangan sentuh sender_jid (non-grup)
+    let groupName; // undefined -> belum diketahui, jangan kirim field-nya
+
+    if (isGroup) {
+      if (isGroupIncoming) {
+        const participant = msg.key?.participant || null;
+        groupSenderJid = participant;
+        if (!participant) {
+          // Kegagalan yang TERLIHAT, bukan senyap: AuliaPos menolak 400 pesan
+          // grup masuk tanpa sender_jid (REQ-010 sisi AuliaPos).
+          logger.warn('[CHAT] pesan grup masuk tanpa key.participant -- sender_jid kosong, AuliaPos akan menolak 400 (kegagalan yang terlihat, bukan senyap)', {
+            messageId: msg.key?.id || null,
+            chatId: remoteJid,
+          });
+        }
+
+        const cachedGroupName = this._getCachedGroupName(remoteJid);
+        if (cachedGroupName !== null) {
+          groupName = cachedGroupName;
+        } else {
+          this._refreshGroupName(remoteJid); // fire-and-forget, sengaja TIDAK di-await
+        }
+      } else {
+        groupSenderJid = null; // grup keluar: JID grup TIDAK dipakai sebagai sender_jid
+      }
+    }
+
     const normalized = {
       messageId: msg.key?.id || null,
       chatId: remoteJid,
@@ -809,6 +926,13 @@ class ConnectionManager {
         : new Date().toISOString(),
       fromMe,
     };
+
+    if (isGroup) {
+      normalized.sender_jid = groupSenderJid; // REQ-001: participant (atau null bila tak tersedia)
+      if (groupName !== undefined) {
+        normalized.group_name = groupName; // REQ-002: hanya bila sudah diketahui
+      }
+    }
 
     messageStore.add(normalized);
 

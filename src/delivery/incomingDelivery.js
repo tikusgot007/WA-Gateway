@@ -49,6 +49,13 @@ async function deliverOne(event, dependencies = {}) {
     identity_hint: event.identity_hint_json ? JSON.parse(event.identity_hint_json) : null,
   };
 
+  // Grup Tahap 2 (REQ-002/GUD-002): group_name hanya dikirim bila Gateway
+  // benar-benar memilikinya -- TIDAK dikirim sebagai null/string kosong, supaya
+  // AuliaPos bisa membedakan "belum ada info" dari "nama grup kosong".
+  if (event.group_name !== null && event.group_name !== undefined) {
+    body.group_name = event.group_name;
+  }
+
   const result = await post('/api/inbox/gateway/messages', body);
 
   if (result.ok) {

@@ -174,11 +174,11 @@ class IncomingBufferSqlite {
 
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO incoming_queue
-        (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid,
+        (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid, group_name,
          message_type, text, media_json, identity_hint_json, message_timestamp,
          direction, status, attempts, next_attempt_at, created_at, updated_at)
       VALUES
-        (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid,
+        (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid, @group_name,
          @message_type, @text, @media_json, @identity_hint_json, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
     `);
@@ -253,6 +253,7 @@ class IncomingBufferSqlite {
         contact_name TEXT,
         phone TEXT,
         sender_jid TEXT,
+        group_name TEXT,
         message_type TEXT NOT NULL,
         text TEXT,
         message_timestamp TEXT NOT NULL,
@@ -305,6 +306,14 @@ class IncomingBufferSqlite {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN identity_hint_json TEXT`);
       logger.info('[MIGRASI] kolom identity_hint_json ditambahkan ke incoming_queue (database SQLite lama).');
     }
+
+    if (!columnNames.includes('group_name')) {
+      // Grup Tahap 2 (REQ-002): TEXT, nullable -- subject grup saat ini untuk
+      // pesan grup MASUK (lihat connectionManager.js _refreshGroupName()).
+      // NULL untuk pesan non-grup atau saat subject belum berhasil didapat.
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN group_name TEXT`);
+      logger.info('[MIGRASI] kolom group_name ditambahkan ke incoming_queue (database SQLite lama).');
+    }
   }
 
   /**
@@ -342,7 +351,8 @@ class IncomingBufferSqlite {
       jid_type: event.jidType,
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
-      sender_jid: event.sender?.jid ?? null,
+      sender_jid: event.sender_jid !== undefined ? event.sender_jid : (event.sender?.jid ?? null),
+      group_name: event.group_name ?? null,
       message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
@@ -637,7 +647,8 @@ class IncomingBufferJsonFile {
       jid_type: event.jidType,
       contact_name: event.sender?.name ?? null,
       phone: event.sender?.phone ?? null,
-      sender_jid: event.sender?.jid ?? null,
+      sender_jid: event.sender_jid !== undefined ? event.sender_jid : (event.sender?.jid ?? null),
+      group_name: event.group_name ?? null,
       message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
