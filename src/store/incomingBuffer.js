@@ -175,11 +175,11 @@ class IncomingBufferSqlite {
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO incoming_queue
         (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid, group_name,
-         message_type, text, media_json, identity_hint_json, message_timestamp,
+         message_type, text, media_json, identity_hint_json, quoted_json, message_timestamp,
          direction, status, attempts, next_attempt_at, created_at, updated_at)
       VALUES
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid, @group_name,
-         @message_type, @text, @media_json, @identity_hint_json, @message_timestamp,
+         @message_type, @text, @media_json, @identity_hint_json, @quoted_json, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
     `);
 
@@ -314,6 +314,15 @@ class IncomingBufferSqlite {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN group_name TEXT`);
       logger.info('[MIGRASI] kolom group_name ditambahkan ke incoming_queue (database SQLite lama).');
     }
+
+    if (!columnNames.includes('quoted_json')) {
+      // Balas Pesan (Tahap 3, REQ-010): TEXT, nullable -- JSON string berisi
+      // {wa_message_id, sender_jid?, snippet?} kutipan yang dibaca dari
+      // contextInfo pesan masuk (native reply pelanggan). NULL bila bukan
+      // balasan (payload lama tidak berubah).
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN quoted_json TEXT`);
+      logger.info('[MIGRASI] kolom quoted_json ditambahkan ke incoming_queue (database SQLite lama).');
+    }
   }
 
   /**
@@ -357,6 +366,7 @@ class IncomingBufferSqlite {
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
+      quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
       message_timestamp: event.timestamp,
       direction: event.direction === 'outgoing' ? 'outgoing' : 'incoming',
       next_attempt_at: now, // langsung boleh dicoba kirim saat itu juga
@@ -653,6 +663,7 @@ class IncomingBufferJsonFile {
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
+      quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
       message_timestamp: event.timestamp,
       direction: event.direction === 'outgoing' ? 'outgoing' : 'incoming',
       status: 'pending',

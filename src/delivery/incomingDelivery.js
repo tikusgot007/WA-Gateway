@@ -56,6 +56,13 @@ async function deliverOne(event, dependencies = {}) {
     body.group_name = event.group_name;
   }
 
+  // Balas Pesan (Tahap 3, REQ-010): `quoted` hanya dikirim bila pelanggan
+  // benar-benar membalas (native reply) sebuah pesan. Payload tanpa kutipan
+  // TIDAK berubah (field `quoted` tidak dikirim).
+  if (event.quoted_json) {
+    body.quoted = JSON.parse(event.quoted_json);
+  }
+
   const result = await post('/api/inbox/gateway/messages', body);
 
   if (result.ok) {

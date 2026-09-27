@@ -50,6 +50,7 @@ const CREATE_TABLE_SQL = `
     state               TEXT NOT NULL DEFAULT 'in_flight',
     wa_message_id       TEXT,
     media_ref_json      TEXT,
+    quote_applied       INTEGER,
     attempts            INTEGER NOT NULL DEFAULT 1,
     last_error          TEXT,
     created_at          TEXT NOT NULL,
@@ -75,6 +76,16 @@ function assertAbandonReason(reason) {
 
 function shortError(message) {
   return String(message == null ? '' : message).slice(0, MAX_ERROR_LENGTH);
+}
+
+// Balas Pesan (Tahap 3): indikator kutipan disimpan tri-state -- 1 (`true`) /
+// 0 (`false`) bila permintaan membawa `quoted`, NULL bila tanpa kutipan.
+// Disimpan supaya replay idempotensi (/send, /send-media) tetap melaporkan
+// `quote_applied` yang benar tanpa mengirim ulang ke Baileys (REQ-003).
+function toQuoteColumn(value) {
+  if (value === true) return 1;
+  if (value === false) return 0;
+  return null;
 }
 
 // D-13/A-5: baris abandoned yang akan dipangkas MUST terlihat lebih dulu --
@@ -113,6 +124,16 @@ class OutgoingOperationsSqlite {
     this.db.pragma('synchronous = FULL'); // baris in_flight HARUS durable sebelum kirim (REQ-021)
     this.db.exec(CREATE_TABLE_SQL);
 
+    // Migrasi ringan: kolom `quote_applied` ditambahkan belakangan (Balas
+    // Pesan, Tahap 3). CREATE TABLE IF NOT EXISTS tidak menambahkannya ke
+    // tabel yang sudah ada, jadi dicek dulu & ALTER TABLE kalau belum ada
+    // (idempoten -- pola sama dengan incomingBuffer._migrate()).
+    const columns = this.db.prepare(`PRAGMA table_info(outgoing_operations)`).all();
+    if (!columns.map((col) => col.name).includes('quote_applied')) {
+      this.db.exec(`ALTER TABLE outgoing_operations ADD COLUMN quote_applied INTEGER`);
+      logger.info('[MIGRASI] kolom quote_applied ditambahkan ke outgoing_operations (database SQLite lama).');
+    }
+
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO outgoing_operations
         (operation_id, payload_hash, kind, chat_id, state, attempts, created_at, updated_at)
@@ -123,6 +144,7 @@ class OutgoingOperationsSqlite {
     this.markSentStmt = this.db.prepare(`
       UPDATE outgoing_operations
       SET state = 'sent', wa_message_id = @waMessageId, media_ref_json = @mediaRefJson,
+          quote_applied = @quoteApplied,
           resolved_at = @resolvedAt, updated_at = @now
       WHERE operation_id = @operationId AND state = 'in_flight'
     `);
@@ -190,12 +212,13 @@ class OutgoingOperationsSqlite {
 
   // `sentAt` (ISO, opsional) = waktu kirim asli; disimpan sebagai resolved_at supaya
   // replay mengembalikan `timestamp` yang sama dengan respons pertama.
-  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null } = {}) {
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null } = {}) {
     const now = this._nowIso();
     const info = this.markSentStmt.run({
       operationId,
       waMessageId,
       mediaRefJson: mediaRef ? JSON.stringify(mediaRef) : null,
+      quoteApplied: toQuoteColumn(quoteApplied),
       resolvedAt: sentAt || now,
       now,
     });
@@ -307,6 +330,7 @@ class OutgoingOperationsJsonFile {
       state: 'in_flight',
       wa_message_id: null,
       media_ref_json: null,
+      quote_applied: null,
       attempts: 1,
       last_error: null,
       created_at: now,
@@ -323,11 +347,12 @@ class OutgoingOperationsJsonFile {
     return row ? { ...row } : null;
   }
 
-  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null } = {}) {
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null } = {}) {
     return this._updateInFlight(operationId, (row, now) => {
       row.state = 'sent';
       row.wa_message_id = waMessageId;
       row.media_ref_json = mediaRef ? JSON.stringify(mediaRef) : null;
+      row.quote_applied = toQuoteColumn(quoteApplied);
       row.resolved_at = sentAt || now;
       row.updated_at = now;
     });

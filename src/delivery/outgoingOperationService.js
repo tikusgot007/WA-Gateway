@@ -200,7 +200,12 @@ async function runOperation({ operationId, payloadHash, kind, chatId, isReady, s
   // "gagal/tidak pasti" (pesan benar-benar terkirim). Baris tinggal in_flight dan
   // terlihat sebagai operasi basi saat start (REQ-031).
   recordSafely(operationId, () => {
-    if (!outgoingOperations.markSent(operationId, { waMessageId: result.messageId, mediaRef: result.mediaRef || null, sentAt: result.timestamp })) {
+    if (!outgoingOperations.markSent(operationId, {
+      waMessageId: result.messageId,
+      mediaRef: result.mediaRef || null,
+      sentAt: result.timestamp,
+      quoteApplied: result.quoteApplied,
+    })) {
       logger.error('[SEND-OPERATION] markSent tidak mengubah baris (bukan in_flight lagi?)', { operationId });
     }
   });
@@ -244,11 +249,14 @@ function parseMediaRef(json) {
  * (dan `operation_id`) hanya ditambahkan.
  *
  * @param {object} decision hasil runOperation()
- * @param {{operationId: string, withMediaRef?: boolean}} options withMediaRef:
- *   true untuk /send-media (selalu sertakan `media_ref`, null bila tidak ada).
+ * @param {{operationId: string, withMediaRef?: boolean, withQuoteApplied?: boolean}} options
+ *   withMediaRef: true untuk /send-media (selalu sertakan `media_ref`, null bila tidak ada).
+ *   withQuoteApplied: true bila permintaan membawa `quoted` (Balas Pesan, Tahap 3) --
+ *   sertakan `quote_applied` pada respons sent/replay; nilai replay dibaca dari baris
+ *   operasi tersimpan supaya tidak perlu mengirim ulang ke Baileys (REQ-003).
  * @returns {{status: number, body: object}}
  */
-function toHttpResponse(decision, { operationId, withMediaRef = false }) {
+function toHttpResponse(decision, { operationId, withMediaRef = false, withQuoteApplied = false }) {
   const respond = (status, body) => ({ status, body: { ...body, operation_id: operationId } });
 
   switch (decision.outcome) {
@@ -261,6 +269,7 @@ function toHttpResponse(decision, { operationId, withMediaRef = false }) {
         timestamp: decision.result.timestamp,
       };
       if (withMediaRef) body.media_ref = decision.result.mediaRef || null;
+      if (withQuoteApplied) body.quote_applied = Boolean(decision.result.quoteApplied);
       return respond(200, body);
     }
     case 'failed':
@@ -327,6 +336,7 @@ function toHttpResponse(decision, { operationId, withMediaRef = false }) {
           timestamp: row.resolved_at,
         };
         if (withMediaRef) body.media_ref = parseMediaRef(row.media_ref_json);
+        if (withQuoteApplied) body.quote_applied = Boolean(row.quote_applied);
         return respond(200, body);
       }
       if (row.state === 'failed') {

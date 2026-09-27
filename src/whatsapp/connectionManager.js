@@ -962,6 +962,11 @@ class ConnectionManager {
       }
     }
 
+    // Balas Pesan (Tahap 3, REQ-010): kutipan arah MASUK (native reply dari
+    // pelanggan). Hanya disertakan bila benar-benar ada -- payload tanpa
+    // kutipan harus tetap sama persis seperti sebelumnya.
+    const quoted = extractIncomingQuote(msg);
+
     const normalized = {
       messageId: msg.key?.id || null,
       chatId: remoteJid,
@@ -986,6 +991,12 @@ class ConnectionManager {
       if (groupName !== undefined) {
         normalized.group_name = groupName; // REQ-002: hanya bila sudah diketahui
       }
+    }
+
+    // REQ-010: `quoted` hanya ada di payload saat pelanggan benar-benar membalas
+    // (native reply) -- field TIDAK dikirim bila tidak ada kutipan.
+    if (quoted) {
+      normalized.quoted = quoted;
     }
 
     messageStore.add(normalized);
@@ -1050,7 +1061,7 @@ class ConnectionManager {
    *
    * Melempar Error dengan pesan yang jelas jika gagal.
    */
-  async sendTextMessage(jid, text) {
+  async sendTextMessage(jid, text, options = {}) {
     if (!this.isConnected()) {
       const err = new Error('WhatsApp belum connected, tidak bisa mengirim pesan');
       err.code = 'NOT_CONNECTED';
@@ -1058,19 +1069,36 @@ class ConnectionManager {
     }
 
     const jidType = classifyJid(jid);
+
+    // Balas Pesan (Tahap 3, REQ-001/REQ-002/CON-001): `quoted` opsional. Bila
+    // malformed/gagal dibentuk, pesan TETAP dikirim tanpa kutipan dan
+    // kegagalannya di-log ("gagal dengan suara, bukan senyap").
+    const quoteBuild = buildQuotedMessageForRequest(options.quoted, jid, this.sock?.user?.id);
+    if (quoteBuild.requested && !quoteBuild.quoted) {
+      logger.warn('[SEND] kutipan (quoted) tidak dapat dibentuk -- pesan tetap dikirim tanpa kutipan (CON-001)', {
+        targetJid: jid,
+        reason: quoteBuild.reason,
+      });
+    }
+
     logger.info('[SEND] mengirim pesan keluar', { targetJid: jid, jidType });
 
     try {
       const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
-      const result = await this.sock.sendMessage(jid, { text }, { messageId: ownMessageId });
+      const result = await this.sock.sendMessage(jid, { text }, {
+        messageId: ownMessageId,
+        ...(quoteBuild.quoted ? { quoted: quoteBuild.quoted } : {}),
+      });
       logger.info('[SEND] pesan berhasil dikirim', {
         targetJid: jid,
         jidType,
         messageId: result?.key?.id,
+        quoteApplied: Boolean(quoteBuild.quoted),
       });
       return {
         messageId: result?.key?.id || null,
         timestamp: new Date().toISOString(),
+        quoteApplied: Boolean(quoteBuild.quoted),
       };
     } catch (err) {
       logger.error('[SEND] gagal mengirim pesan', { targetJid: jid, jidType, error: err.message });
@@ -1089,7 +1117,7 @@ class ConnectionManager {
    * ATURAN KERAS: chatId di sini TIDAK PERNAH melalui normalizeToJid()/jidToPhone()
    * untuk menentukan tujuan pengiriman. chatId dikirim persis apa adanya ke Baileys.
    */
-  async sendReply(chatId, text) {
+  async sendReply(chatId, text, options = {}) {
     if (!isDecodableJid(chatId)) {
       const err = new Error(`chatId tidak valid/tidak dapat didecode sebagai JID: ${chatId}`);
       err.code = 'INVALID_CHAT_ID';
@@ -1099,7 +1127,7 @@ class ConnectionManager {
     const jidType = classifyJid(chatId);
     logger.info('[CHAT] balasan diminta untuk conversation', { chatId, jidType });
 
-    const result = await this.sendTextMessage(chatId, text);
+    const result = await this.sendTextMessage(chatId, text, options);
 
     // Simpan pesan keluar ke conversation yang SAMA (berdasarkan chatId persis sama),
     // supaya langsung terlihat di history chat yang sedang dibuka di dashboard.
@@ -1154,6 +1182,17 @@ class ConnectionManager {
     const jidType = classifyJid(jid);
     const { caption, mimetype, fileName, isAnimated } = options;
 
+    // Balas Pesan (Tahap 3, REQ-001a/REQ-002/CON-001): `quoted` opsional, sama
+    // seperti jalur teks -- malformed/gagal dibentuk -> media TETAP dikirim
+    // tanpa kutipan dan kegagalannya di-log.
+    const quoteBuild = buildQuotedMessageForRequest(options.quoted, jid, this.sock?.user?.id);
+    if (quoteBuild.requested && !quoteBuild.quoted) {
+      logger.warn('[SEND] kutipan (quoted) tidak dapat dibentuk -- media tetap dikirim tanpa kutipan (CON-001)', {
+        targetJid: jid,
+        reason: quoteBuild.reason,
+      });
+    }
+
     let content;
     if (mediaType === 'image') {
       content = { image: buffer, caption: caption || undefined, mimetype: mimetype || 'image/jpeg' };
@@ -1181,7 +1220,10 @@ class ConnectionManager {
 
     try {
       const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
-      const result = await this.sock.sendMessage(jid, content, { messageId: ownMessageId });
+      const result = await this.sock.sendMessage(jid, content, {
+        messageId: ownMessageId,
+        ...(quoteBuild.quoted ? { quoted: quoteBuild.quoted } : {}),
+      });
 
       // Setelah upload sukses, message yang dikembalikan Baileys SUDAH berisi
       // directPath/mediaKey asli dari server WhatsApp untuk file yang baru
@@ -1205,11 +1247,13 @@ class ConnectionManager {
         mediaType,
         messageId: result?.key?.id,
         mediaRefTersedia: Boolean(mediaRef),
+        quoteApplied: Boolean(quoteBuild.quoted),
       });
       return {
         messageId: result?.key?.id || null,
         timestamp: new Date().toISOString(),
         mediaRef,
+        quoteApplied: Boolean(quoteBuild.quoted),
       };
     } catch (err) {
       logger.error('[SEND] gagal mengirim pesan media', {
@@ -1360,6 +1404,159 @@ function buildMediaRef(mediaMessage, mediaType, fileName) {
     fileSha256Base64: mediaMessage.fileSha256 ? Buffer.from(mediaMessage.fileSha256).toString('base64') : null,
     fileName,
   };
+}
+
+/**
+ * Balas Pesan (Tahap 3, plan/plan-feature-balas-pesan-wa-gateway-v1.0.md):
+ * kunci konten Baileys untuk pesan sumber yang dikutip. `text` -> `conversation`;
+ * tipe media dipetakan ke kunci *Message. Diverifikasi dari source Baileys yang
+ * ter-install (`node_modules/baileys/lib/Utils/messages.js`,
+ * generateWAMessageFromContent()): konten diambil dengan `getContentType()` lalu
+ * dibungkus ulang `{ [msgType]: ... }`, dan `contextInfo` diisi dari `key`/`id`
+ * objek `quoted` -- lihat juga `quoted?: WAMessage` di
+ * `Types/Message.d.ts` (MiscMessageGenerationOptions).
+ */
+const QUOTED_MEDIA_TYPES = ['image', 'document', 'sticker', 'audio', 'video'];
+const QUOTED_CONTENT_KEYS = {
+  text: 'conversation',
+  image: 'imageMessage',
+  document: 'documentMessage',
+  sticker: 'stickerMessage',
+  audio: 'audioMessage',
+  video: 'videoMessage',
+};
+
+// `quoted.message_type` adalah tipe pesan sumber; `quoted.media_type` dipakai
+// sebagai fallback bila AuliaPos mengirim tipe media terpisah. Tipe yang tidak
+// dikenali -> null (didegradasi jadi "tanpa kutipan", bukan error, F-C/CON-001).
+function resolveQuotedContentType(quoted) {
+  const messageType = typeof quoted.message_type === 'string' ? quoted.message_type : '';
+  if (messageType === 'text') return 'text';
+  if (QUOTED_MEDIA_TYPES.includes(messageType)) return messageType;
+
+  const mediaType = typeof quoted.media_type === 'string' ? quoted.media_type : '';
+  if (QUOTED_MEDIA_TYPES.includes(mediaType)) return mediaType;
+  return null;
+}
+
+/**
+ * Bentuk objek pesan Baileys minimal untuk opsi `quoted` (REQ-002) DARI data yang
+ * dikirim AuliaPos -- Gateway TIDAK mencari/menyimpan pesan asli (Gateway bukan
+ * sumber riwayat, docs/CHAT.md). `fromMe` HANYA berasal dari AuliaPos (diturunkan
+ * dari kolom `direction` baris sumber); `absent`/`null`/`false` identik `false`.
+ * Untuk sumber outgoing (`fromMe:true`) participant diisi JID akun-bot sendiri;
+ * untuk sumber incoming, participant = `quoted.sender_jid` bila ada (grup).
+ *
+ * F-C/CON-001: `quoted` malformed (bukan objek, `wa_message_id` kosong, tipe tak
+ * dikenal) TIDAK melempar -- mengembalikan `{ quoted: null, reason }` supaya
+ * pemanggil tetap mengirim isi pesan tanpa kutipan.
+ */
+function buildQuotedMessage(quoted, chatId, ownJid) {
+  if (typeof quoted !== 'object' || quoted === null || Array.isArray(quoted)) {
+    return { quoted: null, reason: 'quoted bukan objek' };
+  }
+
+  const waMessageId = typeof quoted.wa_message_id === 'string' ? quoted.wa_message_id.trim() : '';
+  if (!waMessageId) {
+    return { quoted: null, reason: 'quoted.wa_message_id kosong' };
+  }
+
+  const contentType = resolveQuotedContentType(quoted);
+  if (!contentType) {
+    return { quoted: null, reason: 'quoted.message_type/media_type tidak dikenal' };
+  }
+
+  const fromMe = quoted.fromMe === true;
+  const key = { id: waMessageId, remoteJid: chatId, fromMe };
+
+  if (fromMe) {
+    if (ownJid) key.participant = ownJid;
+  } else if (typeof quoted.sender_jid === 'string' && quoted.sender_jid.trim().length > 0) {
+    key.participant = quoted.sender_jid.trim();
+  }
+
+  const message = contentType === 'text'
+    ? { conversation: typeof quoted.text === 'string' ? quoted.text : '' }
+    : { [QUOTED_CONTENT_KEYS[contentType]]: {} };
+
+  return { quoted: { key, message }, reason: null };
+}
+
+/**
+ * Pembungkus tipis di atas buildQuotedMessage(): membedakan "tidak ada field
+ * `quoted`" (request lama, tidak berubah) dari "ada tapi malformed" (F-C: tetap
+ * dikirim, `quote_applied:false`, di-log). `absent`/`null` = tidak ada kutipan.
+ */
+function buildQuotedMessageForRequest(quoted, chatId, ownJid) {
+  if (quoted === undefined || quoted === null) {
+    return { quoted: null, reason: null, requested: false };
+  }
+  const built = buildQuotedMessage(quoted, chatId, ownJid);
+  return { quoted: built.quoted, reason: built.reason, requested: true };
+}
+
+// Konten pesan masuk yang bisa membawa `contextInfo` (native reply). Pesan
+// balasan bisa bertipe teks (extendedTextMessage) atau media.
+const INCOMING_QUOTE_CONTENT_KEYS = [
+  'extendedTextMessage',
+  'imageMessage',
+  'documentMessage',
+  'stickerMessage',
+  'audioMessage',
+  'videoMessage',
+];
+
+/**
+ * Balas Pesan (Tahap 3, REQ-010): baca `contextInfo` (native reply) pesan masuk
+ * dan bentuk objek `quoted` best-effort untuk payload webhook ke AuliaPos:
+ * `{ wa_message_id, sender_jid?, snippet? }`. Mengembalikan null bila bukan
+ * balasan -- pemanggil TIDAK mengirim field `quoted` (payload lama tidak
+ * berubah). TIDAK PERNAH melempar.
+ */
+function extractIncomingQuote(msg) {
+  const content = msg?.message;
+  if (!content || typeof content !== 'object') return null;
+
+  let contextInfo = null;
+  for (const key of INCOMING_QUOTE_CONTENT_KEYS) {
+    if (content[key]?.contextInfo) {
+      contextInfo = content[key].contextInfo;
+      break;
+    }
+  }
+  if (!contextInfo) return null;
+
+  const waMessageId = typeof contextInfo.stanzaId === 'string' ? contextInfo.stanzaId : '';
+  if (!waMessageId) return null;
+
+  const quoted = { wa_message_id: waMessageId };
+  if (typeof contextInfo.participant === 'string' && contextInfo.participant) {
+    quoted.sender_jid = contextInfo.participant;
+  }
+  const snippet = buildQuotedSnippet(contextInfo.quotedMessage);
+  if (snippet) quoted.snippet = snippet;
+  return quoted;
+}
+
+/**
+ * Snippet best-effort kutipan masuk: teks terpotong (maks 200 karakter) atau
+ * label jenis media. Dipakai AuliaPos sebagai FALLBACK saat pesan sumber tidak
+ * ditemukan di DB lokal (REQ-011 kasus kedua); snippet TIDAK pernah di-log.
+ */
+function buildQuotedSnippet(quotedMessage) {
+  if (!quotedMessage || typeof quotedMessage !== 'object') return null;
+
+  const text = quotedMessage.conversation || quotedMessage.extendedTextMessage?.text || null;
+  if (typeof text === 'string' && text.trim().length > 0) {
+    const trimmed = text.trim();
+    return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+  }
+  if (quotedMessage.imageMessage) return '[Foto]';
+  if (quotedMessage.documentMessage) return '[Dokumen]';
+  if (quotedMessage.stickerMessage) return '[Stiker]';
+  if (quotedMessage.audioMessage) return '[Audio]';
+  if (quotedMessage.videoMessage) return '[Video]';
+  return null;
 }
 
 module.exports = new ConnectionManager();

@@ -260,13 +260,14 @@ function runSuite(label, make) {
     assert.deepStrictEqual(
       cols.map((c) => c.name),
       ['operation_id', 'payload_hash', 'kind', 'chat_id', 'state', 'wa_message_id', 'media_ref_json',
+        'quote_applied',
         'attempts', 'last_error', 'created_at', 'updated_at', 'resolved_at', 'dead_lettered_at']
     );
     assert.strictEqual(cols.find((c) => c.name === 'operation_id').pk, 1);
     const idx = db.prepare("PRAGMA index_list('outgoing_operations')").all().map((i) => i.name);
     assert.ok(idx.includes('idx_outgoing_operations_state'));
     db.close();
-    console.log('OK: 13 kolom + indeks idx_outgoing_operations_state.');
+    console.log('OK: 14 kolom + indeks idx_outgoing_operations_state.');
   }
 
   console.log('\n=== Singleton memakai SQLITE_PATH temp (bukan database produksi) ===');

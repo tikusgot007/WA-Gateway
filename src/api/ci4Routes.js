@@ -48,6 +48,13 @@ const jsonMedia = express.json({ limit: config.mediaJsonBodyLimitBytes });
 router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   const { chat_id: chatId, text } = req.body || {};
 
+  // Balas Pesan (Tahap 3, REQ-001): `quoted` opsional. Kehadirannya menentukan
+  // apakah respons menyertakan `quote_applied` -- request TANPA `quoted` tetap
+  // berperilaku persis seperti sebelumnya. Nilai malformed TIDAK ditolak di sini
+  // (F-C/CON-001): connectionManager mendegradasinya jadi "tanpa kutipan".
+  const rawQuoted = (req.body || {}).quoted;
+  const quoteRequested = rawQuoted !== undefined && rawQuoted !== null;
+
   // M1 Wave 2 (REQ-020): operation_id opsional; yang ada tapi tidak valid ditolak
   // 400 SEBELUM apa pun menyentuh Baileys.
   const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
@@ -85,7 +92,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   // Satu-satunya titik panggilan sendReply() di route ini: jalur idempotensi
   // memanggilnya HANYA lewat runOperation() (setelah baris in_flight tersimpan);
   // jalur lama (tanpa operation_id) memanggilnya langsung.
-  const doSend = () => connectionManager.sendReply(chatId, text);
+  const doSend = () => connectionManager.sendReply(chatId, text, { quoted: rawQuoted });
 
   if (operationId) {
     // M1 Wave 2 (REQ-021..REQ-027): kirim dengan idempotensi. payload_hash
@@ -98,7 +105,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       isReady: () => connectionManager.isConnected(),
       send: doSend,
     });
-    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withQuoteApplied: quoteRequested });
     return res.status(status).json(body);
   }
 
@@ -120,6 +127,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
     logger.info('[SEND-CI4] pesan keluar dari POS berhasil dikirim', {
       chatId,
       waMessageId: result.messageId,
+      quoteApplied: Boolean(result.quoteApplied),
     });
 
     return res.json({
@@ -128,6 +136,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       replayed: false,
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
+      ...(quoteRequested ? { quote_applied: Boolean(result.quoteApplied) } : {}),
     });
   } catch (err) {
     logger.error('[SEND-CI4] gagal mengirim pesan dari POS', { chatId, error: err.message });
@@ -159,6 +168,12 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     caption,
     is_animated: isAnimated,
   } = req.body || {};
+
+  // Balas Pesan (Tahap 3, REQ-001a): `quoted` opsional dengan struktur IDENTIK
+  // /send (termasuk semantik fromMe & aturan malformed F-C). Kehadirannya
+  // menentukan apakah respons menyertakan `quote_applied`.
+  const rawQuoted = (req.body || {}).quoted;
+  const quoteRequested = rawQuoted !== undefined && rawQuoted !== null;
 
   // M1 Wave 2 (REQ-020): dicek paling awal -- sebelum decode base64 yang mahal --
   // dan tanpa menyentuh Baileys.
@@ -241,6 +256,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       mimetype: mimetype || undefined,
       fileName: fileName || undefined,
       isAnimated: Boolean(isAnimated),
+      quoted: rawQuoted,
     });
     return {
       messageId: result.messageId,
@@ -249,6 +265,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
         direct_path: result.mediaRef.directPath,
         media_key_base64: result.mediaRef.mediaKeyBase64,
       } : null,
+      quoteApplied: result.quoteApplied,
     };
   };
 
@@ -267,7 +284,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       isReady: () => connectionManager.isConnected(),
       send: doSend,
     });
-    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withMediaRef: true });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withMediaRef: true, withQuoteApplied: quoteRequested });
     return res.status(status).json(body);
   }
 
@@ -291,6 +308,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       mediaType,
       waMessageId: result.messageId,
       mediaRefTersedia: Boolean(result.mediaRef),
+      quoteApplied: Boolean(result.quoteApplied),
     });
 
     return res.json({
@@ -300,6 +318,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
       media_ref: result.mediaRef,
+      ...(quoteRequested ? { quote_applied: Boolean(result.quoteApplied) } : {}),
     });
   } catch (err) {
     logger.error('[SEND-MEDIA-CI4] gagal mengirim media dari POS', { chatId, mediaType, error: err.message });
