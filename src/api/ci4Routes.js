@@ -7,6 +7,7 @@ const config = require('../config');
 const { isDecodableJid } = require('../whatsapp/jidUtils');
 const { requireCI4Token } = require('./authMiddleware');
 const { VALID_MEDIA_TYPES, decodeBase64Media, isValidWebp } = require('../whatsapp/mediaPayload');
+const { resolveForwardRequest } = require('../whatsapp/forwardMarker');
 const outgoingOperationService = require('../delivery/outgoingOperationService');
 
 // M1 Wave 2 (REQ-020): respons 400 yang sama untuk /send dan /send-media.
@@ -16,6 +17,34 @@ function invalidOperationIdResponse(res) {
     error_code: 'INVALID_OPERATION_ID',
     message: 'operation_id harus string 1-64 karakter dengan pola [A-Za-z0-9._:-].',
   });
+}
+
+// Teruskan (Tahap 4, CON-001): `forward` dan `quoted` TIDAK PERNAH dikirim
+// bersamaan. AuliaPos menegakkannya di sisi POS (server), jadi kemunculannya di
+// sini berarti bug pemanggil -- ditolak 400 supaya terlihat, bukan didiamkan
+// dengan diam-diam mengorbankan salah satu penanda.
+function forwardWithQuotedResponse(res) {
+  return res.status(400).json({
+    success: false,
+    error_code: 'FORWARD_WITH_QUOTED',
+    message: 'Field "forward" dan "quoted" tidak boleh dikirim bersamaan pada satu request.',
+  });
+}
+
+/**
+ * Baca field `forward` dari body request dan laporkan penyimpangan bentuknya.
+ * Nilai selain boolean diperlakukan `false` (pola degradasi F-C, sama seperti
+ * `quoted`) dan di-log -- isi pesan pengguna tidak boleh hilang karena field
+ * tambahan yang salah. `absent`/`null` = tidak diminta sama sekali.
+ */
+function readForwardRequest(req, label) {
+  const parsed = resolveForwardRequest((req.body || {}).forward);
+  if (parsed.malformed) {
+    logger.warn(`[${label}] field "forward" bukan boolean -- diperlakukan false, pesan tetap dikirim`, {
+      nilaiDiterima: typeof (req.body || {}).forward,
+    });
+  }
+  return parsed;
 }
 
 /**
@@ -55,6 +84,12 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   const rawQuoted = (req.body || {}).quoted;
   const quoteRequested = rawQuoted !== undefined && rawQuoted !== null;
 
+  // Teruskan (Tahap 4, REQ-001): `forward` opsional (boolean, default false).
+  // Kehadirannya menentukan apakah respons menyertakan `forward_marker_applied` --
+  // request TANPA `forward` tetap berperilaku persis seperti sebelumnya.
+  const forward = readForwardRequest(req, 'SEND-CI4');
+  if (forward.requested && quoteRequested) return forwardWithQuotedResponse(res);
+
   // M1 Wave 2 (REQ-020): operation_id opsional; yang ada tapi tidak valid ditolak
   // 400 SEBELUM apa pun menyentuh Baileys.
   const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
@@ -92,11 +127,14 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
   // Satu-satunya titik panggilan sendReply() di route ini: jalur idempotensi
   // memanggilnya HANYA lewat runOperation() (setelah baris in_flight tersimpan);
   // jalur lama (tanpa operation_id) memanggilnya langsung.
-  const doSend = () => connectionManager.sendReply(chatId, text, { quoted: rawQuoted });
+  const doSend = () => connectionManager.sendReply(chatId, text, { quoted: rawQuoted, forward: forward.requested });
 
   if (operationId) {
     // M1 Wave 2 (REQ-021..REQ-027): kirim dengan idempotensi. payload_hash
     // dihitung SETELAH seluruh validasi payload di atas lolos (A-7).
+    // `forward` SENGAJA tidak masuk hash (pola `quoted`): supaya hash request
+    // lama tidak berubah dan operasi in_flight milik AuliaPos tidak ter-abort
+    // saat Gateway naik versi.
     const decision = await outgoingOperationService.runOperation({
       operationId,
       payloadHash: outgoingOperationService.computePayloadHash({ kind: 'text', chatId, text }),
@@ -105,7 +143,11 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       isReady: () => connectionManager.isConnected(),
       send: doSend,
     });
-    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withQuoteApplied: quoteRequested });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, {
+      operationId,
+      withQuoteApplied: quoteRequested,
+      withForwardMarker: forward.requested,
+    });
     return res.status(status).json(body);
   }
 
@@ -128,6 +170,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       chatId,
       waMessageId: result.messageId,
       quoteApplied: Boolean(result.quoteApplied),
+      forwardMarkerApplied: result.forwardMarkerApplied,
     });
 
     return res.json({
@@ -137,6 +180,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       wa_message_id: result.messageId,
       timestamp: result.timestamp,
       ...(quoteRequested ? { quote_applied: Boolean(result.quoteApplied) } : {}),
+      ...(forward.requested ? { forward_marker_applied: result.forwardMarkerApplied || null } : {}),
     });
   } catch (err) {
     logger.error('[SEND-CI4] gagal mengirim pesan dari POS', { chatId, error: err.message });
@@ -174,6 +218,12 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
   // menentukan apakah respons menyertakan `quote_applied`.
   const rawQuoted = (req.body || {}).quoted;
   const quoteRequested = rawQuoted !== undefined && rawQuoted !== null;
+
+  // Teruskan (Tahap 4, REQ-001a): `forward` opsional dengan struktur & aturan
+  // IDENTIK /send. Kehadirannya menentukan apakah respons menyertakan
+  // `forward_marker_applied`.
+  const forward = readForwardRequest(req, 'SEND-MEDIA-CI4');
+  if (forward.requested && quoteRequested) return forwardWithQuotedResponse(res);
 
   // M1 Wave 2 (REQ-020): dicek paling awal -- sebelum decode base64 yang mahal --
   // dan tanpa menyentuh Baileys.
@@ -257,6 +307,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       fileName: fileName || undefined,
       isAnimated: Boolean(isAnimated),
       quoted: rawQuoted,
+      forward: forward.requested,
     });
     return {
       messageId: result.messageId,
@@ -266,13 +317,16 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
         media_key_base64: result.mediaRef.mediaKeyBase64,
       } : null,
       quoteApplied: result.quoteApplied,
+      forwardMarkerApplied: result.forwardMarkerApplied,
     };
   };
 
   if (operationId) {
     // M1 Wave 2 (REQ-021..REQ-027): kirim dengan idempotensi. Fingerprint dari
     // metadata + SHA-256 konten hasil decode (bukan string base64, SEC-001),
-    // dihitung SETELAH seluruh validasi payload di atas lolos (A-7).
+    // dihitung SETELAH seluruh validasi payload di atas lolos (A-7). `forward`
+    // SENGAJA tidak masuk hash (pola `quoted`): hash request lama tidak boleh
+    // berubah hanya karena Gateway naik versi.
     const mediaMeta = outgoingOperationService.buildMediaMeta({
       mediaType, buffer: decoded.buffer, mimetype, fileName, caption, isAnimated,
     });
@@ -284,7 +338,12 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       isReady: () => connectionManager.isConnected(),
       send: doSend,
     });
-    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId, withMediaRef: true, withQuoteApplied: quoteRequested });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, {
+      operationId,
+      withMediaRef: true,
+      withQuoteApplied: quoteRequested,
+      withForwardMarker: forward.requested,
+    });
     return res.status(status).json(body);
   }
 
@@ -309,6 +368,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       waMessageId: result.messageId,
       mediaRefTersedia: Boolean(result.mediaRef),
       quoteApplied: Boolean(result.quoteApplied),
+      forwardMarkerApplied: result.forwardMarkerApplied,
     });
 
     return res.json({
@@ -319,6 +379,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       timestamp: result.timestamp,
       media_ref: result.mediaRef,
       ...(quoteRequested ? { quote_applied: Boolean(result.quoteApplied) } : {}),
+      ...(forward.requested ? { forward_marker_applied: result.forwardMarkerApplied || null } : {}),
     });
   } catch (err) {
     logger.error('[SEND-MEDIA-CI4] gagal mengirim media dari POS', { chatId, mediaType, error: err.message });

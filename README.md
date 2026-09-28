@@ -179,8 +179,8 @@ Response berbentuk `{ success: boolean, ... }`, berbeda dari format `/api/*`.
 
 | Method | Endpoint | Fungsi |
 |--------|----------|--------|
-| POST | `/send` | Kirim balasan teks dari POS. Body: `{ "chat_id": "...", "text": "..." }` |
-| POST | `/send-media` | Kirim balasan **media** (gambar/dokumen/sticker) dari POS. Body: `{ "chat_id": "...", "media_type": "image"|"document"|"sticker", "media_base64": "...", "mimetype": "...", "file_name": "...", "caption": "...", "is_animated": false }`. **Hanya menerima base64** (bukan URL) — kasir upload file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa dipakai ulang seperti `/media/download`. `file_name` wajib untuk `media_type: "document"`. Untuk `media_type: "sticker"`, file **wajib WebP valid** (ditolak `400 INVALID_STICKER_FORMAT` kalau bukan), tidak ada konversi otomatis dari format lain, dan `caption` diabaikan. Lihat §14/§16. |
+| POST | `/send` | Kirim balasan teks dari POS. Body: `{ "chat_id": "...", "text": "...", "quoted": { ... }, "forward": true }`. `quoted` (Balas Pesan) dan `forward` (Teruskan, §17) **opsional** dan **tidak boleh dikirim bersamaan** (kombinasi ditolak `400 FORWARD_WITH_QUOTED`). Lihat §17. |
+| POST | `/send-media` | Kirim balasan **media** (gambar/dokumen/sticker) dari POS. Body: `{ "chat_id": "...", "media_type": "image"|"document"|"sticker", "media_base64": "...", "mimetype": "...", "file_name": "...", "caption": "...", "is_animated": false }`. **Hanya menerima base64** (bukan URL) — kasir upload file baru dari komputernya, jadi tidak ada referensi WhatsApp yang bisa dipakai ulang seperti `/media/download`. `file_name` wajib untuk `media_type: "document"`. Untuk `media_type: "sticker"`, file **wajib WebP valid** (ditolak `400 INVALID_STICKER_FORMAT` kalau bukan), tidak ada konversi otomatis dari format lain, dan `caption` diabaikan. `quoted`/`forward` opsional dengan aturan **identik** `/send`. Lihat §14/§16/§17. |
 | POST | `/media/download` | Ambil+dekripsi 1 file media **masuk** (gambar/dokumen/sticker) dari server WhatsApp, berdasarkan referensi (`direct_path` + `media_key_base64` + `media_type`) yang tersimpan CI4. Mengembalikan file BINARY langsung (bukan JSON) jika sukses. |
 
 Prinsip yang sama untuk seluruh endpoint media (masuk maupun keluar): Gateway
@@ -566,3 +566,108 @@ ditebak dari dokumentasi/memori.
 2. **Terima sticker ANIMASI sungguhan**, pastikan tetap diteruskan dengan benar (flag `isAnimated` dari WhatsApp sungguhan belum pernah diverifikasi bentuknya persis seperti apa di sandbox ini -- kode mengasumsikan `boolean`, sesuai definisi proto).
 3. **Kirim file WebP yang valid secara format tapi TIDAK memenuhi syarat sticker WhatsApp** (dimensi bukan 512x512, ukuran terlalu besar, dst) -- `isValidWebp()` SENGAJA cuma cek magic bytes container, jadi kemungkinan besar akan lolos validasi Gateway tapi ditolak oleh WhatsApp sendiri. Perlu dipastikan pesan error dari Baileys (kalau ada) diteruskan dengan jelas, bukan generic `500`.
 4. **Sisi CI4 (AuliaPos v3.0)**: seperti disebutkan di §14.4, endpoint `POST /send-media` sudah mendukung sticker di sisi Gateway, tapi UI upload sticker + pemanggilannya dari CI4 adalah pekerjaan terpisah di luar scope perubahan ini. Untuk arah masuk, cabang kode `image`/`document` yang akan direuse untuk `sticker` di `InboxGatewayApi::messages()` (sisi AuliaPos) BELUM diverifikasi menerima `message_type: "sticker"` dengan benar -- itu perubahan di repo AuliaPos, bukan Gateway ini.
+
+---
+
+## 17. Teruskan (penanda "diteruskan" pada pesan keluar)
+
+Kasir meneruskan satu pesan (teks/media) dari satu percakapan ke percakapan lain.
+Fitur ini **sepenuhnya di sisi AuliaPos**: Gateway hanya memenuhi kontrak
+`forward` yang diminta POS.
+
+### 17.1 Keputusan desain
+
+- **Field `forward` opsional (boolean, default `false`)** di `POST /send` **dan**
+  `POST /send-media`, dengan aturan yang persis sama. `forward: true` berarti
+  "tandai pesan ini sebagai diteruskan".
+- **Penanda native didahulukan** (REQ-002): Gateway menempelkan
+  `contextInfo.forwardingScore = 1` + `isForwarded: true` ke konten yang
+  diserahkan ke Baileys. Mekanismenya **diverifikasi langsung dari source
+  Baileys 6.7.24 yang ter-install** (`lib/Utils/messages.js`):
+  `generateWAMessageFromContent()` menggabungkan `contextInfo` tingkat pesan ke
+  konten, dan `generateForwardMessageContent()` menandai `isForwarded: true`
+  begitu `forwardingScore > 0`. **Tidak perlu `quoted` sama sekali** -- jadi
+  "diteruskan" dan "balasan" benar-benar dua hal berbeda.
+- **Gateway tidak pernah memegang pesan asli.** Jalur `forward:` bawaan Baileys
+  (`{ forward: <WAMessage> }`) DITOLAK karena menuntut Gateway membentuk ulang
+  objek pesan asli -- itu melanggar batas "Gateway bukan sumber riwayat" dan
+  memperbesar ruang lingkup perubahan.
+- **Fallback teks, bukan kegagalan**: kalau penanda native tidak tersedia,
+  Gateway menyisipkan prefix `"↪️ Diteruskan: "` di depan `text` (media: ke
+  `caption`). Isi pesan pengguna tidak boleh hilang hanya karena penanda
+  tambahan gagal dipasang.
+- **Penanda fallback untuk stiker tidak mungkin**: WhatsApp mengabaikan caption
+  pada sticker, jadi kalau native tidak tersedia untuk stiker, Gateway hanya
+  mencatatnya di log.
+- **Ketersediaan native ditentukan probe versi Baileys**
+  (`supportsContentContextInfo()`), bukan tebakan: ambangnya `6.7.24` (versi yang
+  sudah diverifikasi). Di bawah itu Gateway otomatis memakai prefix teks.
+- **`forward` + `quoted` bersamaan ditolak `400 FORWARD_WITH_QUOTED`**
+  (kombinasi ini tidak pernah dikirim AuliaPos, jadi kemunculannya berarti bug --
+  gagal dengan suara, bukan senyap).
+- **`forward` TIDAK ikut `payload_hash` idempotensi** (pola `quoted`): hash
+  request yang sudah ada tidak boleh berubah hanya karena Gateway naik versi,
+  atau operasi `in_flight` milik AuliaPos akan ter-abort.
+- **Respons gaining `forward_marker_applied`** (`"native"` | `"text_fallback"`)
+  **hanya** bila request memang meminta `forward`. Request tanpa `forward`
+  berperilaku persis seperti sebelumnya -- daftar key respons tidak berubah satu
+  byte pun. Nilai ini murni untuk log/debug AuliaPos; label di layar kasir
+  dibangun AuliaPos sendiri.
+- **Storenya hanya menambah satu kolom**: `forward_marker_applied` (tri-state
+  `'native'` | `'text_fallback'` | `NULL`) di tabel `outgoing_operations`, lewat
+  `ALTER TABLE` idempoten, supaya replay `operation_id` melaporkan marker yang
+  sama tanpa mengirim ulang.
+
+### 17.2 File yang diubah/ditambahkan
+
+| File | Perubahan |
+|------|-----------|
+| `src/whatsapp/forwardMarker.js` | **Baru.** Satu tempat untuk membaca `forward`, memasang `contextInfo` native, atau menyisipkan prefix teks. |
+| `src/whatsapp/baileysLoader.js` | `supportsContentContextInfo()` -- probe versi Baileys untuk penanda native. |
+| `src/whatsapp/connectionManager.js` | `sendTextMessage()`/`sendMediaMessage()` memasang penanda; `sendReply()`/`sendMediaReply()` meneruskan `options.forward` apa adanya. |
+| `src/api/ci4Routes.js` | `/send` + `/send-media` membaca `forward`, menolak kombinasi dengan `quoted` (`400 FORWARD_WITH_QUOTED`), dan menyertakan `forward_marker_applied` di respons (jalur biasa maupun idempotensi). |
+| `src/delivery/outgoingOperationService.js` | Menyimpan `forward_marker_applied` di baris operasi dan melaporkannya pada respons sent/replay. |
+| `src/store/outgoingOperations.js` | Kolom additive `forward_marker_applied` (SQLite + fallback JSON), migrasi `ALTER TABLE` idempoten. |
+| `test/simulate-forward.js` | **Baru.** Simulasi kontrak `forward` (§17.3). |
+| `test/simulate-outgoing-store.js` | Assertion skema 14 → 15 kolom, tri-state marker, dan migrasi database lama. |
+
+### 17.3 Yang sudah diverifikasi lewat simulasi (`node test/simulate-forward.js`)
+
+- `POST /send` dan `POST /send-media` dengan `forward: true` → `forward_marker_applied: "native"`,
+  dan konten Baileys memuat `contextInfo: { forwardingScore: 1, isForwarded: true }` --
+  isi pesan/caption **tidak** diubah.
+- `forward` + `quoted` → `400 FORWARD_WITH_QUOTED` di kedua endpoint, tanpa menyentuh Baileys.
+  `quoted` saja tetap berfungsi seperti sebelumnya.
+- `forward` non-boolean (`"true"`, `1`, `{}`, `0`) → diperlakukan `false`, pesan tetap terkirim,
+  dan penyimpangan bentuknya di-log.
+- Request **tanpa** `forward` → daftar key respons persis seperti dulu
+  (`['replayed','state','success','timestamp','wa_message_id']`, plus `operation_id`/
+  `media_ref` sesuai endpoint), dan konten tidak mendapat `contextInfo`.
+- Replay `operation_id` (teks & media) → `forward_marker_applied` sama, tanpa kirim ulang.
+- Retry dengan `operation_id` sama tetapi `forward` berubah → tetap `replayed`, bukan
+  `409 OPERATION_ID_REUSED` (bukti `forward` tidak ikut `payload_hash`).
+- Jalur fallback (native tidak tersedia) → prefix masuk ke `text` / `caption`
+  (bukan field lain), dan dicatat `"text_fallback"`.
+- Mekanisme native diuji terhadap Baileys sungguhan yang ter-install:
+  `generateWAMessageContent()` menghasilkan `contextInfo.isForwarded === true` tanpa
+  `quotedMessage`/`stanzaId`; jalur `forward:` bawaan Baileys terbukti menuntut
+  pesan asli lengkap (alasan jalur itu ditolak).
+- Jalur `sticker` tetap mengikuti validasi WebP dan tidak pernah mendapat field caption baru.
+- Seluruh `test/simulate-*.js` dan `test/check-*.js` (termasuk
+  `check-test-sqlite-isolation.js` dan `check-outgoing-log-scan.js`) dijalankan ulang --
+  semua lulus, tidak ada regresi.
+
+### 17.4 Yang PERLU kamu jalankan/verifikasi sendiri (BELUM bisa diverifikasi di sandbox)
+
+1. **Kirim nyata** `forward: true` lewat `/send` **dan** `/send-media` ke nomor uji,
+   lalu periksa di WhatsApp HP uji apakah pesan tampil **bertanda diteruskan** oleh
+   WhatsApp (bukan sekadar teks prefix). Ini satu-satunya bukti yang tidak bisa
+   dihasilkan simulasi.
+2. **Periksa log** `forwardMarkerApplied: "native"` di `logs/gateway.log` dan nilai
+   `forward_marker_applied` di respons, lalu cocokkan dengan yang terlihat di HP.
+3. **Uji media & stiker**: apakah penanda native ikut tampil untuk foto/dokumen, dan
+   apa yang terjadi pada stiker (WhatsApp bisa mengabaikan `contextInfo` di
+   `stickerMessage`; kalau begitu, prefix teks tidak bisa menolong karena stiker
+   tidak menerima caption).
+4. **Uji tanpa `forward`**: kirim pesan biasa dan pastikan tampilannya persis seperti
+   sebelumnya (tidak ada penanda, tidak ada prefix tambahan).

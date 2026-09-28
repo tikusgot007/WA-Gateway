@@ -79,4 +79,50 @@ function getBaileys() {
   return cachedModule;
 }
 
-module.exports = { ensureBaileysLoaded, getBaileys };
+// Teruskan (Tahap 4): apakah versi Baileys yang terpasang mendukung penanda
+// diteruskan native lewat `contextInfo` di tingkat konten?
+//
+// Mekanismenya sudah DIVERIFIKASI di source Baileys 6.7.24 yang ter-install
+// (`lib/Utils/messages.js`): `generateWAMessageFromContent()` menggabungkan
+// `contextInfo` tingkat pesan ke konten hasil, dan
+// `generateForwardMessageContent()` menandai `isForwarded: true` begitu
+// `contextInfo.forwardingScore > 0`. Versi yang lebih lama belum diperiksa --
+// jadi Gateway tidak menebak API internal Baileys: kalau versinya di bawah
+// ambang, penanda native dianggap tidak tersedia dan prefix teks yang dipakai
+// (REQ-002). Ambangnya konservatif (hanya versi yang sudah diperiksa manual),
+// supaya upgrade Baileys tidak diam-diam mematikan penanda native.
+const FORWARD_MARKER_MIN_VERSION = [6, 7, 24];
+
+function parseVersion(version) {
+  return String(version).split('-')[0].split('.').map((part) => Number.parseInt(part, 10));
+}
+
+/** @returns {number} -1/0/1 seperti perbandingan string: a < b, a == b, a > b */
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i += 1) {
+    const left = a[i] || 0;
+    const right = b[i] || 0;
+    if (left !== right) return left < right ? -1 : 1;
+  }
+  return 0;
+}
+
+let forwardMarkerSupported = null;
+
+function supportsContentContextInfo() {
+  if (forwardMarkerSupported !== null) return forwardMarkerSupported;
+  let version = null;
+  try {
+    // eslint-disable-next-line global-require
+    version = require('baileys/package.json').version;
+  } catch (err) {
+    // Versi tidak terbaca -> perlakukan sebagai tidak didukung (prefix teks),
+    // supaya yang terjadi adalah degradasi yang terlihat, bukan penanda hilang
+    // tanpa suara.
+  }
+  const parsed = version === null ? [] : parseVersion(version);
+  forwardMarkerSupported = parsed.length === 3 && compareVersions(parsed, FORWARD_MARKER_MIN_VERSION) >= 0;
+  return forwardMarkerSupported;
+}
+
+module.exports = { ensureBaileysLoaded, getBaileys, supportsContentContextInfo };

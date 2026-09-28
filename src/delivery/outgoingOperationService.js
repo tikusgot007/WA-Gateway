@@ -205,6 +205,7 @@ async function runOperation({ operationId, payloadHash, kind, chatId, isReady, s
       mediaRef: result.mediaRef || null,
       sentAt: result.timestamp,
       quoteApplied: result.quoteApplied,
+      forwardMarkerApplied: result.forwardMarkerApplied,
     })) {
       logger.error('[SEND-OPERATION] markSent tidak mengubah baris (bukan in_flight lagi?)', { operationId });
     }
@@ -249,14 +250,18 @@ function parseMediaRef(json) {
  * (dan `operation_id`) hanya ditambahkan.
  *
  * @param {object} decision hasil runOperation()
- * @param {{operationId: string, withMediaRef?: boolean, withQuoteApplied?: boolean}} options
+ * @param {{operationId: string, withMediaRef?: boolean, withQuoteApplied?: boolean, withForwardMarker?: boolean}} options
  *   withMediaRef: true untuk /send-media (selalu sertakan `media_ref`, null bila tidak ada).
  *   withQuoteApplied: true bila permintaan membawa `quoted` (Balas Pesan, Tahap 3) --
  *   sertakan `quote_applied` pada respons sent/replay; nilai replay dibaca dari baris
  *   operasi tersimpan supaya tidak perlu mengirim ulang ke Baileys (REQ-003).
+ *   withForwardMarker: true bila permintaan membawa `forward: true` (Teruskan, Tahap 4) --
+ *   sertakan `forward_marker_applied` ('native' | 'text_fallback', atau null kalau
+ *   penandanya tidak diketahui) pada respons sent/replay; nilai replay dibaca dari
+ *   baris operasi tersimpan (REQ-003).
  * @returns {{status: number, body: object}}
  */
-function toHttpResponse(decision, { operationId, withMediaRef = false, withQuoteApplied = false }) {
+function toHttpResponse(decision, { operationId, withMediaRef = false, withQuoteApplied = false, withForwardMarker = false }) {
   const respond = (status, body) => ({ status, body: { ...body, operation_id: operationId } });
 
   switch (decision.outcome) {
@@ -270,6 +275,7 @@ function toHttpResponse(decision, { operationId, withMediaRef = false, withQuote
       };
       if (withMediaRef) body.media_ref = decision.result.mediaRef || null;
       if (withQuoteApplied) body.quote_applied = Boolean(decision.result.quoteApplied);
+      if (withForwardMarker) body.forward_marker_applied = decision.result.forwardMarkerApplied || null;
       return respond(200, body);
     }
     case 'failed':
@@ -337,6 +343,7 @@ function toHttpResponse(decision, { operationId, withMediaRef = false, withQuote
         };
         if (withMediaRef) body.media_ref = parseMediaRef(row.media_ref_json);
         if (withQuoteApplied) body.quote_applied = Boolean(row.quote_applied);
+        if (withForwardMarker) body.forward_marker_applied = row.forward_marker_applied || null;
         return respond(200, body);
       }
       if (row.state === 'failed') {

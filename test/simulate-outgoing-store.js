@@ -133,6 +133,22 @@ function runSuite(label, make) {
   assert.strictEqual(s.get('OP-T').resolved_at, '2026-09-24T09:59:59.000Z');
   console.log('OK');
 
+  console.log('--- markSent(): forward_marker_applied tri-state (Teruskan) ---');
+  s.begin(base('OP-FW-NULL'));
+  assert.strictEqual(s.get('OP-FW-NULL').forward_marker_applied, null, 'baris baru: NULL = tanpa penanda');
+  s.markSent('OP-FW-NULL', { waMessageId: 'WA-FW1' });
+  assert.strictEqual(s.get('OP-FW-NULL').forward_marker_applied, null, 'tidak diminta -> NULL');
+  s.begin(base('OP-FW-NATIVE'));
+  s.markSent('OP-FW-NATIVE', { waMessageId: 'WA-FW2', forwardMarkerApplied: 'native' });
+  assert.strictEqual(s.get('OP-FW-NATIVE').forward_marker_applied, 'native');
+  s.begin(base('OP-FW-FALLBACK'));
+  s.markSent('OP-FW-FALLBACK', { waMessageId: 'WA-FW3', forwardMarkerApplied: 'text_fallback' });
+  assert.strictEqual(s.get('OP-FW-FALLBACK').forward_marker_applied, 'text_fallback');
+  s.begin(base('OP-FW-NGAWUR'));
+  s.markSent('OP-FW-NGAWUR', { waMessageId: 'WA-FW4', forwardMarkerApplied: 'nilai-ngawur' });
+  assert.strictEqual(s.get('OP-FW-NGAWUR').forward_marker_applied, null, 'nilai di luar kontrak -> NULL, bukan dilaporkan apa adanya');
+  console.log('OK');
+
   console.log('--- markFailed(): terminal failed + last_error dipotong ---');
   s.begin(base('OP-F'));
   assert.strictEqual(s.markFailed('OP-F', 'x'.repeat(2000)), true);
@@ -261,13 +277,70 @@ function runSuite(label, make) {
       cols.map((c) => c.name),
       ['operation_id', 'payload_hash', 'kind', 'chat_id', 'state', 'wa_message_id', 'media_ref_json',
         'quote_applied',
+        'forward_marker_applied',
         'attempts', 'last_error', 'created_at', 'updated_at', 'resolved_at', 'dead_lettered_at']
     );
     assert.strictEqual(cols.find((c) => c.name === 'operation_id').pk, 1);
     const idx = db.prepare("PRAGMA index_list('outgoing_operations')").all().map((i) => i.name);
     assert.ok(idx.includes('idx_outgoing_operations_state'));
     db.close();
-    console.log('OK: 14 kolom + indeks idx_outgoing_operations_state.');
+    console.log('OK: 15 kolom + indeks idx_outgoing_operations_state.');
+  }
+
+  console.log('\n=== Migrasi: database lama (tanpa forward_marker_applied) di-upgrade, idempoten ===');
+  {
+    const dir = newDir();
+    const dbPath = path.join(dir, 'gateway.sqlite');
+    // Susun ulang skema SEBELUM Teruskan (Tahap 4) -- sama dengan database yang
+    // sudah dipakai Gateway sungguhan di field.
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE outgoing_operations (
+        operation_id        TEXT PRIMARY KEY,
+        payload_hash        TEXT NOT NULL,
+        kind                TEXT NOT NULL,
+        chat_id             TEXT NOT NULL,
+        state               TEXT NOT NULL DEFAULT 'in_flight',
+        wa_message_id       TEXT,
+        media_ref_json      TEXT,
+        quote_applied       INTEGER,
+        attempts            INTEGER NOT NULL DEFAULT 1,
+        last_error          TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL,
+        resolved_at         TEXT,
+        dead_lettered_at    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_outgoing_operations_state
+        ON outgoing_operations (state, updated_at);
+      INSERT INTO outgoing_operations
+        (operation_id, payload_hash, kind, chat_id, state, wa_message_id, attempts, created_at, updated_at, resolved_at)
+      VALUES
+        ('OP-LAMA', 'hash-lama', 'text', '628@s.whatsapp.net', 'sent', 'WA-LAMA', 1,
+         '2026-09-24T10:00:00.000Z', '2026-09-24T10:00:00.000Z', '2026-09-24T10:00:00.000Z');
+    `);
+    legacy.close();
+
+    // Opening pertama harus menambahkan kolomnya (ALTER TABLE), tanpa menghapus data.
+    const upgraded = track(new OutgoingOperationsSqlite(Database, dbPath));
+    const row = upgraded.get('OP-LAMA');
+    assert.ok(row, 'baris lama tidak hilang saat migrasi');
+    assert.strictEqual(row.wa_message_id, 'WA-LAMA');
+    assert.strictEqual(row.forward_marker_applied, null, 'baris lama dibaca sebagai "tanpa penanda"');
+    upgraded.close();
+
+    // Opening kedua pada DB yang SUDAH punya kolom = no-op (idempoten).
+    track(new OutgoingOperationsSqlite(Database, dbPath));
+    const db = new Database(dbPath, { readonly: true });
+    const names = db.prepare("PRAGMA table_info('outgoing_operations')").all().map((c) => c.name);
+    assert.strictEqual(names.filter((n) => n === 'forward_marker_applied').length, 1, 'kolom tidak diduplikasi');
+    assert.strictEqual(
+      db.prepare("SELECT COUNT(*) AS n FROM outgoing_operations WHERE operation_id = 'OP-LAMA'").get().n,
+      1,
+      'data lama utuh setelah migrasi'
+    );
+    db.close();
+    console.log('OK: ALTER TABLE additive, data lama aman, opening kedua tidak menambah kolom lagi.');
   }
 
   console.log('\n=== Singleton memakai SQLITE_PATH temp (bukan database produksi) ===');

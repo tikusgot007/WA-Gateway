@@ -8,7 +8,7 @@ const { Boom } = require('@hapi/boom');
 // require() langsung -- lihat penjelasan lengkap di file itu. ensureBaileysLoaded()
 // SUDAH di-await di src/app/index.js sebelum ConnectionManager dipakai, jadi
 // getBaileys() di sini aman dipanggil sinkron.
-const { getBaileys } = require('./baileysLoader');
+const { getBaileys, supportsContentContextInfo } = require('./baileysLoader');
 
 const config = require('../config');
 const logger = require('../logging');
@@ -21,6 +21,7 @@ const { ownSentRegistry } = require('./ownSentRegistry');
 const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
 const { unduhDenganBatas } = require('./boundedDownload');
+const { applyForwardMarker } = require('./forwardMarker');
 
 const VALID_STATUSES = [
   'disconnected',
@@ -1134,6 +1135,11 @@ class ConnectionManager {
    * punya cabang eksplisit untuk server === 'lid').
    *
    * Melempar Error dengan pesan yang jelas jika gagal.
+   *
+   * `options.forward` (Teruskan, Tahap 4): `true` berarti pesan harus ditandai
+   * diteruskan lewat `contextInfo` Baileys (penanda native, tanpa `quoted`).
+   * Nilai selain boolean sudah dinormalkan oleh pemanggil (ci4Routes.js), jadi
+   * di sini `true` = ya, selain itu = tidak.
    */
   async sendTextMessage(jid, text, options = {}) {
     if (!this.isConnected()) {
@@ -1155,11 +1161,31 @@ class ConnectionManager {
       });
     }
 
-    logger.info('[SEND] mengirim pesan keluar', { targetJid: jid, jidType });
+    // Teruskan (Tahap 4, REQ-002): penanda native dipasang pada konten. Kalau
+    // tidak bisa, teks dapat prefix dan marker melaporkan `text_fallback`.
+    const forward = applyForwardMarker({
+      content: { text },
+      requested: options.forward === true,
+      nativeSupported: supportsContentContextInfo(),
+      textField: 'text',
+      text,
+    });
+    if (forward.reason) {
+      logger.warn('[SEND] penanda diteruskan native tidak bisa dipasang -- memakai prefix teks', {
+        targetJid: jid,
+        reason: forward.reason,
+      });
+    }
+
+    logger.info('[SEND] mengirim pesan keluar', {
+      targetJid: jid,
+      jidType,
+      forwardMarkerApplied: forward.marker,
+    });
 
     try {
       const ownMessageId = this._registerOwnSentId(); // SEBELUM sendMessage (D-03)
-      const result = await this.sock.sendMessage(jid, { text }, {
+      const result = await this.sock.sendMessage(jid, forward.content, {
         messageId: ownMessageId,
         ...(quoteBuild.quoted ? { quoted: quoteBuild.quoted } : {}),
       });
@@ -1168,11 +1194,13 @@ class ConnectionManager {
         jidType,
         messageId: result?.key?.id,
         quoteApplied: Boolean(quoteBuild.quoted),
+        forwardMarkerApplied: forward.marker,
       });
       return {
         messageId: result?.key?.id || null,
         timestamp: new Date().toISOString(),
         quoteApplied: Boolean(quoteBuild.quoted),
+        forwardMarkerApplied: forward.marker,
       };
     } catch (err) {
       logger.error('[SEND] gagal mengirim pesan', { targetJid: jid, jidType, error: err.message });
@@ -1190,6 +1218,9 @@ class ConnectionManager {
    *
    * ATURAN KERAS: chatId di sini TIDAK PERNAH melalui normalizeToJid()/jidToPhone()
    * untuk menentukan tujuan pengiriman. chatId dikirim persis apa adanya ke Baileys.
+   *
+   * `options` diteruskan apa adanya ke sendTextMessage(), jadi `forward: true`
+   * (Teruskan, Tahap 4) ikut bekerja tanpa jalur khusus di sini.
    */
   async sendReply(chatId, text, options = {}) {
     if (!isDecodableJid(chatId)) {
@@ -1244,7 +1275,7 @@ class ConnectionManager {
    * @param {string} jid
    * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean, forward?: boolean }} [options]
    */
   async sendMediaMessage(jid, mediaType, buffer, options = {}) {
     if (!this.isConnected()) {
@@ -1285,11 +1316,32 @@ class ConnectionManager {
       throw err;
     }
 
+    // Teruskan (Tahap 4, REQ-001a/REQ-002): struktur & aturan IDENTIK jalur teks.
+    // Penanda native dipasang pada konten; kalau tidak bisa, prefix teks masuk ke
+    // `caption` (bukan `text`). Stiker tidak punya caption sama sekali (WhatsApp
+    // mengabaikannya), jadi tidak ada field teks untuk fallback di sana.
+    const forward = applyForwardMarker({
+      content,
+      requested: options.forward === true,
+      nativeSupported: supportsContentContextInfo(),
+      textField: mediaType === 'sticker' ? null : 'caption',
+      text: caption,
+    });
+    content = forward.content;
+    if (forward.reason) {
+      logger.warn('[SEND] penanda diteruskan native tidak bisa dipasang -- memakai prefix teks', {
+        targetJid: jid,
+        mediaType,
+        reason: forward.reason,
+      });
+    }
+
     logger.info('[SEND] mengirim pesan media keluar', {
       targetJid: jid,
       jidType,
       mediaType,
       ukuranByte: buffer.length,
+      forwardMarkerApplied: forward.marker,
     });
 
     try {
@@ -1322,12 +1374,14 @@ class ConnectionManager {
         messageId: result?.key?.id,
         mediaRefTersedia: Boolean(mediaRef),
         quoteApplied: Boolean(quoteBuild.quoted),
+        forwardMarkerApplied: forward.marker,
       });
       return {
         messageId: result?.key?.id || null,
         timestamp: new Date().toISOString(),
         mediaRef,
         quoteApplied: Boolean(quoteBuild.quoted),
+        forwardMarkerApplied: forward.marker,
       };
     } catch (err) {
       logger.error('[SEND] gagal mengirim pesan media', {
@@ -1348,10 +1402,13 @@ class ConnectionManager {
    * sendReply(): JID asli apa adanya, TIDAK PERNAH melalui
    * normalizeToJid()/jidToPhone().
    *
+   * `options` diteruskan apa adanya ke sendMediaMessage(), jadi `forward: true`
+   * (Teruskan, Tahap 4) ikut bekerja tanpa jalur khusus di sini.
+   *
    * @param {string} chatId
    * @param {'image'|'document'|'sticker'} mediaType
    * @param {Buffer} buffer
-   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean }} [options]
+   * @param {{ caption?: string, mimetype?: string, fileName?: string, isAnimated?: boolean, forward?: boolean }} [options]
    */
   async sendMediaReply(chatId, mediaType, buffer, options = {}) {
     if (!isDecodableJid(chatId)) {
