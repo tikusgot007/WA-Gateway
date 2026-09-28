@@ -30,6 +30,14 @@ const VALID_STATUSES = [
   'error',
 ];
 
+// Placeholder untuk pesan masuk "lihat sekali" (view once). WAJIB PERSIS sama
+// dengan yang di-assert test/simulate-viewonce.js. WhatsApp membungkus media
+// view-once (`viewOnceMessage`/`viewOnceMessageV2`/`viewOnceMessageV2Extension`)
+// sehingga tipe isi di dalamnya tidak terbaca; alih-alih membuangnya senyap,
+// Gateway meneruskan SATU event teks ini TANPA mengambil/mengunduh medianya.
+const VIEW_ONCE_PLACEHOLDER =
+  '[Pesan lihat-sekali dari pelanggan — isinya tidak dapat ditampilkan di Inbox]';
+
 /**
  * ConnectionManager bertanggung jawab penuh atas lifecycle koneksi WhatsApp:
  * - membuat/menutup socket Baileys
@@ -781,7 +789,20 @@ class ConnectionManager {
   }
 
   async _handleIncomingMessage(msg) {
-    if (!msg.message) return; // pesan protokol/kosong (mis. reaction, receipt), abaikan untuk POC
+    // View-once ("lihat sekali") yang dikirim ke PERANGKAT TERTAUT tidak membawa
+    // isi apa pun: WhatsApp hanya mengirim stanza `<unavailable type="view_once">`,
+    // Baileys menandai `msg.key.isViewOnce = true` dan membiarkan `msg.message`
+    // undefined (messageStubType tetap ter-set CIPHERTEXT) -- lihat
+    // node_modules/baileys/lib/Utils/decode-wa-message.js dan
+    // lib/Socket/messages-recv.js. Sebelum ini pesan seperti itu jatuh ke guard
+    // `!msg.message` di bawah dan HILANG TANPA JEJAK (tidak ada baris DB, tidak
+    // ada log). Keputusan produk: terbitkan SATU event teks placeholder, TANPA
+    // mengambil/mengunduh medianya. Hanya arah MASUK (CON-002).
+    const isViewOnceUnavailable = !msg.message && msg.key?.isViewOnce === true;
+
+    if (!msg.message && !isViewOnceUnavailable) {
+      return; // pesan protokol/kosong (mis. reaction, receipt), abaikan untuk POC
+    }
 
     // "Status" WhatsApp (Stories) bukan chat sama sekali -- JID-nya selalu
     // literal "status@broadcast". Difilter di titik PALING AWAL, sebelum
@@ -792,13 +813,27 @@ class ConnectionManager {
     }
 
     let messageType = 'text';
-    let text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      null;
+    let text = msg.message
+      ? (msg.message.conversation || msg.message.extendedTextMessage?.text || null)
+      : null;
     let media = null;
 
-    if (text === null) {
+    if (isViewOnceUnavailable) {
+      if (Boolean(msg.key?.fromMe)) {
+        // View-once KELUAR (staff kirim dari WA Web/HP): perilaku lama
+        // dipertahankan -- TIDAK dibuatkan placeholder (CON-002).
+        logger.info('[CHAT] view-once KELUAR tanpa isi diabaikan (tidak dibuatkan placeholder)', {
+          messageId: msg.key?.id,
+        });
+        return;
+      }
+
+      text = VIEW_ONCE_PLACEHOLDER;
+      logger.info('[CHAT] pesan view-once MASUK tanpa isi (unavailable) diganti placeholder teks (media tidak diambil/diunduh)', {
+        messageId: msg.key?.id,
+        marker: 'unavailable:view_once',
+      });
+    } else if (text === null) {
       // Bukan pesan teks biasa -- cek apakah gambar/dokumen/sticker/audio/video
       // (didukung), selain itu (lokasi/kontak/dst) di luar scope untuk
       // sekarang, cukup di-log & dilewati.
@@ -877,8 +912,46 @@ class ConnectionManager {
           mimetype: mediaMsg.mimetype || null,
           fileLength: mediaMsg.fileLength ? Number(mediaMsg.fileLength) : null,
         };
+      } else if (
+        msg.message.viewOnceMessage?.message ||
+        msg.message.viewOnceMessageV2?.message ||
+        msg.message.viewOnceMessageV2Extension?.message
+      ) {
+        // View-once ("lihat sekali"): WhatsApp membungkus media di dalam salah
+        // satu key di atas, jadi cek tipe (imageMessage dll.) di atas selalu
+        // undefined dan pesan jatuh ke cabang ini. Keputusan produk: TIDAK
+        // mengambil/mengunduh media (pelanggan memilih "lihat sekali"), cukup
+        // terbitkan SATU event teks placeholder supaya kasir tahu ada kiriman.
+        //
+        // Wrapper KOSONG (mis. `viewOnceMessageV2: {}`) SENGAJA tidak masuk ke
+        // cabang ini -- tidak ada isi yang bisa diselamatkan, jadi pesan jatuh
+        // ke jalur tak-didukung di bawah (log warn) dan tetap dibuang.
+        const viewOnceWrapper = msg.message.viewOnceMessage?.message
+          ? 'viewOnceMessage'
+          : msg.message.viewOnceMessageV2?.message
+            ? 'viewOnceMessageV2'
+            : 'viewOnceMessageV2Extension';
+
+        if (Boolean(msg.key?.fromMe)) {
+          // View-once KELUAR (staff kirim dari WA Web/HP): perilaku lama
+          // dipertahankan -- TIDAK dibuatkan placeholder, supaya Inbox tidak
+          // menampilkan pesan keluar palsu yang tidak dikirim dari POS (CON-002).
+          logger.info('[CHAT] view-once KELUAR diabaikan (tidak dibuatkan placeholder)', {
+            messageId: msg.key?.id,
+            wrapper: viewOnceWrapper,
+          });
+          return;
+        }
+
+        messageType = 'text';
+        text = VIEW_ONCE_PLACEHOLDER;
+        media = null;
+        logger.info('[CHAT] pesan view-once MASUK diganti placeholder teks (media tidak diambil/diunduh)', {
+          messageId: msg.key?.id,
+          wrapper: viewOnceWrapper,
+        });
       } else {
-        logger.debug('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/sticker/audio/video)', {
+        logger.warn('Melewati pesan yang belum didukung (bukan teks/gambar/dokumen/sticker/audio/video) -- pesan DIBUANG', {
           messageId: msg.key?.id,
           type: Object.keys(msg.message)[0],
         });
