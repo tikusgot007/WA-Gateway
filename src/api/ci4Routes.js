@@ -371,20 +371,74 @@ router.post('/media/download', jsonSmall, requireCI4Token, async (req, res) => {
     res.setHeader('Content-Length', buffer.length);
     return res.send(buffer);
   } catch (err) {
-    // Penyebab paling umum: media sudah kadaluarsa di server WhatsApp
-    // (pesan cukup lama) -- ini KEMUNGKINAN BESAR terjadi cepat atau
-    // lambat, sesuai keputusan desain "simpan referensi saja, bukan
-    // file permanen". Bukan bug, tapi keterbatasan yang disadari sejak
-    // awal.
-    logger.warn('[MEDIA] gagal mengambil/mendekripsi media (kemungkinan sudah kadaluarsa di server WhatsApp)', {
+    // Klasifikasi kegagalan (plan-bugfix-inbox-media-unavailable-v1.0,
+    // TASK-011, REQ-001/REQ-005).
+    //
+    // Sebelum ini SETIAP error dipetakan ke 410 MEDIA_UNAVAILABLE. Itu
+    // berbahaya: CI4 memperlakukan 410 sebagai final (menulis
+    // media_confirmed_gone_at, lalu semua request berikutnya di-short-circuit
+    // tanpa pernah menghubungi Gateway) -- jadi satu kedip jaringan bisa
+    // memblacklist foto yang masih utuh selamanya.
+    //
+    // TASK-010 sudah MENGUKUR sinyal asli dari host media (bukti:
+    // build/task-010-expiry-signal-evidence.md):
+    //   - tanda tangan URL kedaluwarsa -> 403
+    //   - tanda tangan rusak            -> 403
+    //   - objek media tidak ada         -> 403
+    // Ketiganya IDENTIK, jadi 403 TIDAK BISA dipakai sebagai tanda
+    // "kadaluarsa" -- memetakannya ke 410 akan menghapus foto yang utuh.
+    // Karena tidak ada sinyal eksplisit yang bisa dipercaya, hanya 410
+    // yang benar-benar dikirim host media yang diperlakukan final
+    // (ASSUMPTION-001: arah yang aman -- salah tebak ke "coba lagi"
+    // cuma menambah percobaan, salah tebak ke "permanen" menghapus foto).
+    //
+    // Bentuk objek error diverifikasi langsung terhadap axios yang
+    // terpasang (scripts/probe-axios-error-shape.js): AxiosError dengan
+    // `.response.status` dan `.code = 'ERR_BAD_REQUEST'` (BUKAN Boom).
+    const statusDariHost = err.response?.status;
+
+    if (err.code === 'MEDIA_DOWNLOAD_TIMEOUT') {
+      logger.warn('[MEDIA] unduhan media melewati batas waktu (sementara, bisa dicoba lagi)', {
+        mediaType,
+        batasMs: config.mediaDownloadTimeoutMs,
+      });
+
+      return res.status(504).json({
+        success: false,
+        error_code: 'MEDIA_DOWNLOAD_TIMEOUT',
+        message: `Gateway melewati batas waktu ${config.mediaDownloadTimeoutMs}ms saat mengambil media dari WhatsApp.`,
+      });
+    }
+
+    if (statusDariHost === 410) {
+      // Satu-satunya status yang CI4 perlakukan sebagai hilang permanen.
+      // BELUM PERNAH teramati dari host media (2026-09-28); jalur ini
+      // disediakan supaya kontrak 410 tetap utuh (CON-006) tanpa
+      // mengorbankan media yang masih ada.
+      logger.warn('[MEDIA] host media menyatakan media hilang permanen (410)', {
+        mediaType,
+        statusDariHost,
+      });
+
+      return res.status(410).json({
+        success: false,
+        error_code: 'MEDIA_UNAVAILABLE',
+        message: 'Media sudah tidak tersedia di server WhatsApp.',
+      });
+    }
+
+    // Semua sisanya SEMENTARA: kegagalan ambil di host media (403/4xx lain),
+    // kegagalan dekripsi, dan error tak terduga. CI4 boleh mencoba lagi.
+    logger.warn('[MEDIA] gagal mengambil/mendekripsi media (sementara, bisa dicoba lagi)', {
       mediaType,
+      statusDariHost: statusDariHost ?? null,
       error: err.message,
     });
 
-    return res.status(410).json({
+    return res.status(503).json({
       success: false,
-      error_code: 'MEDIA_UNAVAILABLE',
-      message: 'Media sudah tidak tersedia di server WhatsApp (kemungkinan kadaluarsa karena pesan cukup lama).',
+      error_code: 'MEDIA_DOWNLOAD_FAILED',
+      message: 'Gateway gagal mengambil media dari WhatsApp saat ini. Coba beberapa saat lagi.',
     });
   }
 });

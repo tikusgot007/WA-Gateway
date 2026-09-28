@@ -160,6 +160,26 @@ const config = {
   // Timeout mengunduh media dari URL (khusus mediaUrl di dashboard test).
   mediaFetchTimeoutMs: toInt(process.env.MEDIA_FETCH_TIMEOUT_MS, 15000),
 
+  // Batas waktu mengambil+dekripsi media MASUK on-demand lewat
+  // POST /media/download (lihat downloadMediaByRef()). Dipakai
+  // unduhDenganBatas() di src/whatsapp/boundedDownload.js.
+  //
+  // WAJIB lebih pendek dari timeout klien AuliaPos untuk panggilan yang
+  // sama, supaya Gateway yang menentukan lebih dulu dan sempat mengirim
+  // klasifikasi (504) daripada klien menyerah dan melaporkan "tidak bisa
+  // menghubungi Gateway" (CON-008). Dua anggaran klien di AuliaPos:
+  //   - prefetch saat pesan masuk: 8 detik (InboxGatewayApi.php:358)
+  //   - live-fetch on-demand      : 30 detik (Inbox::media())
+  // Nilai bawaan 6 detik menyisakan ~2 detik di bawah anggaran TERKETAT
+  // (prefetch 8 detik). Unduhan nyata terukur jauh di bawah ini: media
+  // 718001 byte selesai < 1 detik di mesin toko (log 2026-09-28).
+  //
+  // SENGAJA kunci terpisah, BUKAN mediaFetchTimeoutMs: yang itu dipakai
+  // fitur lain (mediaUrl dashboard) dengan nilai bawaan 15 detik, dan
+  // menurunkannya demi batas ini akan ikut mengubah perilaku fitur itu.
+  // Diisi lewat .env: MEDIA_DOWNLOAD_TIMEOUT_MS (opsional).
+  mediaDownloadTimeoutMs: toInt(process.env.MEDIA_DOWNLOAD_TIMEOUT_MS, 6000),
+
   // =============================================================
   // Override folder temp OS (os.tmpdir()) -- HANYA dipakai di build
   // Android (lihat src/whatsapp/baileysLoader.js). Baileys menulis file

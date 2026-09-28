@@ -20,6 +20,7 @@ const { overflowBuffer } = require('../store/overflowBuffer');
 const { ownSentRegistry } = require('./ownSentRegistry');
 const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
+const { unduhDenganBatas } = require('./boundedDownload');
 
 const VALID_STATUSES = [
   'disconnected',
@@ -1403,29 +1404,35 @@ class ConnectionManager {
    * file yang sudah diunduh sebelumnya -- kita memang tidak pernah
    * menyimpan file-nya, cuma referensi ini, sesuai keputusan desain).
    *
-   * Bisa gagal (throw) kalau media sudah "basi"/kadaluarsa di server
-   * WhatsApp (biasa terjadi untuk pesan yang cukup lama) -- pemanggil
-   * (ci4Routes.js) yang menerjemahkan ini jadi respons error yang
-   * jelas ke CI4/browser.
+   * Bisa gagal (throw): media sudah tidak bisa diambil dari server
+   * WhatsApp, ATAU panggilan ini melewati batas waktu. Pemanggil
+   * (ci4Routes.js) yang menerjemahkan ini jadi respons error yang jelas
+   * ke CI4/browser.
+   *
+   * BATAS WAKTU (plan-bugfix-inbox-media-unavailable-v1.0, TASK-009,
+   * REQ-005/CON-008): unduhan dibatasi config.mediaDownloadTimeoutMs lewat
+   * unduhDenganBatas(). Kalau batas itu lewat, error yang ditolak
+   * `code`-nya `MEDIA_DOWNLOAD_TIMEOUT` (bukan error axios/Boom), supaya
+   * ci4Routes.js bisa membedakannya dari kegagalan lain.
+   *
+   * Error dari Baileys/axios diteruskan APA ADANYA (tidak dibungkus),
+   * supaya pemanggil masih bisa membaca `err.response.status` -- lihat
+   * klasifikasi di ci4Routes.js.
    *
    * @param {{mediaType: 'image'|'document'|'sticker', directPath: string, mediaKeyBase64: string}} mediaRef
    * @returns {Promise<Buffer>}
    */
   async downloadMediaByRef(mediaRef) {
     const mediaKey = Buffer.from(mediaRef.mediaKeyBase64, 'base64');
-
     const { downloadContentFromMessage } = getBaileys();
-    const stream = await downloadContentFromMessage(
-      { directPath: mediaRef.directPath, mediaKey },
-      mediaRef.mediaType
+
+    return unduhDenganBatas(
+      () => downloadContentFromMessage(
+        { directPath: mediaRef.directPath, mediaKey },
+        mediaRef.mediaType
+      ),
+      config.mediaDownloadTimeoutMs
     );
-
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
-
-    return Buffer.concat(chunks);
   }
 
   async shutdown() {
