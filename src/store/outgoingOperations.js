@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const logger = require('../logging');
+const { FORWARD_MARKERS } = require('../whatsapp/forwardMarker');
 
 /**
  * Store operasi KIRIM KELUAR (M1 Wave 2 TASK-002, spec 4.1/4.4): satu baris per
@@ -51,6 +52,7 @@ const CREATE_TABLE_SQL = `
     wa_message_id       TEXT,
     media_ref_json      TEXT,
     quote_applied       INTEGER,
+    forward_marker_applied TEXT,
     attempts            INTEGER NOT NULL DEFAULT 1,
     last_error          TEXT,
     created_at          TEXT NOT NULL,
@@ -86,6 +88,15 @@ function toQuoteColumn(value) {
   if (value === true) return 1;
   if (value === false) return 0;
   return null;
+}
+
+// Teruskan (Tahap 4): penanda diteruskan disimpan tri-state -- 'native' /
+// 'text_fallback' bila request memang meminta penanda, NULL bila tidak (atau
+// nilai di luar kontrak, yang diperlakukan "tidak diketahui" supaya tidak
+///report bohong ke AuliaPos). Disimpan supaya replay idempotensi tetap
+// melaporkan `forward_marker_applied` yang sama tanpa kirim ulang (REQ-003).
+function toForwardMarkerColumn(value) {
+  return FORWARD_MARKERS.includes(value) ? value : null;
 }
 
 // D-13/A-5: baris abandoned yang akan dipangkas MUST terlihat lebih dulu --
@@ -134,6 +145,16 @@ class OutgoingOperationsSqlite {
       logger.info('[MIGRASI] kolom quote_applied ditambahkan ke outgoing_operations (database SQLite lama).');
     }
 
+    // Teruskan (Tahap 4): penanda yang dipakai pada pengiriman pertama disimpan
+    // supaya replay idempotensi melaporkan `forward_marker_applied` yang sama
+    // tanpa mengirim ulang ke Baileys (REQ-003). Additive, tri-state
+    // ('native' | 'text_fallback' | NULL), pola sama dengan quote_applied --
+    // nilai lama (NULL) dibaca sebagai "tanpa penanda", bukan error.
+    if (!columns.map((col) => col.name).includes('forward_marker_applied')) {
+      this.db.exec(`ALTER TABLE outgoing_operations ADD COLUMN forward_marker_applied TEXT`);
+      logger.info('[MIGRASI] kolom forward_marker_applied ditambahkan ke outgoing_operations (database SQLite lama).');
+    }
+
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO outgoing_operations
         (operation_id, payload_hash, kind, chat_id, state, attempts, created_at, updated_at)
@@ -144,7 +165,7 @@ class OutgoingOperationsSqlite {
     this.markSentStmt = this.db.prepare(`
       UPDATE outgoing_operations
       SET state = 'sent', wa_message_id = @waMessageId, media_ref_json = @mediaRefJson,
-          quote_applied = @quoteApplied,
+          quote_applied = @quoteApplied, forward_marker_applied = @forwardMarkerApplied,
           resolved_at = @resolvedAt, updated_at = @now
       WHERE operation_id = @operationId AND state = 'in_flight'
     `);
@@ -212,13 +233,14 @@ class OutgoingOperationsSqlite {
 
   // `sentAt` (ISO, opsional) = waktu kirim asli; disimpan sebagai resolved_at supaya
   // replay mengembalikan `timestamp` yang sama dengan respons pertama.
-  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null } = {}) {
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null, forwardMarkerApplied = null } = {}) {
     const now = this._nowIso();
     const info = this.markSentStmt.run({
       operationId,
       waMessageId,
       mediaRefJson: mediaRef ? JSON.stringify(mediaRef) : null,
       quoteApplied: toQuoteColumn(quoteApplied),
+      forwardMarkerApplied: toForwardMarkerColumn(forwardMarkerApplied),
       resolvedAt: sentAt || now,
       now,
     });
@@ -331,6 +353,7 @@ class OutgoingOperationsJsonFile {
       wa_message_id: null,
       media_ref_json: null,
       quote_applied: null,
+      forward_marker_applied: null,
       attempts: 1,
       last_error: null,
       created_at: now,
@@ -347,12 +370,13 @@ class OutgoingOperationsJsonFile {
     return row ? { ...row } : null;
   }
 
-  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null } = {}) {
+  markSent(operationId, { waMessageId = null, mediaRef = null, sentAt = null, quoteApplied = null, forwardMarkerApplied = null } = {}) {
     return this._updateInFlight(operationId, (row, now) => {
       row.state = 'sent';
       row.wa_message_id = waMessageId;
       row.media_ref_json = mediaRef ? JSON.stringify(mediaRef) : null;
       row.quote_applied = toQuoteColumn(quoteApplied);
+      row.forward_marker_applied = toForwardMarkerColumn(forwardMarkerApplied);
       row.resolved_at = sentAt || now;
       row.updated_at = now;
     });
