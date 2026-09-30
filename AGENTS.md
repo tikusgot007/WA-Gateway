@@ -637,6 +637,11 @@ Persist important project knowledge in the repository, such as:
 
 A new agent should be able to understand the Gateway without depending on prior conversations.
 
+At the end of a session, write a short checkpoint under `docs/sesi/`
+(see `docs/sesi/TEMPLATE.md`) and add it to `docs/sesi/README.md`. It must
+name what changed, what remains, and where the next session should start.
+Record contract changes (see section 10) in `docs/CHANGELOG.md`.
+
 # 19. Design Decision Documentation
 
 `README.md` is the feature-level design decision record.
