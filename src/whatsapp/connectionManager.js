@@ -22,6 +22,7 @@ const { jidToPhone } = require('./normalize');
 const { classifyJid, isDecodableJid, extractPhoneIfAvailable } = require('./jidUtils');
 const { unduhDenganBatas } = require('./boundedDownload');
 const { applyForwardMarker } = require('./forwardMarker');
+const { wrapLoggerForDecryptTracking } = require('./decryptTracker');
 
 const VALID_STATUSES = [
   'disconnected',
@@ -111,6 +112,18 @@ class ConnectionManager {
     // JID grup yang refresh groupMetadata()-nya sedang berjalan (fire-and-forget).
     // Mencegah banyak pesan beruntun dari grup yang sama memicu query paralel.
     this._groupNameFetchInFlight = new Set();
+
+    // Pencegahan insiden 2026-09-29 (lihat decryptTracker.js): kesehatan
+    // FUNGSIONAL sesi, terpisah dari `status` (yang cuma mencerminkan
+    // socket terbuka/tertutup). 'ok' = normal. 'degraded' = status masih
+    // 'connected' tapi terindikasi tidak benar-benar bisa memproses pesan
+    // (dekripsi gagal berulang tanpa satu pun keberhasilan). Ditampilkan
+    // ke CI4 lewat heartbeat supaya badge Inbox POS bisa memberi peringatan
+    // dini, alih-alih diam sampai kasir melapor manual.
+    this.sessionHealth = 'ok';
+    this._decryptFailureTimestamps = [];
+    this._lastMessageProcessedAt = null;
+    this._degradedAlertSent = false;
   }
 
   getStatusSnapshot() {
@@ -122,7 +135,100 @@ class ConnectionManager {
       lastDisconnectReason: this.lastDisconnectReason,
       hasQr: Boolean(this.qr),
       pairingCode: this.pairingCode,
+      // Pencegahan insiden 2026-09-29 -- lihat decryptTracker.js dan
+      // catatan di constructor. Independen dari `status`: bisa 'degraded'
+      // walau `status` masih 'connected'.
+      sessionHealth: this.sessionHealth,
     };
+  }
+
+  /**
+   * Dipanggil oleh wrapLoggerForDecryptTracking() setiap kali Baileys
+   * melaporkan kegagalan dekripsi sesi (SessionError/MessageCounterError/
+   * "Bad MAC"). Kegagalan SESEKALI itu normal (lihat komentar
+   * POLA_ERROR_NOISE_BAILEYS di src/app/index.js) -- yang jadi sinyal sesi
+   * corrupt adalah BANYAK kegagalan beruntun TANPA satu pun pesan yang
+   * berhasil diproses di jendela waktu yang sama (persis pola insiden
+   * 2026-09-29: status tetap 'connected', ratusan SessionError, nol pesan
+   * masuk ke POS selama berjam-jam).
+   */
+  _recordDecryptFailure() {
+    const now = Date.now();
+    this._decryptFailureTimestamps.push(now);
+
+    const windowStart = now - config.decryptFailureWindowMs;
+    this._decryptFailureTimestamps = this._decryptFailureTimestamps.filter((t) => t >= windowStart);
+
+    if (this._decryptFailureTimestamps.length < config.decryptFailureThreshold) return;
+
+    const hasRecentSuccess = this._lastMessageProcessedAt !== null
+      && this._lastMessageProcessedAt >= windowStart;
+
+    if (hasRecentSuccess) {
+      // Ada pesan yang berhasil diproses di jendela yang sama -- kegagalan
+      // dekripsi ini kemungkinan besar noise sinkronisasi antar-device lain
+      // yang normal, bukan sesi corrupt. Jangan tandai degraded.
+      return;
+    }
+
+    if (this.status === 'connected' && this.sessionHealth !== 'degraded') {
+      this.sessionHealth = 'degraded';
+      logger.error(
+        '[SESSION-HEALTH] Sesi WhatsApp terindikasi CORRUPT: status masih \'connected\' tapi ' +
+        `${this._decryptFailureTimestamps.length} kegagalan dekripsi dalam ` +
+        `${Math.round(config.decryptFailureWindowMs / 60000)} menit terakhir TANPA satu pun pesan berhasil diproses. ` +
+        'Kemungkinan besar sesi Signal Protocol desync (bukan sekadar noise sinkronisasi antar-device) -- ' +
+        'perlu Logout/Reset Session lalu scan QR ulang. Restart proses SAJA TIDAK CUKUP (lihat insiden 2026-09-29).'
+      );
+      this._sendDegradedAlert();
+    }
+  }
+
+  /**
+   * Dipanggil setiap kali SATU pesan berhasil selesai diproses
+   * (_handleIncomingMessage sampai akhir tanpa exception) -- baik masuk
+   * maupun sinkron dari device lain. Dipakai sebagai bukti bahwa sesi masih
+   * benar-benar berfungsi, bukan cuma socket-nya yang terbuka.
+   */
+  _recordMessageProcessed() {
+    this._lastMessageProcessedAt = Date.now();
+    if (this.sessionHealth === 'degraded') {
+      logger.info('[SESSION-HEALTH] Sesi WhatsApp kembali memproses pesan dengan normal, status dipulihkan ke \'ok\'.');
+    }
+    this.sessionHealth = 'ok';
+    this._degradedAlertSent = false;
+  }
+
+  /**
+   * Kirim SATU kali notifikasi WA ke admin/owner (config.adminAlertPhone)
+   * saat sesi baru saja ditandai degraded. Sengaja pakai jalur pengiriman
+   * WA Gateway sendiri (bukan servis pihak ketiga) -- modal yang sudah ada
+   * dipakai untuk memberi tahu operator tanpa dependency baru. Best-effort:
+   * kegagalan kirim (mis. justru karena sesi corrupt) cukup dicatat, tidak
+   * pernah melempar/menjatuhkan proses.
+   */
+  async _sendDegradedAlert() {
+    if (this._degradedAlertSent) return;
+    this._degradedAlertSent = true;
+
+    if (!config.adminAlertPhone) {
+      logger.warn('[SESSION-HEALTH] ADMIN_ALERT_PHONE belum dikonfigurasi -- notifikasi WA otomatis dilewati, cek dashboard/log secara manual.');
+      return;
+    }
+
+    const jid = `${config.adminAlertPhone}@s.whatsapp.net`;
+    const text = '⚠️ WA Gateway AuliaPos: sesi WhatsApp toko terindikasi BERMASALAH '
+      + '(status masih terlihat "connected" tapi gagal memproses pesan masuk). '
+      + 'Mohon cek dashboard Gateway dan lakukan Logout + scan QR ulang jika perlu.';
+
+    try {
+      await this.sendTextMessage(jid, text);
+      logger.info('[SESSION-HEALTH] Notifikasi WA degraded terkirim ke admin.', { adminAlertPhone: config.adminAlertPhone });
+    } catch (err) {
+      logger.error('[SESSION-HEALTH] Gagal mengirim notifikasi WA degraded ke admin (dicatat, tidak fatal)', {
+        error: err.message,
+      });
+    }
   }
 
   getQr() {
@@ -199,9 +305,19 @@ class ConnectionManager {
       });
     }
 
+    // Pencegahan insiden 2026-09-29: logger Baileys dibungkus supaya setiap
+    // kegagalan dekripsi sesi (SessionError/MessageCounterError/Bad MAC) yang
+    // dilaporkan Baileys/libsignal ikut terhitung -- lihat decryptTracker.js
+    // dan _recordDecryptFailure(). Logging asli TIDAK berubah sama sekali,
+    // hanya "disadap".
+    const baileysLogger = wrapLoggerForDecryptTracking(
+      logger.raw.child({ module: 'baileys' }),
+      () => this._recordDecryptFailure()
+    );
+
     const sock = makeWASocket({
       version,
-      logger: logger.raw.child({ module: 'baileys' }),
+      logger: baileysLogger,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger.raw.child({ module: 'baileys-keys' })),
@@ -253,6 +369,17 @@ class ConnectionManager {
       this.lastConnectedAt = new Date().toISOString();
       this.lastDisconnectReason = null;
       this.setStatus('connected', { number: this.connectedNumber });
+
+      // Socket baru terbuka: reset penghitung kegagalan dekripsi dari
+      // generation sebelumnya supaya tidak langsung ditandai degraded lagi
+      // hanya karena residu error socket lama (lihat insiden 2026-09-29 --
+      // restart proses sempat terlihat "sehat" sesaat sebelum error muncul
+      // lagi; window baru dimulai bersih agar deteksi tetap relevan
+      // terhadap koneksi yang aktif sekarang, bukan yang sudah ditutup).
+      this._decryptFailureTimestamps = [];
+      this._lastMessageProcessedAt = null;
+      this.sessionHealth = 'ok';
+      this._degradedAlertSent = false;
     }
 
     if (connection === 'close') {
@@ -1075,6 +1202,14 @@ class ConnectionManager {
     }
 
     messageStore.add(normalized);
+
+    // Pencegahan insiden 2026-09-29: catat bukti bahwa sesi BENAR-BENAR
+    // berhasil memproses pesan (bukan cuma socket terbuka) -- lihat
+    // decryptTracker.js dan _recordDecryptFailure(). Diletakkan di sini
+    // (bukan menunggu _persistIncoming selesai) karena keberhasilan yang
+    // relevan adalah dekripsi & parsing pesan Baileys itu sendiri, sama
+    // seperti log "[CHAT] pesan masuk diterima" di bawah.
+    this._recordMessageProcessed();
 
     // Diteruskan ke CI4 untuk KEDUA arah:
     // - fromMe=false (pesan asli dari customer) -> direction='incoming'

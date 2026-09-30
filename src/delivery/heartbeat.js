@@ -53,6 +53,12 @@ async function sendHeartbeat() {
     status: mapStatusForCI4(snapshot.status),
     phone: snapshot.connectedNumber || null,
     gateway_version: require('../../package.json').version || null,
+    // Pencegahan insiden 2026-09-29 (lihat connectionManager.js
+    // sessionHealth/decryptTracker.js): field TAMBAHAN, opsional dari sisi
+    // CI4 -- kontrak lama (status/phone/gateway_version) tidak berubah.
+    // 'degraded' berarti status socket masih 'connected' tapi sesi
+    // terindikasi tidak benar-benar bisa memproses pesan.
+    session_health: snapshot.sessionHealth || 'ok',
   };
 
   const result = await postToCI4('/api/inbox/gateway/status', body);

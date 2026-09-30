@@ -149,6 +149,30 @@ const config = {
   heartbeatIntervalMs: toInt(process.env.HEARTBEAT_INTERVAL_MS, 15000),
 
   // =============================================================
+  // Pencegahan insiden 2026-09-29: deteksi sesi WhatsApp "connected"
+  // tapi diam-diam gagal proses SEMUA pesan (Signal Protocol session
+  // corrupt/desync -- lihat decryptTracker.js). Kejadian nyata: status
+  // tetap 'connected' selama berjam-jam sementara ribuan error
+  // SessionError/MessageCounterError muncul dan NOL pesan berhasil
+  // diproses -- tidak terdeteksi sampai dilaporkan manual oleh kasir.
+  // =============================================================
+
+  // Jumlah kegagalan dekripsi (SessionError/MessageCounterError/Bad MAC)
+  // dalam decryptFailureWindowMs TANPA satu pun pesan berhasil diproses
+  // di window yang sama, sebelum sesi ditandai 'degraded'. Ambang ini
+  // sengaja tidak terlalu rendah -- kegagalan dekripsi SESEKALI (sinkronisasi
+  // protokol antar-device lain) adalah NORMAL dan tidak berbahaya (lihat
+  // komentar POLA_ERROR_NOISE_BAILEYS di src/app/index.js); yang jadi sinyal
+  // masalah adalah kombinasi "banyak kegagalan" DAN "nol keberhasilan".
+  decryptFailureThreshold: Math.max(1, toInt(process.env.DECRYPT_FAILURE_THRESHOLD, 20)),
+  decryptFailureWindowMs: Math.max(1, toInt(process.env.DECRYPT_FAILURE_WINDOW_MS, 600000)), // 10 menit
+
+  // Nomor HP admin/owner (format internasional TANPA '+', mis. "6281234567890")
+  // yang dikirimi WA otomatis SEKALI oleh Gateway sendiri saat sesi
+  // terdeteksi degraded. Kosong = notifikasi dilewati (cukup dicatat di log).
+  adminAlertPhone: (process.env.ADMIN_ALERT_PHONE || '').trim(),
+
+  // =============================================================
   // Kirim media (gambar/dokumen) KELUAR -- baik dari dashboard test
   // (/api/chats/:chatId/reply-media) maupun dari CI4 (/send-media).
   // File media di sini HANYA dipegang di memory selama proses kirim,
