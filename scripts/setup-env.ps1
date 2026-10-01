@@ -142,6 +142,10 @@ $adapterValues = @{
   'PORT'               = "$AdapterPort"
   'SQLITE_PATH'        = './data/evolution-gateway.sqlite'
   'MEDIA_STORE_DIR'    = './data/media'
+  # Webhook TANPA secret berarti host LAN mana pun bisa menyuntikkan pesan
+  # "masuk" palsu ke Inbox POS. Selalu diisi; nilainya didaftarkan ke Evolution
+  # oleh setup-instance.js (lewat `headers`).
+  'EVOLUTION_WEBHOOK_SECRET' = (New-Hex -Bytes 32)
 }
 $adapterLines = Set-EnvLines -Lines (Get-Content -LiteralPath $adapterEx) -Values $adapterValues
 Write-Utf8NoBom -Path $adapterEnv -Lines $adapterLines

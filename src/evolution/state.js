@@ -61,15 +61,22 @@ function setConnectionState(rawState, meta = {}) {
     return false;
   }
 
+  const previous = internal.status;
   internal.status = status;
   if (meta.phone) internal.phone = String(meta.phone);
   internal.updatedAt = new Date().toISOString();
   internal.explicit = true;
   internal.reason = meta.reason ? String(meta.reason) : null;
 
-  const logMeta = { status, phone: internal.phone, reason: internal.reason };
-  if (status === 'connected') logger.info('[EVOLUTION-STATE] instance connected', logMeta);
-  else logger.warn('[EVOLUTION-STATE] instance tidak connected', logMeta);
+  // Catat HANYA saat status benar-benar berubah. Sejak heartbeat juga
+  // menanyakan state ke Evolution tiap siklus (lihat heartbeat.js), fungsi ini
+  // dipanggil terus-menerus dengan nilai yang sama -- mencatat tiap panggilan
+  // akan membanjiri log.
+  if (previous !== status) {
+    const logMeta = { status, phone: internal.phone, reason: internal.reason };
+    if (status === 'connected') logger.info('[EVOLUTION-STATE] instance connected', logMeta);
+    else logger.warn('[EVOLUTION-STATE] instance tidak connected', logMeta);
+  }
   return true;
 }
 

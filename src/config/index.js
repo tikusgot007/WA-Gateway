@@ -104,6 +104,12 @@ const config = {
     // Timeout per request HTTP ke Evolution API (ms).
     requestTimeoutMs: toInt(process.env.EVOLUTION_REQUEST_TIMEOUT_MS, 15000),
 
+    // Timeout khusus polling status koneksi (heartbeat). Jauh lebih pendek
+    // dari requestTimeoutMs SENGAJA: polling ini berjalan di dalam siklus
+    // heartbeat (bawaan 15 dtk) sementara CI4 menganggap gateway basi pada
+    // 30 dtk -- polling yang lambat tidak boleh menunda irama heartbeat.
+    statusPollTimeoutMs: toInt(process.env.EVOLUTION_STATUS_POLL_TIMEOUT_MS, 5000),
+
     // Path webhook yang didaftarkan ke Evolution (mount relatif server ini).
     // URL lengkap dihitung operator: http://<ip-pc-gateway>:<port><path>.
     webhookPath: (process.env.EVOLUTION_WEBHOOK_PATH || '/evolution/webhook').trim(),

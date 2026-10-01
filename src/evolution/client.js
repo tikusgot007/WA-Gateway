@@ -41,9 +41,9 @@ function instancePath(suffix) {
   return `${config.evolution.baseUrl}${suffix}/${encodeURIComponent(config.evolution.instance)}`;
 }
 
-async function withTimeout(fn) {
+async function withTimeout(fn, timeoutMs = config.evolution.requestTimeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.evolution.requestTimeoutMs);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fn(controller.signal);
   } finally {
@@ -210,13 +210,13 @@ async function sendSticker({ number, buffer, quoted = null }) {
 }
 
 /** GET /instance/connectionState/{instance} -> { instance: { state: open|close|connecting } } */
-async function getConnectionState() {
+async function getConnectionState(timeoutMs) {
   if (!isConfigured()) throw notConfiguredError();
   const res = await withTimeout((signal) => fetch(instancePath('/instance/connectionState'), {
     method: 'GET',
     headers: { apikey: config.evolution.apiKey },
     signal,
-  }));
+  }), timeoutMs);
   const { json } = await parseJsonSafely(res);
   return json && json.instance ? json.instance.state : null;
 }
