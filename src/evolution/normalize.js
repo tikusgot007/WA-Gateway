@@ -117,11 +117,26 @@ const NOISE_NODES = [
   'pollUpdateMessage',
 ];
 
+/**
+ * Wadah yang ISINYA dikirim Evolution sebagai pesan TERPISAH.
+ *
+ * `albumMessage` hanya membawa `expectedImageCount`/`expectedVideoCount` -- tidak
+ * ada blob di dalamnya. Fotonya tiba sendiri-sendiri sebagai `imageMessage`.
+ * Terverifikasi dari DB Evolution + log adapter (2026-10-01): album
+ * A5F78764... disertai 4 `imageMessage` pada detik yang sama, dan ketiganya
+ * tersimpan sebagai media lokal. Karena itu wadahnya dilewati; kalau tidak, ia
+ * menambah baris penanda mubazir (dulu: dead-letter) di samping foto aslinya.
+ */
+const CONTAINER_ONLY_NODES = ['albumMessage'];
+
 function noiseReason(record, messageObj) {
   if (record && record.messageStubType) return 'stub sistem (messageStubType)';
   if (!messageObj || typeof messageObj !== 'object') return null;
   for (const node of NOISE_NODES) {
     if (messageObj[node]) return node;
+  }
+  for (const node of CONTAINER_ONLY_NODES) {
+    if (messageObj[node]) return node + ' (isinya dikirim sebagai pesan terpisah)';
   }
   const keys = Object.keys(messageObj);
   if (keys.length > 0 && keys.every((k) => k === 'messageContextInfo' || k === 'base64')) {

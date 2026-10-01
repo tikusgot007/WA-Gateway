@@ -419,15 +419,23 @@ function webhookPayload(overrides = {}) {
   section('Tipe tak didukung -> penanda teks (bukan dead); wrapper dibuka; noise dilewati');
   const PN = '628222333444@s.whatsapp.net';
 
-  // Album foto: dulu jadi 'text' kosong -> CI4 400 -> dead permanen.
+  // Wadah album: hanya membawa expectedImageCount; isinya dikirim Evolution
+  // sebagai pesan TERPISAH -> dilewati (dulu jadi 'text' kosong -> CI4 400 -> dead).
+  const pendingBeforeAlbum = incomingBuffer.countPending();
   wres = await post('/evolution/webhook', webhookPayload({
     data: { key: { id: 'ALB-1', remoteJid: PN, fromMe: false }, message: { albumMessage: { expectedImageCount: 3 }, messageContextInfo: {} }, messageType: 'albumMessage' },
   }), { withAuth: false });
-  assert.strictEqual(wres.body.success, true, 'album TIDAK boleh dilewati');
-  const albRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'ALB-1');
-  assert.ok(albRow, 'album masuk antrean');
-  assert.strictEqual(albRow.message_type, 'unsupported', 'album bukan lagi text kosong');
-  assert.ok(albRow.text && albRow.text.includes('album'), 'album membawa penanda terbaca');
+  assert.strictEqual(wres.body.skipped, true, 'wadah album dilewati');
+  assert.strictEqual(incomingBuffer.countPending(), pendingBeforeAlbum, 'wadah album tidak menambah baris');
+
+  // Foto album datang sendiri-sendiri sebagai imageMessage -> baris gambar biasa.
+  const albPhoto = Buffer.from('ALBUM-PHOTO-BYTES');
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'ALB-IMG-1', remoteJid: PN, fromMe: false }, message: { imageMessage: { mimetype: 'image/jpeg' }, base64: albPhoto.toString('base64') }, messageType: 'imageMessage' },
+  }), { withAuth: false });
+  const albImgRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'ALB-IMG-1');
+  assert.ok(albImgRow, 'foto album masuk antrean');
+  assert.strictEqual(albImgRow.message_type, 'image', 'foto album = baris gambar');
 
   // Location: konten nyata yang belum didukung -> penanda, bukan dead.
   wres = await post('/evolution/webhook', webhookPayload({
