@@ -216,24 +216,29 @@ function isViewOnceMessage(record) {
 }
 
 /**
- * Node berisi konten NYATA yang belum didukung. Dipetakan ke penanda teks
- * berbahasa Indonesia supaya pesan tetap muncul di Inbox (kasir tahu dan bisa
- * membukanya di WhatsApp) -- bukan hilang tanpa jejak.
+ * Penanda teks untuk tipe/isi yang belum didukung. GAYA SERAGAM dengan
+ * placeholder audio/video yang dibuat UI Inbox:
+ *   "Customer mengirim <jenis> — cek WhatsApp Web."
+ * Tujuannya supaya semua pesan yang tampil sebagai placeholder terbaca
+ * konsisten di Inbox.
  */
+const PENANDA_AWAL = 'Customer mengirim ';
+const PENANDA_AKHIR = ' — cek WhatsApp Web.';
+
 function unsupportedLabel(messageObj) {
-  if (!messageObj || typeof messageObj !== 'object') return '[Pesan tidak dikenal — buka WhatsApp untuk melihat]';
+  if (!messageObj || typeof messageObj !== 'object') {
+    return PENANDA_AWAL + 'pesan yang belum didukung' + PENANDA_AKHIR;
+  }
   const count = Number(messageObj.albumMessage && messageObj.albumMessage.expectedImageCount) || null;
   if (messageObj.albumMessage) {
-    return count
-      ? `[Pelanggan mengirim album ${count} foto — buka WhatsApp untuk melihat]`
-      : '[Pelanggan mengirim album foto — buka WhatsApp untuk melihat]';
+    return PENANDA_AWAL + (count ? `album ${count} foto` : 'album foto') + PENANDA_AKHIR;
   }
   if (messageObj.pollCreationMessage || messageObj.pollCreationMessageV2 || messageObj.pollCreationMessageV3) {
-    return '[Pelanggan mengirim polling — buka WhatsApp untuk melihat]';
+    return PENANDA_AWAL + 'polling' + PENANDA_AKHIR;
   }
-  if (messageObj.eventMessage) return '[Pelanggan mengirim undangan acara — buka WhatsApp untuk melihat]';
-  if (messageObj.productMessage) return '[Pelanggan mengirim katalog produk — buka WhatsApp untuk melihat]';
-  if (messageObj.ptvMessage) return '[Pelanggan mengirim video singkat — buka WhatsApp untuk melihat]';
+  if (messageObj.eventMessage) return PENANDA_AWAL + 'undangan acara' + PENANDA_AKHIR;
+  if (messageObj.productMessage) return PENANDA_AWAL + 'katalog produk' + PENANDA_AKHIR;
+  if (messageObj.ptvMessage) return PENANDA_AWAL + 'video singkat' + PENANDA_AKHIR;
   if (
     messageObj.buttonsResponseMessage
     || messageObj.listResponseMessage
@@ -241,12 +246,12 @@ function unsupportedLabel(messageObj) {
     || messageObj.interactiveResponseMessage
     || messageObj.interactiveMessage
   ) {
-    return '[Balasan tombol/daftar dari pelanggan — buka WhatsApp untuk melihat]';
+    return PENANDA_AWAL + 'balasan tombol/daftar' + PENANDA_AKHIR;
   }
   const node = Object.keys(messageObj).find((k) => k !== 'base64' && k !== 'messageContextInfo');
   return node
-    ? `[Pesan bertipe "${node}" belum didukung — buka WhatsApp untuk melihat]`
-    : '[Pesan belum didukung — buka WhatsApp untuk melihat]';
+    ? PENANDA_AWAL + `pesan bertipe "${node}"` + PENANDA_AKHIR
+    : PENANDA_AWAL + 'pesan yang belum didukung' + PENANDA_AKHIR;
 }
 
 /**
@@ -367,7 +372,7 @@ function normalizeMessagesUpsert(payload) {
 
   if (viewOnce) {
     messageType = 'unsupported';
-    text = '[Pelanggan mengirim pesan lihat-sekali — isinya tidak dapat ditampilkan di Inbox]';
+    text = PENANDA_AWAL + 'pesan lihat-sekali' + PENANDA_AKHIR;
   } else {
     messageType = detectMessageType(messageObj);
     text = extractText(messageObj);
@@ -382,7 +387,7 @@ function normalizeMessagesUpsert(payload) {
       // Jaring pengaman: teks kosong (mis. hanya contextInfo) tidak boleh lolos
       // sebagai message_type='text' -- itu persis kelas bug yang lalu jadi dead.
       messageType = 'unsupported';
-      text = '[Pesan tanpa teks — buka WhatsApp untuk melihat]';
+      text = PENANDA_AWAL + 'pesan tanpa isi teks' + PENANDA_AKHIR;
     }
   }
 
