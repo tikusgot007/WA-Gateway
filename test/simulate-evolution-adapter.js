@@ -9,7 +9,9 @@
  *   - forward -> prefix teks,
  *   - quoted -> memakai quotedStore (key+message),
  *   - webhook Evolution -> buffer durable (idempoten) -> diteruskan ke CI4,
- *   - filter echo pesan kiriman sendiri & pesan non-teks,
+ *   - filter echo pesan kiriman sendiri,
+ *   - tipe tak didukung -> penanda teks (bukan dead), pembungkus (view-once/
+ *     dokumen-berjudul) dibuka, dan pesan sistem (reaction/protocol) dilewati,
  *   - CONNECTION_UPDATE -> status heartbeat.
  *
  * Semua data di folder temp (SQLITE_PATH / MEDIA_STORE_DIR); TIDAK menyentuh
@@ -412,6 +414,61 @@ function webhookPayload(overrides = {}) {
   wres = await post('/evolution/webhook', webhookPayload({ data: { key: { id: 'ECHO-1', remoteJid: '628222333444@s.whatsapp.net', fromMe: true }, message: { conversation: 'balasan kita' } } }), { withAuth: false });
   assert.strictEqual(wres.body.skipped, true);
   assert.strictEqual(incomingBuffer.countPending(), pendingEcho, 'echo tidak menambah baris');
+  console.log('OK');
+
+  section('Tipe tak didukung -> penanda teks (bukan dead); wrapper dibuka; noise dilewati');
+  const PN = '628222333444@s.whatsapp.net';
+
+  // Album foto: dulu jadi 'text' kosong -> CI4 400 -> dead permanen.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'ALB-1', remoteJid: PN, fromMe: false }, message: { albumMessage: { expectedImageCount: 3 }, messageContextInfo: {} }, messageType: 'albumMessage' },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.success, true, 'album TIDAK boleh dilewati');
+  const albRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'ALB-1');
+  assert.ok(albRow, 'album masuk antrean');
+  assert.strictEqual(albRow.message_type, 'unsupported', 'album bukan lagi text kosong');
+  assert.ok(albRow.text && albRow.text.includes('album'), 'album membawa penanda terbaca');
+
+  // Location: konten nyata yang belum didukung -> penanda, bukan dead.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'LOC-1', remoteJid: PN, fromMe: false }, message: { locationMessage: { degreesLatitude: 1, degreesLongitude: 2 } }, messageType: 'locationMessage' },
+  }), { withAuth: false });
+  const locRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'LOC-1');
+  assert.ok(locRow, 'lokasi masuk antrean');
+  assert.strictEqual(locRow.message_type, 'unsupported');
+  assert.ok(locRow.text && locRow.text.includes('lokasi'), 'lokasi membawa penanda terbaca');
+
+  // View-once foto: pembungkus dibuka -> image (dulu dead).
+  const voBytes = Buffer.from('VIEWONCE-BYTES');
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'VO-1', remoteJid: PN, fromMe: false }, message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: 'image/jpeg' }, base64: voBytes.toString('base64') } } }, messageType: 'viewOnceMessageV2' },
+  }), { withAuth: false });
+  const voRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'VO-1');
+  assert.ok(voRow, 'view-once masuk antrean');
+  assert.strictEqual(voRow.message_type, 'image', 'view-once dibuka jadi image');
+
+  // Dokumen berjudul (wrapper) -> document (dulu dead).
+  const docBytes = Buffer.from('DOC-BYTES');
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'DWC-1', remoteJid: PN, fromMe: false }, message: { documentWithCaptionMessage: { message: { documentMessage: { mimetype: 'application/pdf', fileName: 'a.pdf' }, base64: docBytes.toString('base64') } } }, messageType: 'documentWithCaptionMessage' },
+  }), { withAuth: false });
+  const dwcRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'DWC-1');
+  assert.ok(dwcRow, 'dokumen berjudul masuk antrean');
+  assert.strictEqual(dwcRow.message_type, 'document');
+
+  // Reaction: metadata, bukan konten -> dilewati, TIDAK menambah baris.
+  const pendingBeforeNoise = incomingBuffer.countPending();
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'RXN-1', remoteJid: PN, fromMe: false }, message: { reactionMessage: { text: 'ok' } }, messageType: 'reactionMessage' },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.skipped, true, 'reaction dilewati');
+  assert.strictEqual(incomingBuffer.countPending(), pendingBeforeNoise, 'reaction tidak menambah baris');
+
+  // Protocol (mis. hapus pesan/sistem): juga dilewati.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'PRT-1', remoteJid: PN, fromMe: false }, message: { protocolMessage: { type: 0 } }, messageType: 'protocolMessage' },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.skipped, true, 'protocol dilewati');
   console.log('OK');
 
   section('CONNECTION_UPDATE mengubah status heartbeat');

@@ -50,14 +50,124 @@ function extractText(messageObj) {
   return null;
 }
 
+/**
+ * Pembungkus (wrapper) Baileys: isi pesan sebenarnya ada di `.message`.
+ *
+ * Sebelum ini view-once / ephemeral / dokumen-berjudul / pesan-diedit jatuh ke
+ * default 'text' dengan isi kosong, lalu ditolak CI4 (400) dan ditandai dead
+ * PERMANEN (tanpa retry) -- padahal isinya pesan pelanggan yang sah. Dibuka di
+ * sini supaya isinya diklasifikasikan seperti pesan biasa.
+ */
+const MESSAGE_WRAPPERS = [
+  'ephemeralMessage',
+  'viewOnceMessage',
+  'viewOnceMessageV2',
+  'viewOnceMessageV2Extension',
+  'documentWithCaptionMessage',
+  'editedMessage',
+];
+
+function unwrapMessage(recordMessage) {
+  let inner = recordMessage;
+  let outerBase64 = inner && typeof inner.base64 === 'string' ? inner.base64 : null;
+  for (let i = 0; i < 10; i += 1) {
+    if (!inner || typeof inner !== 'object') break;
+    const wrapper = MESSAGE_WRAPPERS.find(
+      (k) => inner[k] && typeof inner[k] === 'object' && inner[k].message,
+    );
+    if (!wrapper) break;
+    outerBase64 = outerBase64 || (typeof inner.base64 === 'string' ? inner.base64 : null);
+    inner = inner[wrapper].message;
+  }
+  // `base64` (webhook_base64=true) kadang menempel di lapisan LUAR, bukan di node
+  // media dalam. Kalau lapisan dalam tidak punya, turunkan supaya extractMedia
+  // tetap menemukan blob-nya.
+  if (inner && typeof inner === 'object' && !inner.base64 && outerBase64) {
+    inner = { ...inner, base64: outerBase64 };
+  }
+  return inner || {};
+}
+
+/**
+ * Tipe konten yang DIDUKUNG CI4, atau `null` kalau bukan konten yang dikenal.
+ *
+ * Mengembalikan `null` (bukan default `'text'`) adalah inti perbaikan: default
+ * `'text'` membuat tipe tak dikenal terkirim sebagai teks kosong -> ditolak CI4.
+ */
 function detectMessageType(messageObj) {
-  if (!messageObj || typeof messageObj !== 'object') return 'text';
+  if (!messageObj || typeof messageObj !== 'object') return null;
   if (messageObj.imageMessage) return 'image';
   if (messageObj.documentMessage) return 'document';
   if (messageObj.stickerMessage) return 'sticker';
   if (messageObj.audioMessage) return 'audio';
   if (messageObj.videoMessage) return 'video';
-  return 'text';
+  if (typeof messageObj.conversation === 'string') return 'text';
+  if (messageObj.extendedTextMessage) return 'text';
+  return null;
+}
+
+/**
+ * Node yang BUKAN konten pelanggan (metadata/status sistem) -> dilewati tanpa
+ * masuk antrean dan tanpa dead-letter. Sebelumnya ini pun jadi 'text' kosong.
+ */
+const NOISE_NODES = [
+  'reactionMessage',
+  'protocolMessage',
+  'senderKeyDistributionMessage',
+  'pollUpdateMessage',
+];
+
+function noiseReason(record, messageObj) {
+  if (record && record.messageStubType) return 'stub sistem (messageStubType)';
+  if (!messageObj || typeof messageObj !== 'object') return null;
+  for (const node of NOISE_NODES) {
+    if (messageObj[node]) return node;
+  }
+  const keys = Object.keys(messageObj);
+  if (keys.length > 0 && keys.every((k) => k === 'messageContextInfo' || k === 'base64')) {
+    return 'messageContextInfo saja (tanpa konten)';
+  }
+  return null;
+}
+
+/**
+ * Node berisi konten NYATA yang belum didukung. Dipetakan ke penanda teks
+ * berbahasa Indonesia supaya pesan tetap muncul di Inbox (kasir tahu dan bisa
+ * membukanya di WhatsApp) -- bukan hilang tanpa jejak.
+ */
+function unsupportedLabel(messageObj) {
+  if (!messageObj || typeof messageObj !== 'object') return '[Pesan tidak dikenal — buka WhatsApp untuk melihat]';
+  const count = Number(messageObj.albumMessage && messageObj.albumMessage.expectedImageCount) || null;
+  if (messageObj.albumMessage) {
+    return count
+      ? `[Pelanggan mengirim album ${count} foto — buka WhatsApp untuk melihat]`
+      : '[Pelanggan mengirim album foto — buka WhatsApp untuk melihat]';
+  }
+  if (messageObj.locationMessage || messageObj.liveLocationMessage) {
+    return '[Pelanggan mengirim lokasi — buka WhatsApp untuk melihat]';
+  }
+  if (messageObj.contactMessage || messageObj.contactsArrayMessage) {
+    return '[Pelanggan mengirim kontak — buka WhatsApp untuk melihat]';
+  }
+  if (messageObj.pollCreationMessage || messageObj.pollCreationMessageV2 || messageObj.pollCreationMessageV3) {
+    return '[Pelanggan mengirim polling — buka WhatsApp untuk melihat]';
+  }
+  if (messageObj.eventMessage) return '[Pelanggan mengirim undangan acara — buka WhatsApp untuk melihat]';
+  if (messageObj.productMessage) return '[Pelanggan mengirim katalog produk — buka WhatsApp untuk melihat]';
+  if (messageObj.ptvMessage) return '[Pelanggan mengirim video singkat — buka WhatsApp untuk melihat]';
+  if (
+    messageObj.buttonsResponseMessage
+    || messageObj.listResponseMessage
+    || messageObj.templateButtonReplyMessage
+    || messageObj.interactiveResponseMessage
+    || messageObj.interactiveMessage
+  ) {
+    return '[Balasan tombol/daftar dari pelanggan — buka WhatsApp untuk melihat]';
+  }
+  const node = Object.keys(messageObj).find((k) => k !== 'base64' && k !== 'messageContextInfo');
+  return node
+    ? `[Pesan bertipe "${node}" belum didukung — buka WhatsApp untuk melihat]`
+    : '[Pesan belum didukung — buka WhatsApp untuk melihat]';
 }
 
 /**
@@ -152,9 +262,31 @@ function normalizeMessagesUpsert(payload) {
     return { ok: false, reason: 'pesan grup masuk tanpa key.participant -- dibuang (kontrak CI4 mewajibkan sender_jid)' };
   }
 
-  const messageObj = record.message || {};
-  const messageType = detectMessageType(messageObj);
-  const text = extractText(messageObj);
+  // Buka pembungkus (view-once, ephemeral, dokumen-berjudul, pesan diedit)
+  // SEBELUM klasifikasi, supaya isinya dikenali sebagai tipe sebenarnya.
+  const messageObj = unwrapMessage(record.message || {});
+
+  // Metadata/sistem (reaction, protocol, stub) bukan konten pelanggan.
+  const noise = noiseReason(record, messageObj);
+  if (noise) {
+    return { ok: false, skip: true, reason: 'pesan sistem/metadata dilewati: ' + noise };
+  }
+
+  let messageType = detectMessageType(messageObj);
+  let text = extractText(messageObj);
+
+  if (messageType === null) {
+    // Konten NYATA yang belum didukung: kirim penanda teks, JANGAN 'text' kosong
+    // (yang akan ditolak CI4 400 dan menjadi dead permanen).
+    messageType = 'unsupported';
+    text = unsupportedLabel(messageObj);
+  } else if (messageType === 'text' && (text === null || text === '')) {
+    // Jaring pengaman: teks kosong (mis. hanya contextInfo) tidak boleh lolos
+    // sebagai message_type='text' -- itu persis kelas bug yang lalu jadi dead.
+    messageType = 'unsupported';
+    text = '[Pesan tanpa teks — buka WhatsApp untuk melihat]';
+  }
+
   const media = extractMedia(messageObj);
   const quotedContext = extractQuotedContext(messageObj);
 
@@ -210,5 +342,8 @@ module.exports = {
   normalizeConnectionUpdate,
   detectMessageType,
   extractText,
+  unwrapMessage,
+  unsupportedLabel,
+  noiseReason,
   toIsoTimestamp,
 };

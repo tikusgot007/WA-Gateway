@@ -83,7 +83,10 @@ async function handleMessagesUpsert(req, res, payload) {
   const normalized = normalizeMessagesUpsert(payload);
 
   if (!normalized.ok) {
-    logger.warn('[EVOLUTION-IN] payload webhook dilewati', { reason: normalized.reason });
+    // `skip` = sengaja dilewati (reaction/protocol/stub/metadata) -> debug, bukan
+    // warn. WARN hanya untuk payload yang benar-benar tidak bisa dipetakan.
+    const logAt = normalized.skip ? logger.debug : logger.warn;
+    logAt('[EVOLUTION-IN] payload webhook dilewati', { reason: normalized.reason });
     return res.json({ success: true, skipped: true, reason: normalized.reason });
   }
 
