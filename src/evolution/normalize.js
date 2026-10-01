@@ -67,6 +67,14 @@ const MESSAGE_WRAPPERS = [
   'editedMessage',
 ];
 
+/**
+ * Pembungkus view-once. Isinya SENGAJA tidak pernah diambil/diunduh: WhatsApp
+ * tidak menampilkannya di perangkat tertaut, dan gateway lama pun memilih tidak
+ * menyimpannya (paritas CON-002). Dipakai hanya untuk MENGENALI lalu memberi
+ * baris penanda.
+ */
+const VIEW_ONCE_WRAPPERS = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension'];
+
 function unwrapMessage(recordMessage) {
   let inner = recordMessage;
   let outerBase64 = inner && typeof inner.base64 === 'string' ? inner.base64 : null;
@@ -196,6 +204,17 @@ function noiseReason(record, messageObj) {
   return null;
 }
 
+function isViewOnceMessage(record) {
+  if (!record) return false;
+  // Jalur NYATA dari HP ke perangkat tertaut: stanza <unavailable
+  // type="view_once"> -> key.isViewOnce=true dan isi pesan KOSONG
+  // (terverifikasi di WA-Gateway lama, commit 66bff03 / connectionManager.js:923).
+  if (record.key && record.key.isViewOnce === true) return true;
+  const raw = record.message;
+  if (!raw || typeof raw !== 'object') return false;
+  return VIEW_ONCE_WRAPPERS.some((k) => Boolean(raw[k]));
+}
+
 /**
  * Node berisi konten NYATA yang belum didukung. Dipetakan ke penanda teks
  * berbahasa Indonesia supaya pesan tetap muncul di Inbox (kasir tahu dan bisa
@@ -322,34 +341,53 @@ function normalizeMessagesUpsert(payload) {
     return { ok: false, reason: 'pesan grup masuk tanpa key.participant -- dibuang (kontrak CI4 mewajibkan sender_jid)' };
   }
 
-  // Buka pembungkus (view-once, ephemeral, dokumen-berjudul, pesan diedit)
-  // SEBELUM klasifikasi, supaya isinya dikenali sebagai tipe sebenarnya.
-  const messageObj = unwrapMessage(record.message || {});
-
-  // Metadata/sistem (reaction, protocol, stub) bukan konten pelanggan.
-  const noise = noiseReason(record, messageObj);
-  if (noise) {
-    return { ok: false, skip: true, reason: 'pesan sistem/metadata dilewati: ' + noise };
+  // View-once: isinya memang tidak dapat diambil di perangkat tertaut, dan
+  // sengaja TIDAK diunduh/disimpan (paritas WA-Gateway lama, CON-002). Dikirim
+  // sebagai baris penanda supaya kasir tahu -- kalau tidak, pesannya hilang.
+  const viewOnce = isViewOnceMessage(record);
+  if (viewOnce && fromMe) {
+    return { ok: false, skip: true, reason: 'view-once kiriman sendiri diabaikan' };
   }
 
-  let messageType = detectMessageType(messageObj);
-  let text = extractText(messageObj);
-  const extra = extractExtra(messageObj);
+  // Buka pembungkus (ephemeral, dokumen-berjudul, pesan diedit) SEBELUM
+  // klasifikasi. View-once tidak dibuka karena isinya tidak akan diambil.
+  const messageObj = viewOnce ? {} : unwrapMessage(record.message || {});
 
-  if (messageType === null) {
-    // Konten NYATA yang belum didukung: kirim penanda teks, JANGAN 'text' kosong
-    // (yang akan ditolak CI4 400 dan menjadi dead permanen).
-    messageType = 'unsupported';
-    text = unsupportedLabel(messageObj);
-  } else if (messageType === 'text' && (text === null || text === '')) {
-    // Jaring pengaman: teks kosong (mis. hanya contextInfo) tidak boleh lolos
-    // sebagai message_type='text' -- itu persis kelas bug yang lalu jadi dead.
-    messageType = 'unsupported';
-    text = '[Pesan tanpa teks — buka WhatsApp untuk melihat]';
+  if (!viewOnce) {
+    // Metadata/sistem (reaction, protocol, stub) bukan konten pelanggan.
+    const noise = noiseReason(record, messageObj);
+    if (noise) {
+      return { ok: false, skip: true, reason: 'pesan sistem/metadata dilewati: ' + noise };
+    }
   }
 
-  const media = extractMedia(messageObj);
-  const quotedContext = extractQuotedContext(messageObj);
+  let messageType = null;
+  let text = null;
+  let extra = null;
+
+  if (viewOnce) {
+    messageType = 'unsupported';
+    text = '[Pelanggan mengirim pesan lihat-sekali — isinya tidak dapat ditampilkan di Inbox]';
+  } else {
+    messageType = detectMessageType(messageObj);
+    text = extractText(messageObj);
+    extra = extractExtra(messageObj);
+
+    if (messageType === null) {
+      // Konten NYATA yang belum didukung: kirim penanda teks, JANGAN 'text' kosong
+      // (yang akan ditolak CI4 400 dan menjadi dead permanen).
+      messageType = 'unsupported';
+      text = unsupportedLabel(messageObj);
+    } else if (messageType === 'text' && (text === null || text === '')) {
+      // Jaring pengaman: teks kosong (mis. hanya contextInfo) tidak boleh lolos
+      // sebagai message_type='text' -- itu persis kelas bug yang lalu jadi dead.
+      messageType = 'unsupported';
+      text = '[Pesan tanpa teks — buka WhatsApp untuk melihat]';
+    }
+  }
+
+  const media = viewOnce ? null : extractMedia(messageObj);
+  const quotedContext = viewOnce ? null : extractQuotedContext(messageObj);
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
   const senderJid = isGroup ? (key.participant || null) : (fromMe ? null : remoteJid);

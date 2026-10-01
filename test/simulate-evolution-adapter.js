@@ -10,8 +10,9 @@
  *   - quoted -> memakai quotedStore (key+message),
  *   - webhook Evolution -> buffer durable (idempoten) -> diteruskan ke CI4,
  *   - filter echo pesan kiriman sendiri,
- *   - tipe tak didukung -> penanda teks (bukan dead), pembungkus (view-once/
- *     dokumen-berjudul) dibuka, dan pesan sistem (reaction/protocol) dilewati,
+ *   - tipe tak didukung -> penanda teks (bukan dead), pembungkus dokumen-
+ *     berjudul/ephemeral/diedit dibuka, view-once -> penanda tanpa media, dan
+ *     pesan sistem (reaction/protocol) dilewati,
  *   - CONNECTION_UPDATE -> status heartbeat.
  *
  * Semua data di folder temp (SQLITE_PATH / MEDIA_STORE_DIR); TIDAK menyentuh
@@ -462,14 +463,34 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(ctRow.message_type, 'contact');
   assert.ok(ctRow.extra_json && ctRow.extra_json.includes('"kind":"contact"'), 'extra kontak tersimpan');
 
-  // View-once foto: pembungkus dibuka -> image (dulu dead).
-  const voBytes = Buffer.from('VIEWONCE-BYTES');
+  // View-once: isinya sengaja TIDAK diambil (paritas WA-Gateway lama, CON-002)
+  // -> satu baris penanda, media tidak disimpan.
   wres = await post('/evolution/webhook', webhookPayload({
-    data: { key: { id: 'VO-1', remoteJid: PN, fromMe: false }, message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: 'image/jpeg' }, base64: voBytes.toString('base64') } } }, messageType: 'viewOnceMessageV2' },
+    data: { key: { id: 'VO-1', remoteJid: PN, fromMe: false }, message: { viewOnceMessageV2: { message: { imageMessage: { mimetype: 'image/jpeg' }, base64: Buffer.from('VIEWONCE').toString('base64') } } }, messageType: 'viewOnceMessageV2' },
   }), { withAuth: false });
   const voRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'VO-1');
   assert.ok(voRow, 'view-once masuk antrean');
-  assert.strictEqual(voRow.message_type, 'image', 'view-once dibuka jadi image');
+  assert.strictEqual(voRow.message_type, 'unsupported', 'view-once jadi penanda, bukan image');
+  assert.ok(voRow.text && voRow.text.includes('lihat-sekali'), 'penanda lihat-sekali terbaca');
+  assert.strictEqual(voRow.media_json, null, 'media view-once TIDAK disimpan');
+
+  // Jalur NYATA: stanza <unavailable type="view_once"> -> key.isViewOnce=true
+  // dan message KOSONG (bukan pembungkus berisi) -> tetap satu penanda.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'VO-2', remoteJid: PN, fromMe: false, isViewOnce: true }, message: {}, messageType: 'unknown' },
+  }), { withAuth: false });
+  const vo2Row = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'VO-2');
+  assert.ok(vo2Row, 'view-once tanpa isi masuk antrean sebagai penanda');
+  assert.strictEqual(vo2Row.message_type, 'unsupported');
+  assert.ok(vo2Row.text && vo2Row.text.includes('lihat-sekali'));
+
+  // View-once KELUAR (fromMe=true) -> TIDAK ada baris (CON-002).
+  const pendingBeforeVo3 = incomingBuffer.countPending();
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'VO-3', remoteJid: PN, fromMe: true, isViewOnce: true }, message: {} },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.skipped, true, 'view-once keluar dilewati');
+  assert.strictEqual(incomingBuffer.countPending(), pendingBeforeVo3, 'view-once keluar tidak menambah baris');
 
   // Dokumen berjudul (wrapper) -> document (dulu dead).
   const docBytes = Buffer.from('DOC-BYTES');

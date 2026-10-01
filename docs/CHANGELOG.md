@@ -3,6 +3,34 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-01 — View-once dari pelanggan + batas ukuran media masuk
+
+**Status**: terverifikasi lewat kiriman nyata dari HP ke Inbox produksi.
+
+### View-once kini muncul sebagai penanda (sebelumnya hilang total)
+- Akar: WhatsApp mengirim view-once ke perangkat tertaut sebagai stanza
+  `<unavailable type="view_once">` — `key.isViewOnce = true`, `message` KOSONG.
+  Evolution 2.3.7 membuang pesan tanpa `message` sebelum webhook dikirim
+  (`whatsapp.baileys.service.ts:1166`), jadi adapter tidak pernah menerimanya.
+- Perbaikan dua sisi:
+  - **Patch Evolution** (1 blok, wajib diterapkan ulang saat upgrade) —
+    lihat `docs/evolution-viewonce-patch.md`.
+  - **Adapter** `isViewOnceMessage()`: `key.isViewOnce` atau pembungkus
+    `viewOnceMessage*` -> satu baris penanda
+    `[Pelanggan mengirim pesan lihat-sekali — ...]`, media TIDAK diunduh
+    (paritas CON-002 gateway lama). View-once keluar diabaikan.
+
+### Media masuk melebihi ambang tidak lagi hilang senyap
+- Akar: batas badan webhook 16 MB -> berkas > ±12 MB (base64 +33%) ditolak 413
+  berulang, hanya tercatat sebagai warn, pesan tidak masuk antrean. Terbukti
+  dari dokumen 27 MB pelanggan yang hilang (lalu pulih setelah fix).
+- Perbaikan: `maxIncomingMediaBytes` (default 64 MB) +
+  `webhookJsonBodyLimit` (default 160mb, harus > base64 ambang). Media di atas
+  ambang TIDAK diunduh — dikirim sebagai penanda
+  `Customer mengirim file besar diatas 64mb — cek WhatsApp Web.`
+- Env: `EVOLUTION_MAX_INCOMING_MEDIA_MB`, `EVOLUTION_WEBHOOK_BODY_LIMIT`.
+
+
 ## 2026-10-01 — Tahap 4: media/quote/forward + 3 perbaikan bug (uji nyata via UI POS)
 
 **Status**: TERVERIFIKASI lewat UI Inbox AuliaPos (media masuk & keluar, dokumen,
