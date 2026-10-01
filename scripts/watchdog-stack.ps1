@@ -8,9 +8,14 @@
   mekanisme yang memeriksa + menyalakan ulang jauh lebih andal daripada tiga
   mekanisme terpisah yang masing-masing bisa gagal diam-diam.
 
-  Aturan penting: HANYA cmdlet untuk cek port (Get-NetTCPConnection). Panggilan
-  socket mentah (TcpClient) menggantung saat dijalankan sebagai SYSTEM di host
-  ini -- sudah terbukti dua kali.
+  Aturan penting:
+  - HANYA cmdlet untuk cek port (Get-NetTCPConnection). Panggilan socket mentah
+    (TcpClient) menggantung saat dijalankan sebagai SYSTEM di host ini -- sudah
+    terbukti dua kali.
+  - Jangan pernah pakai Get-ScheduledTaskInfo.LastRunTime sebagai jam boot:
+    nilai itu basi setelah reboot sehingga pernah terbaca 256s untuk proses yang
+    baru saja start, dan Evolution yang sedang pulih pun dibunuh. Gunakan umur
+    proses nyata (Get-TaskProcessAgeSec).
 
   Keluar dengan kode 1 kalau ada komponen yang masih mati di akhir, supaya task
   terjadwal tidak melaporkan sukses palsu.
@@ -26,7 +31,9 @@ param(
   [int]   $PgPort        = 5432,
   [int]   $EvolutionPort = 8080,
   [int]   $AdapterPort   = 3000,
-  [int]   $EvolutionStartGraceSec = 240,
+  # Cold boot Evolution butuh ~6 menit: run-evolution.cmd menunggu PostgreSQL
+  # sampai 60s, lalu tsx mengompilasi TypeScript sebelum port 8080 dibuka.
+  [int]   $EvolutionStartGraceSec = 420,
   [string]$LogPath      = 'D:\kilo\watchdog.log',
   [switch]$Quiet
 )
@@ -68,6 +75,25 @@ function Start-Task {
   L ('    schtasks /run ' + $Name + ' -> ' + (($out | ForEach-Object { $_.ToString().Trim() }) -join ' '))
 }
 
+function Get-TaskProcessAgeSec {
+  # Umur proses cmd.exe pembungkus task (bukan Get-ScheduledTaskInfo.LastRunTime,
+  # yang basi setelah reboot). Mengambil nama file wrapper dari action task itu
+  # sendiri, jadi tidak ada daftar nama yang perlu dirawat terpisah.
+  # $null kalau task tidak Running atau proses wrapper tidak ditemukan.
+  param([string]$TaskName)
+  $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if (-not $task -or $task.State -ne 'Running') { return $null }
+  $exe = $null
+  try { $exe = @($task.Actions)[0].Execute } catch { }
+  if (-not $exe) { return $null }
+  $leaf = Split-Path -Leaf $exe
+  $cmd = Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($leaf)) } |
+    Sort-Object CreationDate -Descending | Select-Object -First 1
+  if (-not $cmd) { return $null }
+  [int]((Get-Date) - $cmd.CreationDate).TotalSeconds
+}
+
 $actions = @()
 
 # --- 1. PostgreSQL --------------------------------------------------------
@@ -88,30 +114,33 @@ if (-not (Test-Listen -Port $PgPort)) {
 # --- 2. Evolution --------------------------------------------------------
 if (-not (Test-Listen -Port $EvolutionPort)) {
   $actions += 'evolution tidak listen'
-  $task = Get-ScheduledTask -TaskName $EvolutionTask -ErrorAction SilentlyContinue
-  $info = Get-ScheduledTaskInfo -TaskName $EvolutionTask -ErrorAction SilentlyContinue
-  $runningSec = 999
-  if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 1900) {
-    $runningSec = [int]((Get-Date) - $info.LastRunTime).TotalSeconds
-  }
+  $taskRunning = (Get-ScheduledTask -TaskName $EvolutionTask -ErrorAction SilentlyContinue).State -eq 'Running'
+  $ageSec = Get-TaskProcessAgeSec -TaskName $EvolutionTask
 
-  if ($task -and $task.State -eq 'Running' -and $runningSec -lt $EvolutionStartGraceSec) {
-    # PENTING: Evolution butuh 60-90 detik untuk boot (tsx). Task yang masih
-    # dalam masa itu JANGAN dibunuh -- `schtasks /end` mengirim Ctrl+C dan
-    # mematikan instance yang sedang start (kejadian nyata 2026-10-01: Evolution
-    # di-restart terus tiap 5 menit karena dinilai "zombie" saat boot).
-    $actions += ('evolution sedang start (' + $runningSec + 's) -> tunggu, tidak dibunuh')
+  # PENTING: `schtasks /end` mengirim Ctrl+C ke semua instance task, jadi salah
+  # klasifikasi di sini memutus sesi WhatsApp yang sedang pulih.
+  if ($taskRunning -and ($null -eq $ageSec -or $ageSec -lt $EvolutionStartGraceSec)) {
+    $actions += ('evolution sedang boot (umur proses ' + $ageSec + 's) -> tunggu, tidak dibunuh')
+    # Dicatat langsung: cabang ini bisa menunggu sampai 7 menit, dan tanpa ini
+    # log-nya kosong selama menunggu sehingga sulit dibedakan dari macet.
+    L ('    evolution sedang boot (umur proses ' + $ageSec + 's) -> tunggu, tidak dibunuh')
     if (-not (Wait-Listen -Port $EvolutionPort -Seconds $EvolutionStartGraceSec)) {
-      $actions += 'evolution MASIH mati setelah masa tenggang'
+      $actions += ('evolution masih tidak listen setelah ' + $EvolutionStartGraceSec + 's -> end+start')
+      L ('    evolution masih tidak listen setelah ' + $EvolutionStartGraceSec + 's -> end+start')
+      & schtasks /end /tn $EvolutionTask 2>&1 | Out-Null
+      Start-Sleep -Seconds 2
+      Start-Task -Name $EvolutionTask
+      if (-not (Wait-Listen -Port $EvolutionPort -Seconds $EvolutionStartGraceSec)) { $actions += 'evolution MASIH mati setelah restart' }
     }
   } else {
-    if ($task -and $task.State -eq 'Running') {
-      $actions += ('task evolution Running ' + $runningSec + 's tanpa port -> zombie, end+start')
+    if ($taskRunning) {
+      $actions += ('task evolution Running ' + $ageSec + 's tanpa port -> end+start')
+      L ('    task evolution Running ' + $ageSec + 's tanpa port -> end+start')
       & schtasks /end /tn $EvolutionTask 2>&1 | Out-Null
       Start-Sleep -Seconds 2
     }
     Start-Task -Name $EvolutionTask
-    if (-not (Wait-Listen -Port $EvolutionPort -Seconds 120)) { $actions += 'evolution MASIH mati' }
+    if (-not (Wait-Listen -Port $EvolutionPort -Seconds $EvolutionStartGraceSec)) { $actions += 'evolution MASIH mati' }
   }
 }
 
