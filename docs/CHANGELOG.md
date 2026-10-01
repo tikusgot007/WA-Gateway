@@ -3,6 +3,31 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-01 — mediaMode `ondemand`: jaminan berkas besar tidak hilang senyap
+
+**Status**: terverifikasi di aulia3 (webhook `webhookBase64:false`; pesan nyata
+diunduh ulang oleh adapter).
+
+- Masalah: pada mode `base64`, badan webhook ikut sebesar berkas (+33%). Berkas
+  di atas batas badan ditolak **413 sebelum terbaca**, jadi adapter tidak tahu
+  pesan/pengirimnya dan mustahil membuat baris penanda -> kasir tidak tahu ada
+  yang tertolak.
+- Solusi: `EVOLUTION_MEDIA_MODE=ondemand` -> `webhook:set` mendaftarkan webhook
+  dengan `base64:false`. Badan webhook selalu kecil, adapter lalu:
+  - memutuskan dari **metadata `fileLength`** (tanpa unduh) bila sudah melebihi
+    `maxIncomingMediaBytes` -> baris penanda "Customer mengirim file besar …";
+  - kalau tidak, mengunduh lewat `POST /chat/getBase64FromMediaMessage/{instance}`
+    (`client.getMediaBase64`), dengan pengaman `Content-Length`;
+  - unduhan gagal/timeout -> baris penanda "Customer mengirim berkas — gagal
+    diambil …".
+- Karena itu `EVOLUTION_WEBHOOK_BODY_LIMIT` tidak lagi menjadi penentu: tidak
+  ada lagi ukuran berkas yang "terlalu besar untuk diberi tahu".
+- Tambahan: `npm run webhook:info` untuk memverifikasi `webhookBase64` cocok
+  dengan `mediaMode` (secret disensor).
+- Mode `base64` tetap didukung (jalur lama) supaya perubahan ini aditif.
+- Env baru: `EVOLUTION_MEDIA_FETCH_TIMEOUT_MS` (default 60000).
+
+
 ## 2026-10-01 — View-once dari pelanggan + batas ukuran media masuk
 
 **Status**: terverifikasi lewat kiriman nyata dari HP ke Inbox produksi.

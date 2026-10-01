@@ -274,6 +274,68 @@ async function setWebhook({ url, events, headers = null, base64 = false }) {
   return json;
 }
 
+/**
+ * POST /chat/getBase64FromMediaMessage/{instance}
+ *
+ * Dipakai saat `EVOLUTION_MEDIA_MODE=ondemand` (webhook TANPA base64): adapter
+ * meminta Evolution mengambilkan blob satu pesan berdasarkan key-nya. Dengan
+ * begitu badan webhook selalu kecil, sehingga berkas besar pun tetap terbaca
+ * dan bisa diberi baris penanda (bukan ditolak 413 lalu hilang).
+ *
+ * Body `{ message: { key } }` -- Evolution mencari pesannya sendiri
+ * (whatsapp.baileys.service.ts:3853). Balasan: `{ mediaType, fileName,
+ * mimetype, base64, buffer }`.
+ *
+ * @param {object} key key Baileys pesan (id, remoteJid, fromMe, participant...)
+ * @param {{maxBytes?:number}} [opts] pengaman: bila Content-Length balasan
+ *        melebihi ini, unduhan dibatalkan (err.code = MEDIA_TOO_LARGE).
+ * @returns {Promise<{base64:string, mimetype:string|null, fileName:string|null, mediaType:string|null}>}
+ */
+async function getMediaBase64(key, opts = {}) {
+  if (!isConfigured()) throw notConfiguredError();
+
+  let res;
+  try {
+    res = await withTimeout((signal) => fetch(instancePath('/chat/getBase64FromMediaMessage'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+      body: JSON.stringify({ message: { key } }),
+      signal,
+    }), config.evolution.mediaFetchTimeoutMs);
+  } catch (err) {
+    throw networkError(err);
+  }
+
+  const maxBytes = Number(opts.maxBytes) || 0;
+  const contentLength = Number(res.headers.get('content-length') || 0);
+  if (maxBytes > 0 && contentLength > 0 && contentLength > Math.ceil((maxBytes * 4) / 3) + 65536) {
+    try {
+      if (res.body && typeof res.body.cancel === 'function') await res.body.cancel();
+    } catch (err) { /* abaikan */ }
+    const e = new Error('Media terlalu besar untuk diunduh dari Evolution');
+    e.code = 'MEDIA_TOO_LARGE';
+    throw e;
+  }
+
+  const { json, rawText } = await parseJsonSafely(res);
+  if (!res.ok || !json || typeof json.base64 !== 'string' || !json.base64) {
+    const reason = (json && (json.message || (json.error && json.error.message)))
+      || rawText.slice(0, 200)
+      || `HTTP ${res.status}`;
+    const e = new Error(`Evolution gagal memberi media: ${reason}`);
+    e.code = 'EVOLUTION_MEDIA_FAILED';
+    e.httpStatus = res.status;
+    throw e;
+  }
+
+  return {
+    base64: json.base64,
+    mimetype: typeof json.mimetype === 'string' ? json.mimetype : null,
+    fileName: typeof json.fileName === 'string' ? json.fileName : null,
+    mediaType: typeof json.mediaType === 'string' ? json.mediaType : null,
+  };
+}
+
 module.exports = {
   isConfigured,
   sendText,
@@ -282,4 +344,5 @@ module.exports = {
   getConnectionState,
   getGroupInfo,
   setWebhook,
+  getMediaBase64,
 };

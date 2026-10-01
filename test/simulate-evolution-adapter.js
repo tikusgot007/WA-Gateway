@@ -75,11 +75,21 @@ evolutionClient.sendSticker = async (args) => {
   stub.sticker.push(args);
   return { messageId: `EVS-${stub.sticker.length}`, timestamp: '2026-10-01T12:00:00.000Z', mediaRef: null, quoteApplied: Boolean(args.quoted), key: { id: `EVS-${stub.sticker.length}`, remoteJid: args.number + '@s.whatsapp.net', fromMe: true } };
 };
+// Stub unduh media on-demand (mediaMode 'ondemand' -- webhook tanpa base64).
+const stubMediaUnduh = { impl: null, panggilan: 0 };
+evolutionClient.getMediaBase64 = async (key, opts) => {
+  stubMediaUnduh.panggilan += 1;
+  if (!stubMediaUnduh.impl) throw new Error('getMediaBase64 belum di-stub');
+  return stubMediaUnduh.impl(key, opts);
+};
+
 function resetStub() {
   stub.sent = [];
   stub.media = [];
   stub.sticker = [];
   stub.impl = null;
+  stubMediaUnduh.impl = null;
+  stubMediaUnduh.panggilan = 0;
 }
 
 let server;
@@ -378,10 +388,19 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(groupInfoCalls, 1, 'info grup di-cache (tidak fetch ulang)');
   console.log('OK');
 
-  section('Media masuk: image tanpa base64 dilewati; dengan base64 -> ref + diteruskan ke CI4 + bisa diunduh');
+  section('Media masuk: image tanpa base64 -> unduh on-demand; gagal unduh -> penanda (bukan dilewati)');
+  stubMediaUnduh.impl = async () => {
+    const e = new Error('tak tersedia');
+    e.code = 'EVOLUTION_MEDIA_FAILED';
+    throw e;
+  };
   wres = await post('/evolution/webhook', webhookPayload({ data: { key: { id: 'IMG-NOB64', remoteJid: '628222333444@s.whatsapp.net', fromMe: false }, message: { imageMessage: { caption: 'tanpa base64' } }, messageType: 'imageMessage' } }), { withAuth: false });
   assert.strictEqual(wres.status, 200);
-  assert.strictEqual(wres.body.skipped, true);
+  assert.notStrictEqual(wres.body.skipped, true, 'media tanpa base64 TIDAK lagi dilewati');
+  const noB64Row = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'IMG-NOB64');
+  assert.ok(noB64Row, 'tetap masuk antrean sebagai penanda');
+  assert.strictEqual(noB64Row.message_type, 'unsupported', 'jadi penanda, bukan hilang');
+  stubMediaUnduh.impl = null;
 
   const imgBytes = Buffer.from('PNG-DUMMY-BYTES');
   wres = await post('/evolution/webhook', webhookPayload({ data: { key: { id: 'IMG1', remoteJid: '628222333444@s.whatsapp.net', fromMe: false }, pushName: 'Budi', message: { imageMessage: { mimetype: 'image/jpeg', caption: 'foto uji' }, base64: imgBytes.toString('base64') }, messageType: 'imageMessage', messageTimestamp: 1790000200 } }), { withAuth: false });
@@ -537,6 +556,69 @@ function webhookPayload(overrides = {}) {
     assert.strictEqual(bigRow.media_json, null, 'tidak ada media yang disimpan');
   } finally {
     config.maxIncomingMediaBytes = ambangAsli;
+  }
+  console.log('OK');
+
+  section('Media ondemand: webhook TANPA base64 -> diunduh dari Evolution');
+  stubMediaUnduh.panggilan = 0;
+  stubMediaUnduh.impl = async () => ({
+    base64: Buffer.from('FOTO-OND').toString('base64'),
+    mimetype: 'image/jpeg',
+    fileName: null,
+    mediaType: 'imageMessage',
+  });
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'OND-1', remoteJid: PN, fromMe: false },
+      message: { imageMessage: { mimetype: 'image/jpeg', fileLength: 8 } },
+      messageType: 'imageMessage',
+    },
+  }), { withAuth: false });
+  const ondRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'OND-1');
+  assert.ok(ondRow, 'media ondemand harus terunduh dan masuk antrean');
+  assert.strictEqual(ondRow.message_type, 'image', 'tetap jadi baris image');
+  assert.ok(ondRow.media_json && ondRow.media_json.includes('evolution-media:'), 'media tersimpan lokal');
+  assert.strictEqual(stubMediaUnduh.panggilan, 1, 'mengunduh tepat sekali');
+
+  section('Media ondemand: unduhan gagal -> baris penanda, bukan hilang');
+  stubMediaUnduh.impl = async () => {
+    const e = new Error('boom');
+    e.code = 'EVOLUTION_MEDIA_FAILED';
+    throw e;
+  };
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'OND-2', remoteJid: PN, fromMe: false },
+      message: { documentMessage: { mimetype: 'application/pdf', fileLength: 123 } },
+      messageType: 'documentMessage',
+    },
+  }), { withAuth: false });
+  const ond2 = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'OND-2');
+  assert.ok(ond2, 'gagal unduh tetap masuk antrean');
+  assert.strictEqual(ond2.message_type, 'unsupported', 'jadi penanda');
+  assert.ok(ond2.text && ond2.text.includes('gagal diambil'), 'penanda menyebut gagal diambil');
+
+  section('Media ondemand: metadata sudah melebihi ambang -> penanda TANPA unduh');
+  const ambangOnd = config.maxIncomingMediaBytes;
+  config.maxIncomingMediaBytes = 1000;
+  stubMediaUnduh.impl = async () => ({ base64: Buffer.from('x').toString('base64') });
+  const unduhSebelum = stubMediaUnduh.panggilan;
+  try {
+    wres = await post('/evolution/webhook', webhookPayload({
+      data: {
+        key: { id: 'OND-3', remoteJid: PN, fromMe: false },
+        message: { documentMessage: { mimetype: 'application/pdf', fileLength: 50000 } },
+        messageType: 'documentMessage',
+      },
+    }), { withAuth: false });
+    const ond3 = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'OND-3');
+    assert.ok(ond3, 'berkas besar (metadata) tetap masuk antrean sebagai penanda');
+    assert.strictEqual(ond3.message_type, 'unsupported');
+    assert.ok(ond3.text && ond3.text.includes('file besar'), 'penanda file besar');
+    assert.strictEqual(stubMediaUnduh.panggilan, unduhSebelum, 'TIDAK mengunduh bila metadata sudah melebihi ambang');
+  } finally {
+    config.maxIncomingMediaBytes = ambangOnd;
+    stubMediaUnduh.impl = null;
   }
   console.log('OK');
 

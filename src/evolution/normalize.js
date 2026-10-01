@@ -285,9 +285,21 @@ function extractMedia(messageObj) {
       mimetype: typeof node.mimetype === 'string' ? node.mimetype : null,
       fileName: typeof node.fileName === 'string' ? node.fileName : null,
       caption: typeof node.caption === 'string' ? node.caption : null,
+      // Ukuran berkas dari METADATA pesan. Dipakai untuk memutuskan
+      // unduh/penanda TANPA harus mengunduh lebih dulu (mediaMode ondemand).
+      // Bisa number, string angka, atau Long protobuf ({low,high}).
+      fileLength: mediaLengthToNumber(node.fileLength),
       base64: typeof messageObj.base64 === 'string' && messageObj.base64 ? messageObj.base64 : null,
     };
   }
+  return null;
+}
+
+/** Normalisasi `fileLength` (number | string | Long protobuf) -> number|null. */
+function mediaLengthToNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  if (value && typeof value === 'object' && typeof value.low === 'number') return value.low;
   return null;
 }
 

@@ -104,6 +104,11 @@ const config = {
     // Timeout per request HTTP ke Evolution API (ms).
     requestTimeoutMs: toInt(process.env.EVOLUTION_REQUEST_TIMEOUT_MS, 15000),
 
+    // Timeout khusus MENGUNDUH media masuk dari Evolution
+    // (POST /chat/getBase64FromMediaMessage) pada mediaMode 'ondemand'.
+    // Jauh lebih longgar dari requestTimeoutMs karena berkas bisa besar.
+    mediaFetchTimeoutMs: toInt(process.env.EVOLUTION_MEDIA_FETCH_TIMEOUT_MS, 60000),
+
     // Timeout khusus polling status koneksi (heartbeat). Jauh lebih pendek
     // dari requestTimeoutMs SENGAJA: polling ini berjalan di dalam siklus
     // heartbeat (bawaan 15 dtk) sementara CI4 menganggap gateway basi pada
@@ -135,8 +140,13 @@ const config = {
   // tidak memanggil Evolution berulang. Default 10 menit.
   groupInfoCacheTtlMs: Math.max(1000, toInt(process.env.GROUP_INFO_CACHE_TTL_MS, 10 * 60 * 1000)),
 
-  // Media MASUK (Tahap 4). Mode 'base64' = Evolution mengirim base64 di
-  // webhook dan adapter menyimpannya lokal; 'url' = simpan URL Evolution.
+  // Media MASUK.
+  //  'base64'   = Evolution mengirim base64 DI DALAM webhook (lama). Badan
+  //               webhook ikut sebesar berkas -> berkas besar bisa ditolak 413
+  //               sebelum terbaca, dan adapter tak bisa memberi penanda.
+  //  'ondemand' = webhook TANPA base64 (kecil, tak pernah 413); adapter
+  //               mengunduh media lewat Evolution hanya bila perlu. Mode ini
+  //               yang memberi jaminan "kasir selalu tahu" untuk berkas besar.
   mediaMode: (process.env.EVOLUTION_MEDIA_MODE || 'base64').trim().toLowerCase(),
   mediaStoreDir: path.resolve(process.cwd(), process.env.MEDIA_STORE_DIR || './data/media'),
   mediaRetentionDays: Math.max(1, toInt(process.env.MEDIA_RETENTION_DAYS, 7)),

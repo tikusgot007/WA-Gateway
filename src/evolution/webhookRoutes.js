@@ -10,6 +10,7 @@ const { normalizeMessagesUpsert, normalizeConnectionUpdate } = require('./normal
 const evolutionState = require('./state');
 const quotedStore = require('./quotedStore');
 const mediaStore = require('./mediaStore');
+const evolutionClient = require('./client');
 const groupInfo = require('./groupInfo');
 const { jidToPhone } = require('./jid');
 const ownSent = require('./ownSentRegistry').instance;
@@ -119,71 +120,52 @@ async function handleMessagesUpsert(req, res, payload) {
     }
   }
 
-  // --- Media MASUK (Tahap 4) --------------------------------------------
-  // image/document/sticker WAJIB membawa referensi file bagi CI4. Adapter
-  // menyimpan blob (base64 dari webhook, karena webhook_base64=true) ke
-  // penyimpanan lokal dan menyerahkan ref opaque `evolution-media:<id>`.
+  // --- Media MASUK -------------------------------------------------------
+  // image/document/sticker WAJIB membawa referensi file bagi CI4: adapter
+  // menyimpan blob ke penyimpanan lokal dan menyerahkan ref opaque
+  // `evolution-media:<id>`.
   //
-  // Media yang MELEBIHI ambang (config.maxIncomingMediaBytes) TIDAK diunduh
-  // maupun disimpan -- terlalu berat untuk memori/disk. Supaya tidak hilang
-  // tanpa jejak, pesannya dikirim sebagai baris penanda teks (tipe
-  // `unsupported`, dirender apa adanya oleh UI Inbox). Dulu berkas > ~12 MB
-  // malah ditolak 413 oleh batas badan dan hilang sama sekali.
-  const approxMediaBytes = media && media.base64 ? Math.floor((media.base64.length * 3) / 4) : 0;
+  // Dua sumber blob:
+  //  - langsung dari `message.base64` (mediaMode 'base64', cara lama), atau
+  //  - diunduh dari Evolution (mediaMode 'ondemand', badan webhook tanpa
+  //    base64). Mode ondemand mencegah badan webhook ditolak 413 sehingga
+  //    berkas besar TETAP terbaca dan bisa diberi baris penanda.
+  //
+  // Media di atas ambang TIDAK diunduh/disimpan -- dikirim sebagai baris
+  // penanda supaya tidak hilang tanpa jejak dan kasir tetap tahu.
   const isMediaMessage = ['image', 'document', 'sticker', 'audio', 'video'].includes(event.messageType);
-
-  if (isMediaMessage && approxMediaBytes > config.maxIncomingMediaBytes) {
-    const batasMb = Math.floor(config.maxIncomingMediaBytes / (1024 * 1024));
+  const butuhBerkas = ['image', 'document', 'sticker'].includes(event.messageType);
+  const batasMb = Math.floor(config.maxIncomingMediaBytes / (1024 * 1024));
+  const jadikanPenanda = (teks) => {
     event.messageType = 'unsupported';
     event.media = null;
-    event.text = `Customer mengirim file besar diatas ${batasMb}mb — cek WhatsApp Web.`;
-    logger.warn('[EVOLUTION-IN] media masuk melebihi batas -- dikirim sebagai penanda, bukan diunduh', {
+    event.text = teks;
+  };
+
+  const ukuranMetadata = media && Number(media.fileLength) > 0 ? Number(media.fileLength) : null;
+  const ukuranDariBase64 = media && media.base64 ? Math.floor((media.base64.length * 3) / 4) : null;
+  const ukuranDiketahui = ukuranMetadata || ukuranDariBase64;
+
+  if (isMediaMessage && ukuranDiketahui && ukuranDiketahui > config.maxIncomingMediaBytes) {
+    jadikanPenanda(`Customer mengirim file besar diatas ${batasMb}mb — cek WhatsApp Web.`);
+    logger.warn('[EVOLUTION-IN] media melebihi batas -- dikirim sebagai penanda, bukan diunduh', {
       waMessageId: event.messageId,
-      approxBytes: approxMediaBytes,
+      ukuranDiketahui,
       limitBytes: config.maxIncomingMediaBytes,
     });
-  } else if (['image', 'document', 'sticker'].includes(event.messageType)) {
-    if (!media || !media.base64) {
-      logger.warn('[EVOLUTION-IN] media masuk tanpa base64 -- dilewati (pastikan webhook_base64 aktif)', {
+  } else if (butuhBerkas) {
+    const hasil = await siapkanMediaMasuk({ event, media, evolutionKey, batasMb });
+    if (hasil.penanda) {
+      jadikanPenanda(hasil.penanda);
+    } else if (hasil.skip) {
+      logger.warn('[EVOLUTION-IN] media masuk tidak bisa dipakai -- dilewati', {
         waMessageId: event.messageId,
-        messageType: event.messageType,
+        reason: hasil.skip,
       });
-      return res.json({ success: true, skipped: true, reason: 'media tanpa base64' });
+      return res.json({ success: true, skipped: true, reason: hasil.skip });
+    } else {
+      event.media = hasil.media;
     }
-
-    let buffer = null;
-    try {
-      buffer = Buffer.from(media.base64, 'base64');
-    } catch (err) {
-      buffer = null;
-    }
-    if (!buffer || buffer.length === 0) {
-      logger.warn('[EVOLUTION-IN] base64 media tidak valid -- dilewati', { waMessageId: event.messageId });
-      return res.json({ success: true, skipped: true, reason: 'base64 media tidak valid' });
-    }
-
-    const ref = mediaStore.save(buffer, {
-      mimetype: media.mimetype,
-      fileName: media.fileName,
-      mediaType: event.messageType,
-    });
-
-    event.media = {
-      // Ref opaque adapter, BUKAN URL. `media_key_base64` sengaja placeholder
-      // (non-kosong, wajib oleh CI4) karena Evolution tidak memberi mediaKey
-      // Baileys -- /media/download mengabaikannya.
-      direct_path: ref,
-      media_key_base64: 'evolution',
-      mimetype: media.mimetype || undefined,
-      file_name: media.fileName || undefined,
-      file_length: buffer.length,
-      file_sha256_base64: crypto.createHash('sha256').update(buffer).digest('base64'),
-    };
-    logger.info('[EVOLUTION-IN] media masuk disimpan lokal', {
-      waMessageId: event.messageId,
-      messageType: event.messageType,
-      bytes: buffer.length,
-    });
   } else if (event.messageType === 'audio' || event.messageType === 'video') {
     // CI4 menerima audio/video sebagai placeholder (referensi media opsional).
     if (media && media.mimetype) event.media = { mimetype: media.mimetype };
@@ -215,6 +197,84 @@ async function handleMessagesUpsert(req, res, payload) {
     });
     return res.status(500).json({ success: false, error: 'enqueue_failed' });
   }
+}
+
+/**
+ * Siapkan blob media masuk (dari webhook atau diunduh ke Evolution) lalu simpan
+ * ke penyimpanan lokal.
+ *
+ * @returns {Promise<{media?:object, penanda?:string, skip?:string}>}
+ *   - `media`   : objek media siap kirim ke CI4
+ *   - `penanda` : pesan harus jadi baris penanda teks (mis. berkas terlalu besar)
+ *   - `skip`    : pesan dilewati (mis. base64 rusak)
+ */
+async function siapkanMediaMasuk({ event, media, evolutionKey, batasMb }) {
+  let base64 = media && media.base64 ? media.base64 : null;
+  let mimetype = media ? media.mimetype : null;
+  let fileName = media ? media.fileName : null;
+
+  if (!base64) {
+    // mediaMode 'ondemand' (atau webhook_base64 mati): unduh dari Evolution.
+    try {
+      const unduh = await evolutionClient.getMediaBase64(evolutionKey, {
+        maxBytes: config.maxIncomingMediaBytes,
+      });
+      base64 = unduh.base64;
+      mimetype = mimetype || unduh.mimetype;
+      fileName = fileName || unduh.fileName;
+    } catch (err) {
+      if (err.code === 'MEDIA_TOO_LARGE') {
+        return { penanda: `Customer mengirim file besar diatas ${batasMb}mb — cek WhatsApp Web.` };
+      }
+      logger.warn('[EVOLUTION-IN] gagal mengunduh media dari Evolution -- dikirim sebagai penanda', {
+        waMessageId: event.messageId,
+        code: err.code || null,
+        error: err.message,
+      });
+      return { penanda: 'Customer mengirim berkas — gagal diambil, cek WhatsApp Web.' };
+    }
+  }
+
+  let buffer = null;
+  try {
+    buffer = Buffer.from(base64, 'base64');
+  } catch (err) {
+    buffer = null;
+  }
+  if (!buffer || buffer.length === 0) {
+    return { skip: 'base64 media tidak valid' };
+  }
+
+  // Pengaman terakhir: metadata bisa tidak akurat, jadi ukuran nyata dicek lagi.
+  if (buffer.length > config.maxIncomingMediaBytes) {
+    return { penanda: `Customer mengirim file besar diatas ${batasMb}mb — cek WhatsApp Web.` };
+  }
+
+  const ref = mediaStore.save(buffer, {
+    mimetype,
+    fileName,
+    mediaType: event.messageType,
+  });
+
+  logger.info('[EVOLUTION-IN] media masuk disimpan lokal', {
+    waMessageId: event.messageId,
+    messageType: event.messageType,
+    bytes: buffer.length,
+  });
+
+  return {
+    media: {
+      // Ref opaque adapter, BUKAN URL. `media_key_base64` sengaja placeholder
+      // (non-kosong, wajib oleh CI4) karena Evolution tidak memberi mediaKey
+      // Baileys -- /media/download mengabaikannya.
+      direct_path: ref,
+      media_key_base64: 'evolution',
+      mimetype: mimetype || undefined,
+      file_name: fileName || undefined,
+      file_length: buffer.length,
+      file_sha256_base64: crypto.createHash('sha256').update(buffer).digest('base64'),
+    },
+  };
 }
 
 module.exports = router;
