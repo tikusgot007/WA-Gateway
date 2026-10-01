@@ -220,6 +220,50 @@ const config = {
   // sama sekali, jadi os.tmpdir() bawaan Node tetap dipakai apa adanya,
   // TIDAK ADA perubahan behavior sama sekali untuk desktop.
   appTmpDir: process.env.APP_TMP_DIR || null,
+
+  // =============================================================
+  // Adapter Evolution API (spike, branch spike/evolution) -- lihat
+  // src/evolution/*. Sesi WhatsApp dipegang SERVER Evolution (bukan proses
+  // ini); adapter hanya menerima webhook & memanggil REST Evolution.
+  // =============================================================
+  evolution: {
+    // Base URL Evolution API, TANPA trailing slash (bawaan Docker: 8080).
+    baseUrl: (() => {
+      const raw = (process.env.EVOLUTION_BASE_URL || 'http://127.0.0.1:8080').trim().replace(/\/+$/, '');
+      return /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    })(),
+
+    // API key Evolution (header `apikey`, BUKAN Bearer). Kosong = adapter
+    // menolak kirim (EVOLUTION_NOT_CONFIGURED).
+    apiKey: (process.env.EVOLUTION_API_KEY || '').trim(),
+
+    // Nama instance Evolution (dipakai di path /{instanceName}).
+    instance: (process.env.EVOLUTION_INSTANCE || '').trim(),
+
+    requestTimeoutMs: toInt(process.env.EVOLUTION_REQUEST_TIMEOUT_MS, 15000),
+
+    // Path webhook yang didaftarkan ke Evolution (mount relatif server ini).
+    webhookPath: (process.env.EVOLUTION_WEBHOOK_PATH || '/evolution/webhook').trim(),
+
+    // Opsional: shared secret yang dikirim Evolution di header webhook.
+    webhookSecret: (process.env.EVOLUTION_WEBHOOK_SECRET || '').trim(),
+    webhookSecretHeader: (process.env.EVOLUTION_WEBHOOK_SECRET_HEADER || 'x-adapter-webhook-secret').trim(),
+
+    // Status koneksi eksplisit dianggap basi setelah sekian ms.
+    connectionStaleMs: toInt(process.env.EVOLUTION_CONNECTION_STALE_MS, 120000),
+  },
+
+  // Store kutipan (key + message pesan masuk) untuk membangun `quoted`
+  // Evolution saat kasir membalas. TTL membatasi pertumbuhan baris.
+  quotedStoreTtlMs: Math.max(1, toInt(process.env.QUOTED_STORE_TTL_MS, 7 * 24 * 3600 * 1000)),
+
+  // Cache info grup adapter Evolution (subject + pemetaan LID->nomor).
+  groupInfoCacheTtlMs: Math.max(1000, toInt(process.env.GROUP_INFO_CACHE_TTL_MS, 10 * 60 * 1000)),
+
+  // Media MASUK adapter Evolution: blob disimpan lokal dan direferensikan
+  // sebagai `evolution-media:<id>` (Evolution tidak memberi directPath/mediaKey).
+  mediaStoreDir: path.resolve(process.cwd(), process.env.MEDIA_STORE_DIR || './data/media'),
+  mediaRetentionDays: Math.max(1, toInt(process.env.MEDIA_RETENTION_DAYS, 7)),
 };
 
 // Peringatan keras jika HOST dibuka ke LAN tanpa authentication.

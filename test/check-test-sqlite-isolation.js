@@ -35,6 +35,11 @@ const DB_OPENING_MODULES = [
   'api/routes',
   'api/server',
   'app/index',
+  // SPIKE adapter Evolution (branch spike/evolution) -- juga membuka DB lewat store.
+  'evolution/ci4Routes',
+  'evolution/webhookRoutes',
+  'api/evolutionServer',
+  'app/evolution',
 ];
 
 function stripComments(source) {
