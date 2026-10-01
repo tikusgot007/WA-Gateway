@@ -26,6 +26,7 @@ param(
   [int]   $PgPort        = 5432,
   [int]   $EvolutionPort = 8080,
   [int]   $AdapterPort   = 3000,
+  [int]   $EvolutionStartGraceSec = 240,
   [string]$LogPath      = 'D:\kilo\watchdog.log',
   [switch]$Quiet
 )
@@ -88,14 +89,30 @@ if (-not (Test-Listen -Port $PgPort)) {
 if (-not (Test-Listen -Port $EvolutionPort)) {
   $actions += 'evolution tidak listen'
   $task = Get-ScheduledTask -TaskName $EvolutionTask -ErrorAction SilentlyContinue
-  if ($task -and $task.State -eq 'Running') {
-    # Task "Running" tapi port mati = proses zombie; hentikan dulu.
-    $actions += 'task evolution Running tapi port mati -> end+start'
-    & schtasks /end /tn $EvolutionTask 2>&1 | Out-Null
-    Start-Sleep -Seconds 2
+  $info = Get-ScheduledTaskInfo -TaskName $EvolutionTask -ErrorAction SilentlyContinue
+  $runningSec = 999
+  if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 1900) {
+    $runningSec = [int]((Get-Date) - $info.LastRunTime).TotalSeconds
   }
-  Start-Task -Name $EvolutionTask
-  if (-not (Wait-Listen -Port $EvolutionPort -Seconds 90)) { $actions += 'evolution MASIH mati' }
+
+  if ($task -and $task.State -eq 'Running' -and $runningSec -lt $EvolutionStartGraceSec) {
+    # PENTING: Evolution butuh 60-90 detik untuk boot (tsx). Task yang masih
+    # dalam masa itu JANGAN dibunuh -- `schtasks /end` mengirim Ctrl+C dan
+    # mematikan instance yang sedang start (kejadian nyata 2026-10-01: Evolution
+    # di-restart terus tiap 5 menit karena dinilai "zombie" saat boot).
+    $actions += ('evolution sedang start (' + $runningSec + 's) -> tunggu, tidak dibunuh')
+    if (-not (Wait-Listen -Port $EvolutionPort -Seconds $EvolutionStartGraceSec)) {
+      $actions += 'evolution MASIH mati setelah masa tenggang'
+    }
+  } else {
+    if ($task -and $task.State -eq 'Running') {
+      $actions += ('task evolution Running ' + $runningSec + 's tanpa port -> zombie, end+start')
+      & schtasks /end /tn $EvolutionTask 2>&1 | Out-Null
+      Start-Sleep -Seconds 2
+    }
+    Start-Task -Name $EvolutionTask
+    if (-not (Wait-Listen -Port $EvolutionPort -Seconds 120)) { $actions += 'evolution MASIH mati' }
+  }
 }
 
 # --- 3. Adapter ----------------------------------------------------------
