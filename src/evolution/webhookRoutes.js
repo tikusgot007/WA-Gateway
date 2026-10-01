@@ -30,7 +30,7 @@ const ownSent = require('./ownSentRegistry').instance;
  * balas 500 supaya Evolution (bila retry) mengirim ulang.
  */
 const router = express.Router();
-const jsonBody = express.json({ limit: '16mb' }); // media base64 bisa besar (webhook_base64)
+const jsonBody = express.json({ limit: config.webhookJsonBodyLimit }); // lihat config: harus > base64 media masuk maksimum
 
 /** Nama event Evolution dinormalkan: case-insensitive, tanpa `_`/`.`/`-`. */
 function normalizeEventName(raw) {
@@ -123,7 +123,26 @@ async function handleMessagesUpsert(req, res, payload) {
   // image/document/sticker WAJIB membawa referensi file bagi CI4. Adapter
   // menyimpan blob (base64 dari webhook, karena webhook_base64=true) ke
   // penyimpanan lokal dan menyerahkan ref opaque `evolution-media:<id>`.
-  if (['image', 'document', 'sticker'].includes(event.messageType)) {
+  //
+  // Media yang MELEBIHI ambang (config.maxIncomingMediaBytes) TIDAK diunduh
+  // maupun disimpan -- terlalu berat untuk memori/disk. Supaya tidak hilang
+  // tanpa jejak, pesannya dikirim sebagai baris penanda teks (tipe
+  // `unsupported`, dirender apa adanya oleh UI Inbox). Dulu berkas > ~12 MB
+  // malah ditolak 413 oleh batas badan dan hilang sama sekali.
+  const approxMediaBytes = media && media.base64 ? Math.floor((media.base64.length * 3) / 4) : 0;
+  const isMediaMessage = ['image', 'document', 'sticker', 'audio', 'video'].includes(event.messageType);
+
+  if (isMediaMessage && approxMediaBytes > config.maxIncomingMediaBytes) {
+    const batasMb = Math.floor(config.maxIncomingMediaBytes / (1024 * 1024));
+    event.messageType = 'unsupported';
+    event.media = null;
+    event.text = `Customer mengirim file besar diatas ${batasMb}mb — cek WhatsApp Web.`;
+    logger.warn('[EVOLUTION-IN] media masuk melebihi batas -- dikirim sebagai penanda, bukan diunduh', {
+      waMessageId: event.messageId,
+      approxBytes: approxMediaBytes,
+      limitBytes: config.maxIncomingMediaBytes,
+    });
+  } else if (['image', 'document', 'sticker'].includes(event.messageType)) {
     if (!media || !media.base64) {
       logger.warn('[EVOLUTION-IN] media masuk tanpa base64 -- dilewati (pastikan webhook_base64 aktif)', {
         waMessageId: event.messageId,

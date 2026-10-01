@@ -140,6 +140,17 @@ const config = {
   mediaMode: (process.env.EVOLUTION_MEDIA_MODE || 'base64').trim().toLowerCase(),
   mediaStoreDir: path.resolve(process.cwd(), process.env.MEDIA_STORE_DIR || './data/media'),
   mediaRetentionDays: Math.max(1, toInt(process.env.MEDIA_RETENTION_DAYS, 7)),
+
+  // Batas ukuran media MASUK. Berkas di atas ini tidak diunduh/disimpan --
+  // adapter mengirim baris penanda teks supaya pesannya tidak hilang tanpa
+  // jejak (dulu: badan webhook > batas -> 413 -> hilang senyap).
+  maxIncomingMediaBytes: Math.max(1, toInt(process.env.EVOLUTION_MAX_INCOMING_MEDIA_MB, 64)) * 1024 * 1024,
+
+  // Batas badan JSON webhook masuk. HARUS lebih besar dari base64 media masuk
+  // maksimum (~4/3 x maxIncomingMediaBytes) supaya permintaan masih bisa
+  // diparse dan penanda "file terlalu besar" dapat dibuat. Default: 96mb
+  // (cukup untuk berkas 64mb + kepala pesan).
+  webhookJsonBodyLimit: (process.env.EVOLUTION_WEBHOOK_BODY_LIMIT || '96mb').trim(),
 };
 
 // Peringatan keras jika HOST dibuka ke LAN tanpa authentication pada

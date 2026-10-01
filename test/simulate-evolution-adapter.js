@@ -44,6 +44,7 @@ const mediaStore = require('../src/evolution/mediaStore');
 const ownSent = require('../src/evolution/ownSentRegistry').instance;
 const evolutionCi4Routes = require('../src/evolution/ci4Routes');
 const evolutionWebhookRoutes = require('../src/evolution/webhookRoutes');
+const config = require('../src/config');
 const { FORWARD_TEXT_PREFIX } = require('../src/whatsapp/forwardMarker');
 
 // --- tangkap log (jangan cetak isi pesan) ---
@@ -492,6 +493,30 @@ function webhookPayload(overrides = {}) {
     data: { key: { id: 'PRT-1', remoteJid: PN, fromMe: false }, message: { protocolMessage: { type: 0 } }, messageType: 'protocolMessage' },
   }), { withAuth: false });
   assert.strictEqual(wres.body.skipped, true, 'protocol dilewati');
+  console.log('OK');
+
+  section('Media melebihi ambang -> penanda teks (bukan diunduh, bukan hilang)');
+  const ambangAsli = config.maxIncomingMediaBytes;
+  // Ambang diubah kecil supaya bisa diuji tanpa berkas besar sungguhan.
+  config.maxIncomingMediaBytes = 1000;
+  try {
+    const bigB64 = Buffer.alloc(4096, 7).toString('base64'); // ~4 KB > ambang 1 KB
+    wres = await post('/evolution/webhook', webhookPayload({
+      data: {
+        key: { id: 'BIG-1', remoteJid: PN, fromMe: false },
+        message: { documentMessage: { mimetype: 'application/octet-stream', fileName: 'big.bin' }, base64: bigB64 },
+        messageType: 'documentMessage',
+      },
+    }), { withAuth: false });
+    assert.strictEqual(wres.body.success, true, 'media besar tidak boleh dilewati');
+    const bigRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'BIG-1');
+    assert.ok(bigRow, 'media besar masuk antrean sebagai penanda');
+    assert.strictEqual(bigRow.message_type, 'unsupported', 'tipe jadi unsupported');
+    assert.ok(bigRow.text && bigRow.text.includes('file besar'), 'teks penanda file besar');
+    assert.strictEqual(bigRow.media_json, null, 'tidak ada media yang disimpan');
+  } finally {
+    config.maxIncomingMediaBytes = ambangAsli;
+  }
   console.log('OK');
 
   section('CONNECTION_UPDATE mengubah status heartbeat');
