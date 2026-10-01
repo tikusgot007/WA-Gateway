@@ -63,6 +63,12 @@ async function deliverOne(event, dependencies = {}) {
     body.quoted = JSON.parse(event.quoted_json);
   }
 
+  // Tahap 4: data terstruktur (lokasi/kontak) hanya dikirim bila ada -- payload
+  // tipe lama tidak berubah (field `extra` tidak dikirim).
+  if (event.extra_json) {
+    body.extra = JSON.parse(event.extra_json);
+  }
+
   const result = await post('/api/inbox/gateway/messages', body);
 
   if (result.ok) {

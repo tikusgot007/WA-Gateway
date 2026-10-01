@@ -175,11 +175,11 @@ class IncomingBufferSqlite {
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO incoming_queue
         (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid, group_name,
-         message_type, text, media_json, identity_hint_json, quoted_json, message_timestamp,
+         message_type, text, media_json, extra_json, identity_hint_json, quoted_json, message_timestamp,
          direction, status, attempts, next_attempt_at, created_at, updated_at)
       VALUES
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid, @group_name,
-         @message_type, @text, @media_json, @identity_hint_json, @quoted_json, @message_timestamp,
+         @message_type, @text, @media_json, @extra_json, @identity_hint_json, @quoted_json, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
     `);
 
@@ -323,6 +323,14 @@ class IncomingBufferSqlite {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN quoted_json TEXT`);
       logger.info('[MIGRASI] kolom quoted_json ditambahkan ke incoming_queue (database SQLite lama).');
     }
+
+    if (!columnNames.includes('extra_json')) {
+      // Tahap 4: TEXT, nullable -- JSON data terstruktur untuk tipe non-file.
+      // Saat ini {kind:'location', latitude, longitude, name, address, live}
+      // dan {kind:'contact', contacts:[{display_name, vcard}]}.
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN extra_json TEXT`);
+      logger.info('[MIGRASI] kolom extra_json ditambahkan ke incoming_queue (database SQLite lama).');
+    }
   }
 
   /**
@@ -365,6 +373,7 @@ class IncomingBufferSqlite {
       message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
+      extra_json: event.extra ? JSON.stringify(event.extra) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
       quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
       message_timestamp: event.timestamp,
@@ -662,6 +671,7 @@ class IncomingBufferJsonFile {
       message_type: event.messageType,
       text: event.text,
       media_json: event.media ? JSON.stringify(event.media) : null,
+      extra_json: event.extra ? JSON.stringify(event.extra) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
       quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
       message_timestamp: event.timestamp,

@@ -437,14 +437,29 @@ function webhookPayload(overrides = {}) {
   assert.ok(albImgRow, 'foto album masuk antrean');
   assert.strictEqual(albImgRow.message_type, 'image', 'foto album = baris gambar');
 
-  // Location: konten nyata yang belum didukung -> penanda, bukan dead.
+  // Lokasi (Tahap 4): data terstruktur -> message_type='location' + extra.
   wres = await post('/evolution/webhook', webhookPayload({
-    data: { key: { id: 'LOC-1', remoteJid: PN, fromMe: false }, message: { locationMessage: { degreesLatitude: 1, degreesLongitude: 2 } }, messageType: 'locationMessage' },
+    data: { key: { id: 'LOC-1', remoteJid: PN, fromMe: false }, message: { locationMessage: { degreesLatitude: -6.2, degreesLongitude: 106.8, name: 'Toko' } }, messageType: 'locationMessage' },
   }), { withAuth: false });
   const locRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'LOC-1');
   assert.ok(locRow, 'lokasi masuk antrean');
-  assert.strictEqual(locRow.message_type, 'unsupported');
-  assert.ok(locRow.text && locRow.text.includes('lokasi'), 'lokasi membawa penanda terbaca');
+  assert.strictEqual(locRow.message_type, 'location');
+  assert.ok(locRow.extra_json && locRow.extra_json.includes('"kind":"location"'), 'extra lokasi tersimpan');
+  let locFwd = null;
+  await incomingDelivery.deliverOne(locRow, {
+    postToCI4: async (pathSuffix, body) => { locFwd = { pathSuffix, body }; return { ok: true, status: 200, json: {} }; },
+  });
+  assert.strictEqual(locFwd.body.extra.kind, 'location');
+  assert.strictEqual(locFwd.body.extra.latitude, -6.2);
+
+  // Kontak (Tahap 4): message_type='contact' + extra contacts[].
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'CT-1', remoteJid: PN, fromMe: false }, message: { contactMessage: { displayName: 'Budi', vcard: 'BEGIN:VCARD' } }, messageType: 'contactMessage' },
+  }), { withAuth: false });
+  const ctRow = incomingBuffer.getDueEvents(300).find((e) => e.wa_message_id === 'CT-1');
+  assert.ok(ctRow, 'kontak masuk antrean');
+  assert.strictEqual(ctRow.message_type, 'contact');
+  assert.ok(ctRow.extra_json && ctRow.extra_json.includes('"kind":"contact"'), 'extra kontak tersimpan');
 
   // View-once foto: pembungkus dibuka -> image (dulu dead).
   const voBytes = Buffer.from('VIEWONCE-BYTES');

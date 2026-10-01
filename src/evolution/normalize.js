@@ -101,8 +101,59 @@ function detectMessageType(messageObj) {
   if (messageObj.stickerMessage) return 'sticker';
   if (messageObj.audioMessage) return 'audio';
   if (messageObj.videoMessage) return 'video';
+  // Tahap 4: lokasi & kontak punya data terstruktur (bukan blob), dikirim lewat
+  // `extra` dan ditampilkan di Inbox.
+  if (messageObj.locationMessage || messageObj.liveLocationMessage) return 'location';
+  if (messageObj.contactMessage || messageObj.contactsArrayMessage) return 'contact';
   if (typeof messageObj.conversation === 'string') return 'text';
   if (messageObj.extendedTextMessage) return 'text';
+  return null;
+}
+
+/**
+ * Data terstruktur untuk tipe yang tidak berbentuk file: lokasi & kontak.
+ * Dikirim apa adanya ke CI4 lewat field `extra` dan disimpan di kolom JSON.
+ * @returns {object|null}
+ */
+function extractExtra(messageObj) {
+  if (!messageObj || typeof messageObj !== 'object') return null;
+
+  const loc = messageObj.locationMessage || messageObj.liveLocationMessage;
+  if (loc) {
+    const latitude = Number(loc.degreesLatitude);
+    const longitude = Number(loc.degreesLongitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return {
+      kind: 'location',
+      latitude,
+      longitude,
+      name: typeof loc.name === 'string' && loc.name ? loc.name : null,
+      address: typeof loc.address === 'string' && loc.address ? loc.address : null,
+      live: Boolean(messageObj.liveLocationMessage),
+    };
+  }
+
+  const normalizeContact = (c) => {
+    if (!c || typeof c !== 'object') return null;
+    const displayName = typeof c.displayName === 'string' && c.displayName.trim() ? c.displayName.trim() : null;
+    const vcard = typeof c.vcard === 'string' && c.vcard ? c.vcard : null;
+    if (!displayName && !vcard) return null;
+    return { display_name: displayName, vcard };
+  };
+
+  if (messageObj.contactMessage) {
+    const contact = normalizeContact(messageObj.contactMessage);
+    if (!contact) return null;
+    return { kind: 'contact', contacts: [contact] };
+  }
+
+  if (messageObj.contactsArrayMessage) {
+    const arr = Array.isArray(messageObj.contactsArrayMessage.contacts) ? messageObj.contactsArrayMessage.contacts : [];
+    const contacts = arr.map(normalizeContact).filter(Boolean);
+    if (contacts.length === 0) return null;
+    return { kind: 'contact', contacts };
+  }
+
   return null;
 }
 
@@ -157,12 +208,6 @@ function unsupportedLabel(messageObj) {
     return count
       ? `[Pelanggan mengirim album ${count} foto — buka WhatsApp untuk melihat]`
       : '[Pelanggan mengirim album foto — buka WhatsApp untuk melihat]';
-  }
-  if (messageObj.locationMessage || messageObj.liveLocationMessage) {
-    return '[Pelanggan mengirim lokasi — buka WhatsApp untuk melihat]';
-  }
-  if (messageObj.contactMessage || messageObj.contactsArrayMessage) {
-    return '[Pelanggan mengirim kontak — buka WhatsApp untuk melihat]';
   }
   if (messageObj.pollCreationMessage || messageObj.pollCreationMessageV2 || messageObj.pollCreationMessageV3) {
     return '[Pelanggan mengirim polling — buka WhatsApp untuk melihat]';
@@ -289,6 +334,7 @@ function normalizeMessagesUpsert(payload) {
 
   let messageType = detectMessageType(messageObj);
   let text = extractText(messageObj);
+  const extra = extractExtra(messageObj);
 
   if (messageType === null) {
     // Konten NYATA yang belum didukung: kirim penanda teks, JANGAN 'text' kosong
@@ -322,6 +368,7 @@ function normalizeMessagesUpsert(payload) {
     messageType,
     text: text || '',
     media: null, // Tahap 4: diisi oleh caller bila messageType butuh referensi media
+    extra: extra || null, // Tahap 4: data terstruktur untuk location/contact
     timestamp: toIsoTimestamp(record.messageTimestamp),
     direction: fromMe ? 'outgoing' : 'incoming',
     quoted: quotedContext ? {
@@ -359,6 +406,7 @@ module.exports = {
   extractText,
   unwrapMessage,
   unsupportedLabel,
+  extractExtra,
   noiseReason,
   toIsoTimestamp,
 };
