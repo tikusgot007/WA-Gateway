@@ -1,0 +1,22 @@
+{
+  "name": "evolution-gateway",
+  "version": "0.1.0",
+  "description": "Adapter AuliaPos (CI4) <-> Evolution API: mempertahankan kontrak HTTP WA-Gateway sehingga AuliaPos tidak perlu diubah",
+  "main": "src/app/evolution.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/app/evolution.js",
+    "dev": "node --watch src/app/evolution.js",
+    "test": "node test/simulate-evolution-adapter.js && node test/simulate-evolution-boot.js",
+    "webhook:set": "node scripts/set-webhook.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pino": "^9.6.0"
+  }
+}

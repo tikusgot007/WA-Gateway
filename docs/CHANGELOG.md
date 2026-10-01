@@ -1,0 +1,229 @@
+# Changelog
+
+Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
+Format bebas, kronologis terbaru di atas.
+
+## 2026-10-01 — Tahap 4: media/quote/forward + 3 perbaikan bug (uji nyata via UI POS)
+
+**Status**: TERVERIFIKASI lewat UI Inbox AuliaPos (media masuk & keluar, dokumen,
+sticker, quote teks, quote sticker, forward teks), tanpa mengubah kode AuliaPos.
+
+### Perbaikan bug (ditemukan dari uji UI POS)
+
+1. **Media KELUAR tidak tampil di Inbox ("Gambar tidak tersedia").**
+   - Akar: `/send-media` mengembalikan `mediaRef: null` (Evolution tidak memberi
+     directPath/mediaKey), sehingga CI4 menyimpan `media_metadata = NULL`
+     (`Inbox.php:3502-3512`, `1473-1494`) dan UI menolak merender (`Inbox.php:510`).
+   - Perbaikan: adapter menyimpan byte media keluar ke `mediaStore` dan
+     mengembalikan `media_ref = { direct_path: 'evolution-media:<id>',
+     media_key_base64: 'evolution' }` (ref yang sama seperti media masuk).
+2. **Kirim STICKER selalu gagal (`500 Invalid URL`).**
+   - Akar: Evolution v2.3.7 `mediaSticker()` memakai `data.sticker` (bukan upload
+     multipart `file`) → `convertToWebP(undefined)` gagal.
+   - Perbaikan: `client.sendSticker` mengirim JSON `{ number, sticker: <base64> }`.
+3. **Quote STICKER muncul di WhatsApp Web tapi TIDAK di HP.**
+   - Akar: `quoted.message` memuat field `bytes` sebagai objek JSON `{"0":..,"1":..}`;
+     dikirim balik → protobuf salah decode → client HP gagal render quote sticker
+     (quote teks tidak terpengaruh, karena tidak butuh field byte media).
+   - Perbaikan: `resolveQuoted()` mengonversi objek byte-array → base64 (protobufjs
+     menerima base64 untuk `bytes`) dan membersihkan `quoted.key` → `{ id, remoteJid,
+     fromMe }` (+`participant` bila ada).
+   - Bukti A/B: byte sebagai objek → quote tidak muncul di HP; byte sebagai base64
+     (atau kirim `key` saja) → quote muncul. Setelah perbaikan, balas sticker via
+     adapter muncul di HP.
+
+### Fitur: dukungan GRUP (Uji 7)
+
+- Pesan grup berjalan dua arah (masuk & keluar ke `...@g.us`).
+- Ditambahkan `src/evolution/groupInfo.js`: saat pesan grup masuk, adapter mengambil
+  info grup dari `GET /group/findGroupInfos` (di-cache 10 menit,
+  `GROUP_INFO_CACHE_TTL_MS`), lalu:
+  - mengisi `group_name` dari `subject` grup (sebelumnya NULL); dan
+  - memetakan pengirim LID (`...@lid`) → JID nomor via `participants[].phoneNumber`,
+    sehingga `messages.sender_jid` tersimpan sebagai nomor (mis.
+    `628563324637@s.whatsapp.net`), bukan LID.
+- Kegagalan pengambilan info grup bersifat NON-FATAL (pesan tetap diteruskan).
+
+### Hasil uji (via UI Inbox POS)
+
+- Gambar keluar (image), dokumen keluar (xlsx), media masuk (gambar + sticker).
+- Quote teks dan quote sticker (keduanya tampil di HP setelah perbaikan).
+- Forward teks (`↪️ Diteruskan:` prefix, `forward_marker_applied=text_fallback`).
+- Grup: pesan masuk & keluar; `group_name` terisi; `sender_jid` dipetakan ke nomor.
+
+### Catatan
+
+- Format `media_ref` mengikuti kontrak CI4 — **AuliaPos tidak diubah**.
+- Media keluar disimpan di `MEDIA_STORE_DIR` dan ikut retensi `MEDIA_RETENTION_DAYS`
+  (media lama > retensi tidak bisa dimuat ulang — batasan yang sama seperti media masuk).
+
+## 2026-10-01 — Beralih ke PostgreSQL (DB yang didukung Evolution) + uji ulang
+
+**Status**: TERVERIFIKASI penuh di PostgreSQL (masuk, keluar, heartbeat, status kirim).
+
+### Latar
+
+Pada uji MariaDB, Evolution API v2.3.7 menjalankan raw SQL khusus PostgreSQL
+(`updateChatUnreadMessages` dll) yang gagal (`P2010`) dan membatalkan handler
+`messages.upsert` sebelum webhook dikirim. Alih-alih menambal satu per satu,
+Evolution dipindah ke **PostgreSQL** (DB default yang didukung).
+
+### Perubahan lingkungan (mesin dev)
+
+- PostgreSQL 16.15 dipasang native; cluster di `C:\Projects\pgdata-evolution`
+  (`initdb` manual, karena installer winget EDB terputus di tengah). Dijalankan
+  dengan `pg_ctl -D C:\Projects\pgdata-evolution -o "-p 5432" start`.
+- Database `evolution_gateway_pg`, role `evolution_gw`.
+- `evolution-api-server/.env`: `DATABASE_PROVIDER=postgresql` +
+  `DATABASE_CONNECTION_URI=postgresql://evolution_gw:***@127.0.0.1:5432/evolution_gateway_pg?schema=public`,
+  dan `DATABASE_SAVE_DATA_NEW_MESSAGE=true` dikembalikan (workaround MySQL dihapus).
+- Migrasi PostgreSQL (`prisma migrate deploy`) diterapkan; instance `aulia-uji`
+  dibuat ulang + pairing ulang (sesi disimpan di DB).
+- Redis tetap dimatikan (`CACHE_REDIS_ENABLED=false`, cache lokal).
+
+### Hasil uji ulang
+
+- Keluar: `POST /send` → `wa_message_id` OK.
+- Masuk: `messages.upsert` → buffer → CI4 → baris `messages.direction=incoming`
+  (`id=7`, "Apa 5") OK.
+- `connection.update` → heartbeat `connected` OK.
+- **`messages.update` (status kirim) kini diterima** — event ini gagal di
+  MariaDB, sekarang normal.
+
+### Catatan operasional tambahan
+
+- **Jangan restart instance lalu langsung mengirim**: saat restart, socket
+  menutup dan Evolution menjawab `500 Connection Closed`; adapter
+  mengembalikan `504 SEND_UNRESOLVED` (`state: in_flight`). Tunggu instance
+  benar-benar stabil `open` sebelum mengirim/menguji.
+- DB MySQL sementara `evolution_gateway_db` (dari uji sebelumnya) kini tidak
+  terpakai; boleh dihapus manual (bukan operasi yang dijalankan otomatis).
+
+## 2026-10-01 — Tahap 2 & 3: uji nyata end-to-end dengan Evolution API v2.3.7
+
+**Status**: TERVERIFIKASI (teks 2 arah + heartbeat), tanpa mengubah kode
+AuliaPos.
+
+### Perbaikan kode adapter
+
+- `setWebhook` (`src/evolution/client.js`): body dibungkus `{ webhook: {...} }`
+  dan memakai field `byEvents`, sesuai schema resmi v2.3.7
+  (`src/api/integrations/event/webhook/webhook.schema.ts`); contoh di
+  dokumentasi (flat) ditolak server.
+- `test/simulate-evolution-adapter.js`: tambah seksi yang mengunci mapping
+  request klien nyata (path `/message/sendText/{instance}` & `/webhook/set/{instance}`,
+  header `apikey`, body `text` flat, body webhook bersarang). Semua lulus.
+
+### Hasil yang diverifikasi (bukti nyata)
+
+- Kirim teks adapter → Evolution → WhatsApp: `POST /send` mengembalikan
+  `wa_message_id`.
+- Kirim dari UI Inbox AuliaPos: adapter menerima `operation_id` UUID dari CI4
+  dan mengirim sukses.
+- Pesan masuk: `messages.upsert` → buffer durable → `POST /api/inbox/gateway/messages`
+  → baris `messages.direction=incoming` di `aulia_inboxdb`.
+- Heartbeat: `gateway_status` = `connected` / `session_health=ok`.
+- Payload webhook `messages.upsert` asli direkam; cocok dengan `normalize.js`.
+
+### Temuan operasional (didokumentasikan di README)
+
+1. **Webhook yang di-`set` setelah instance dibuat baru aktif setelah
+   instance direstart** — penyebab webhook pesan masuk tidak terkirim pada
+   percobaan pertama.
+2. **MariaDB/MySQL: Evolution v2.3.7 menjalankan raw SQL khusus PostgreSQL**
+   (`updateChatUnreadMessages`), Prisma `P2010`, membatalkan handler
+   `messages.upsert` sebelum webhook dikirim. Workaround uji:
+   `DATABASE_SAVE_DATA_NEW_MESSAGE=false`. Rekomendasi: PostgreSQL.
+   Juga ada error non-fatal `Unknown argument 'lid'` di `onWhatsappCache`.
+3. `@lid` di-resolve Evolution ke JID nomor (`@s.whatsapp.net`) pada payload
+   webhook (via `remoteJidAlt`).
+
+### Prasyarat lingkungan uji (mesin dev)
+
+- Evolution API v2.3.7 native (Node + MariaDB XAMPP, `evolution_gateway_db`),
+  port 8080; adapter port 3000; AuliaPos `http://127.0.0.1/aulia-app`.
+- Migration AuliaPos `2026-09-30-000001_AddSessionHealthToGatewayStatus`
+  (sudah ada di repo, aditif) diterapkan ke `aulia_inboxdb` agar heartbeat
+  menerima kolom `session_health` (disetujui user).
+
+## 2026-10-01 — Tahap 1: skeleton repo + kontrak CI4 (mock Evolution)
+
+**Status**: implementasi awal, test lulus, **belum diuji dengan Evolution API
+nyata**.
+
+### Ditambahkan
+
+- Struktur repo baru, dibuat dari cetak biru `spike/fonnte` (repo
+  `WA-Gateway`): modul durability (`src/store/*`, `src/delivery/*`,
+  `src/logging/*`, `src/whatsapp/mediaPayload.js`,
+  `src/whatsapp/forwardMarker.js`, `src/api/authMiddleware.js`) disalin
+  apa adanya (bebas Baileys, tidak perlu diubah).
+- `src/config/index.js` — blok `config.ci4` (kontrak AuliaPos) dan
+  `config.evolution` (base URL, apikey, instance, webhook path/secret,
+  mode media, TTL quoted store).
+- `src/evolution/jid.js` — konversi nomor ↔ JID, deteksi JID grup.
+- `src/evolution/state.js` — status koneksi Evolution → heartbeat CI4;
+  `session_health` selalu `"ok"` (tidak ada tracker dekripsi di jalur ini).
+- `src/evolution/ownSentRegistry.js` — saring echo webhook untuk pesan yang
+  dikirim adapter sendiri (mencegah duplikasi di Inbox).
+- `src/evolution/quotedStore.js` — simpan `key`+`message` pesan Evolution
+  saat pesan masuk, di-key oleh `wa_message_id`, untuk membangun `quoted`
+  Evolution saat kasir membalas. Fallback in-memory bila `better-sqlite3`
+  tidak tersedia.
+- `src/evolution/mediaStore.js` — simpan media masuk secara lokal
+  (keputusan §6.2 opsi A pada rencana), menyerahkan ref opaque
+  `evolution-media:<id>` sebagai `direct_path` untuk `/media/download`.
+- `src/evolution/client.js` — klien REST Evolution API v2.3.7
+  (`sendText`, `sendMedia`, `sendSticker`, `getConnectionState`,
+  `setWebhook`), header `apikey` (bukan Bearer). Bentuk payload
+  diverifikasi dari docs resmi + source code `evolution-foundation/evolution-api`.
+- `src/evolution/normalize.js` — normalisasi webhook `MESSAGES_UPSERT` dan
+  `CONNECTION_UPDATE` → event buffer internal. **Ditulis defensif**:
+  bentuk payload nyata belum direkam (lihat README "Yang belum
+  terverifikasi").
+- `src/evolution/ci4Routes.js` — endpoint kontrak CI4 (`/send`,
+  `/send-media`, `/media/download`) dengan validasi identik WA-Gateway,
+  idempotensi `operation_id` (reuse `outgoingOperationService`), forward
+  via prefix teks, quote via `quotedStore`.
+- `src/evolution/webhookRoutes.js` — receiver webhook Evolution
+  (`/evolution/webhook`), termasuk filter echo kiriman sendiri, filter
+  pesan non-teks (ditunda ke Tahap 4), dan penanganan `CONNECTION_UPDATE`.
+- `src/evolution/heartbeat.js` — heartbeat periodik ke
+  `/api/inbox/gateway/status`.
+- `src/api/server.js`, `src/app/evolution.js` — server HTTP + entry point.
+- `scripts/set-webhook.js` — pendaftaran webhook ke Evolution
+  (`POST /webhook/set/{instance}`).
+- `test/simulate-evolution-adapter.js` — 15 skenario assert-based (auth,
+  validasi payload, idempotensi, forward, quote, webhook idempoten, filter
+  grup/non-teks/echo, heartbeat, kebocoran log). **Semua lulus.**
+- `test/simulate-evolution-boot.js` — smoke boot entry point di child
+  process. **Lulus.**
+- `.env.example`, `.gitignore`, `README.md`.
+
+### Diverifikasi (bukti nyata)
+
+- `npm test` → 15/15 skenario assert lulus + boot smoke lulus, dijalankan
+  di lingkungan dev (Node v22.23.2, Windows).
+- Isolasi test: `SQLITE_PATH`/`MEDIA_STORE_DIR` memakai folder temp OS,
+  tidak menyentuh `data/evolution-gateway.sqlite` produksi.
+
+### BELUM diverifikasi (lihat README untuk detail)
+
+- Belum ada instance Evolution API nyata yang dijalankan (Docker tidak
+  tersedia di mesin dev ini; akan disiapkan di PC gateway per keputusan
+  user).
+- Bentuk field `sendText` (`text` flat vs `textMessage.text`) — ada
+  perbedaan antara satu halaman OpenAPI docs dan schema validasi resmi;
+  klien memakai bentuk schema (flat), wajib dikonfirmasi ulang ke instance
+  nyata.
+- Bentuk payload webhook `MESSAGES_UPSERT` nyata.
+- Pemetaan `connectionState` ke `logged_out`.
+- Uji end-to-end teks masuk/keluar (Tahap 2), sambungan ke AuliaPos
+  (Tahap 3), media/quote/forward nyata (Tahap 4).
+
+### Tidak diubah
+
+- **Repo `aulia-app` tidak disentuh sama sekali** (tidak ada file yang
+  diubah, tidak ada `.env` produksi yang diarahkan ke adapter ini).
+- Tidak ada proses adapter Fonnte (`spike/fonnte`) yang dihentikan atau
+  diubah.
