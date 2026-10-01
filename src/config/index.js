@@ -147,10 +147,16 @@ const config = {
   maxIncomingMediaBytes: Math.max(1, toInt(process.env.EVOLUTION_MAX_INCOMING_MEDIA_MB, 64)) * 1024 * 1024,
 
   // Batas badan JSON webhook masuk. HARUS lebih besar dari base64 media masuk
-  // maksimum (~4/3 x maxIncomingMediaBytes) supaya permintaan masih bisa
-  // diparse dan penanda "file terlalu besar" dapat dibuat. Default: 96mb
-  // (cukup untuk berkas 64mb + kepala pesan).
-  webhookJsonBodyLimit: (process.env.EVOLUTION_WEBHOOK_BODY_LIMIT || '96mb').trim(),
+  // maksimum (~4/3 x ukuran berkas) supaya permintaan masih bisa diparse dan
+  // penanda "file terlalu besar" dapat dibuat -- kalau batas badan tercapai,
+  // express membalas 413 SEBELUM badan dibaca, sehingga keterangan mustahil
+  // dibuat dan pesannya hilang senyap.
+  //
+  // Default 160mb: cukup untuk berkas sampai ~120 MB (base64 ~133 MB + kepala
+  // pesan), jadi seluruh dokumen yang diizinkan WhatsApp (umumnya <= 100 MB)
+  // tetap sampai sebagai penanda, bukan 413. Berkas di atas ~120 MB masih akan
+  // 413 -- untuk itu perlu mode tanpa base64 (adapter mengunduh on-demand).
+  webhookJsonBodyLimit: (process.env.EVOLUTION_WEBHOOK_BODY_LIMIT || '160mb').trim(),
 };
 
 // Peringatan keras jika HOST dibuka ke LAN tanpa authentication pada
