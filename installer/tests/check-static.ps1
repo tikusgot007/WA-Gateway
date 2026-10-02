@@ -35,6 +35,13 @@ foreach ($n in @('AuliaEvolution', 'AuliaAdapter', 'AuliaStackWatchdog')) {
   if ($task) { $problems.Add('scheduled task terdaftar: ' + $n) }
 }
 
+# 3b. Installer tidak boleh memuat SELURUH .env Evolution ke environment proses
+# (LOG_LEVEL dkk terbawa ke proses anak/adapter dan membuat pino gagal).
+foreach ($f in $files) {
+  $t = Get-Content -LiteralPath $f.FullName -Raw
+  if ($t -like '*Import-DotEnv*') { $problems.Add('Import-DotEnv (memuat .env penuh) di ' + $f.FullName) }
+}
+
 # 4. Script yang diubah bersih dari literal host/instance.
 $instanceJs = Join-Path $repo 'scripts\setup-instance.js'
 if (Test-Path -LiteralPath $instanceJs) {

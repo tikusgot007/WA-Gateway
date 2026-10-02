@@ -69,7 +69,13 @@ async function main() {
       integration: 'WHATSAPP-BAILEYS',
       qrcode: true,
     });
-    log('create', { status: created.status, body: created.json });
+    const createdInstance = created.json && created.json.instance ? created.json.instance : null;
+    // Jangan log body mentah: respons create memuat qrcode.base64 / pairing code.
+    log('create', {
+      status: created.status,
+      instance: createdInstance ? createdInstance.instanceName : null,
+      state: createdInstance ? createdInstance.status : null,
+    });
     if (created.status >= 400) throw new Error('gagal membuat instance');
   }
 
@@ -83,10 +89,17 @@ async function main() {
     headers,
     base64: config.mediaMode === 'base64',
   });
-  log('webhook terdaftar', { url: WEBHOOK_URL, events: EVENTS, result });
+  // Jangan log `result` mentah: memuat headers.x-adapter-webhook-secret.
+  log('webhook terdaftar', {
+    url: WEBHOOK_URL,
+    events: EVENTS,
+    enabled: result ? result.enabled : null,
+    webhookId: result && result.id ? result.id : null,
+  });
 
   const restarted = await api('POST', `/instance/restart/${INSTANCE}`);
-  log('restart', { status: restarted.status, body: restarted.json });
+  // Jangan log body restart: Evolution mengembalikan QR/pairing code juga.
+  log('restart', { status: restarted.status });
 
   state = await getState();
   log('state akhir', { state });

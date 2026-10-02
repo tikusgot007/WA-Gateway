@@ -7,6 +7,7 @@ $checks = @(
   'check-firewall.ps1',
   'check-runbook.ps1',
   'check-static.ps1',
+  'check-setup-instance-redaction.ps1',
   'check-syntax.ps1'
 )
 $failed = 0

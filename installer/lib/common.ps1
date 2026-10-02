@@ -71,24 +71,6 @@ function Get-EnvValue {
   return (($line.Line -split '=', 2)[1]).Trim().Trim("'").Trim('"')
 }
 
-# Muat .env ke environment proses (Prisma hanya membaca .env dari cwd,
-# jadi skrip yang memanggil Prisma memuatnya eksplisit).
-function Import-DotEnv {
-  param([Parameter(Mandatory = $true)][string]$Path)
-  if (-not (Test-Path -LiteralPath $Path)) { throw "File .env tidak ditemukan: $Path" }
-  $count = 0
-  foreach ($line in (Get-Content -LiteralPath $Path)) {
-    $t = $line.Trim()
-    if (-not $t -or $t.StartsWith('#')) { continue }
-    $idx = $t.IndexOf('=')
-    if ($idx -lt 1) { continue }
-    $key = $t.Substring(0, $idx).Trim()
-    $val = $t.Substring($idx + 1).Trim().Trim("'").Trim('"')
-    if ($key -match '^[A-Za-z_][A-Za-z0-9_]*$') { Set-Item -Path ('Env:' + $key) -Value $val; $count++ }
-  }
-  return $count
-}
-
 function Test-Listen {
   param([Parameter(Mandatory = $true)][int]$Port)
   @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue).Count -gt 0

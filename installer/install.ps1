@@ -59,9 +59,23 @@ Initialize-AuliaLog -Path $LogPath -Reset
 
 function Invoke-ChildScript {
   param([string]$Script, [string[]]$ScriptArgs, [string]$Label)
+  # Output dialihkan ke FILE, bukan pipe. Dua jebakan yang sudah terbukti di
+  # Windows PowerShell 5.1:
+  #  - menangkap lewat pipeline (`| ForEach-Object`) menggantung, karena
+  #    start.ps1 meninggalkan proses adapter hidup yang memegang handle pipe;
+  #  - `Start-Process -Wait` ikut menunggu proses TURUNAN (uji: 31s pada
+  #    proses tidur 30s), jadi juga menggantung.
+  # Native call dengan redirection `*>` ke file: tidak menunggu turunan dan
+  # tetap memberi exit code lewat $LASTEXITCODE.
+  $outFile = Join-Path $logDir ($Label + '.out.log')
   $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $ScriptArgs
-  $r = Invoke-Native -Exe 'powershell.exe' -NativeArgs $childArgs -Label $Label
-  if ($r.Code -ne 0) { throw ($Label + ' gagal (exit ' + $r.Code + ')') }
+  & powershell.exe @childArgs *> $outFile
+  $code = $LASTEXITCODE
+  Write-Log ($Label + ' [exit=' + $code + ']')
+  if (Test-Path -LiteralPath $outFile) {
+    Get-Content -LiteralPath $outFile | ForEach-Object { Write-Log ('  ' + $Label + ': ' + $_) }
+  }
+  if ($code -ne 0) { throw ($Label + ' gagal (exit ' + $code + ')') }
 }
 
 function Get-ZipUrl {
@@ -173,13 +187,23 @@ try {
     throw ('Sumber adapter pada ref ''' + $AdapterRef + ''' tidak mendukung paket installer ini. Pin -AdapterRef ke commit yang memuat folder installer/ (lihat petunjuk-penggunaan.md).')
   }
 
+  # npm ci idempotent: kalau node_modules sudah ada, lewati (mempercepat
+  # jalur pemulihan setelah kegagalan di langkah berikutnya).
   $env:HUSKY = '0'
-  Write-Log 'npm ci: evolution-api...'
-  $r = Invoke-Native -Exe $tools.Npm.Source -NativeArgs @('ci', '--no-audit', '--no-fund') -Label 'npm' -WorkDir $evoDir
-  if ($r.Code -ne 0) { throw 'npm ci (evolution-api) gagal.' }
-  Write-Log 'npm ci: adapter...'
-  $r = Invoke-Native -Exe $tools.Npm.Source -NativeArgs @('ci', '--no-audit', '--no-fund') -Label 'npm' -WorkDir $adapterDir
-  if ($r.Code -ne 0) { throw 'npm ci (adapter) gagal.' }
+  foreach ($pair in @(
+    @{ Dir = $evoDir; Label = 'evolution-api' },
+    @{ Dir = $adapterDir; Label = 'adapter' }
+  )) {
+    $dir = $pair['Dir']
+    if (Test-Path -LiteralPath (Join-Path $dir 'node_modules')) {
+      Write-Log ('npm ci (' + $pair['Label'] + '): node_modules sudah ada, dilewati.')
+      continue
+    }
+    Write-Log ('npm ci: ' + $pair['Label'] + '...')
+    $r = Invoke-Native -Exe $tools.Npm.Source -NativeArgs @('ci', '--no-audit', '--no-fund') -Label 'npm' -WorkDir $dir
+    if ($r.Code -ne 0) { throw ('npm ci (' + $pair['Label'] + ') gagal.') }
+  }
+  Remove-Item Env:\HUSKY -ErrorAction SilentlyContinue
 
   Invoke-ChildScript -Script (Join-Path $here 'apply-viewonce-patch.ps1') -ScriptArgs @('-EvolutionDir', $evoDir, '-LogPath', (Join-Path $logDir 'apply-viewonce-patch.log')) -Label 'apply-viewonce-patch'
 
@@ -219,12 +243,25 @@ try {
   }
   $prismaCli = Join-Path $evoDir 'node_modules\prisma\build\index.js'
   if (-not (Test-Path -LiteralPath $prismaCli)) { throw ('Prisma CLI tidak ditemukan: ' + $prismaCli) }
-  $null = Import-DotEnv -Path (Join-Path $evoDir '.env')
+  # Hanya dua variabel ini yang dibutuhkan Prisma. JANGAN memuat seluruh .env
+  # Evolution ke environment proses ini: variabel seperti LOG_LEVEL akan ikut
+  # terbawa ke proses anak (start.ps1 -> adapter) dan membuat adapter gagal
+  # (pino: "default level ... must be included in custom levels").
   $env:DATABASE_PROVIDER = 'postgresql'
-  if (-not $env:DATABASE_CONNECTION_URI) { throw 'DATABASE_CONNECTION_URI kosong setelah memuat .env Evolution.' }
+  $dbUri = Get-EnvValue -Path (Join-Path $evoDir '.env') -Key 'DATABASE_CONNECTION_URI'
+  if (-not $dbUri) { throw 'DATABASE_CONNECTION_URI tidak ditemukan di .env Evolution.' }
+  $env:DATABASE_CONNECTION_URI = $dbUri
 
-  $r = Invoke-Native -Exe $tools.Node.Source -NativeArgs @($prismaCli, 'generate', '--schema', 'prisma\postgresql-schema.prisma') -Label 'prisma generate' -WorkDir $evoDir
-  if ($r.Code -ne 0) { throw 'prisma generate gagal.' }
+  # prisma generate idempotent: lewati kalau query engine sudah tergenerasi.
+  # Ini juga mencegah EPERM saat resume, karena proses Evolution yang sedang
+  # jalan memegang query_engine-windows.dll.node.
+  $prismaEngine = Join-Path $evoDir 'node_modules\.prisma\client\query_engine-windows.dll.node'
+  if (Test-Path -LiteralPath $prismaEngine) {
+    Write-Log 'prisma generate: client sudah ada, dilewati.'
+  } else {
+    $r = Invoke-Native -Exe $tools.Node.Source -NativeArgs @($prismaCli, 'generate', '--schema', 'prisma\postgresql-schema.prisma') -Label 'prisma generate' -WorkDir $evoDir
+    if ($r.Code -ne 0) { throw 'prisma generate gagal.' }
+  }
   $r = Invoke-Native -Exe $tools.Node.Source -NativeArgs @($prismaCli, 'migrate', 'deploy', '--schema', 'prisma\postgresql-schema.prisma') -Label 'prisma migrate' -WorkDir $evoDir
   if ($r.Code -ne 0) { throw 'prisma migrate deploy gagal.' }
 
@@ -235,11 +272,17 @@ try {
     '-LogPath', (Join-Path $logDir 'start.log')
   ) -Label 'start'
 
-  Invoke-ChildScript -Script (Join-Path $adapterDir 'scripts\allow-lan-ports.ps1') -ScriptArgs @(
-    '-Sources', $LanSources,
-    '-Ports', ("$AdapterPort,$EvolutionPort"),
-    '-LogPath', (Join-Path $logDir 'allow-lan-ports.log')
-  ) -Label 'allow-lan-ports'
+  $fwScript = Join-Path $adapterDir 'scripts\allow-lan-ports.ps1'
+  if (-not (Test-Path -LiteralPath $fwScript)) { throw ('allow-lan-ports.ps1 tidak ditemukan: ' + $fwScript) }
+  $fwArgs = @('-Sources', $LanSources, '-LogPath', (Join-Path $logDir 'allow-lan-ports.log'))
+  if ((Get-Content -LiteralPath $fwScript -Raw) -like '*PortList*') {
+    # -PortList (string dipisah koma): powershell -File tidak bisa mengirim
+    # array int[] dengan benar.
+    $fwArgs += @('-PortList', "$AdapterPort,$EvolutionPort")
+  } elseif ($AdapterPort -ne 3000 -or $EvolutionPort -ne 8080) {
+    throw ('allow-lan-ports.ps1 di ref ''' + $AdapterRef + ''' belum mendukung -PortList (hanya port default 3000/8080). Pin -AdapterRef ke commit yang lebih baru untuk port kustom.')
+  }
+  Invoke-ChildScript -Script $fwScript -ScriptArgs $fwArgs -Label 'allow-lan-ports'
 
   $env:WEBHOOK_PUBLIC_URL = 'http://127.0.0.1:' + $AdapterPort + '/evolution/webhook'
   $r = Invoke-Native -Exe $tools.Node.Source -NativeArgs @('scripts\setup-instance.js') -Label 'setup-instance' -WorkDir $adapterDir

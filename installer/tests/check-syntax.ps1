@@ -7,8 +7,10 @@ $repo = Split-Path -Parent $installer
 
 $files = @(Get-ChildItem -LiteralPath $installer -Recurse -File |
   Where-Object { $_.Extension -eq '.ps1' -and $_.FullName -notlike '*\tests\*' })
-$setupEnv = Join-Path $repo 'scripts\setup-env.ps1'
-if (Test-Path -LiteralPath $setupEnv) { $files += Get-Item -LiteralPath $setupEnv }
+foreach ($rel in @('scripts\setup-env.ps1', 'scripts\allow-lan-ports.ps1')) {
+  $p = Join-Path $repo $rel
+  if (Test-Path -LiteralPath $p) { $files += Get-Item -LiteralPath $p }
+}
 
 $bad = 0
 foreach ($f in $files) {

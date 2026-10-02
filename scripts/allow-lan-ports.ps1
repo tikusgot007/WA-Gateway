@@ -26,6 +26,10 @@ param(
   # `schtasks ... -File`, sehingga "a,b" sampai sebagai satu alamat tak valid.
   [string]  $Sources   = '192.168.1.10',
   [int[]]   $Ports     = @(3000, 8080),
+  # Alternatif array int[] dalam bentuk string dipisah koma. Diperlukan karena
+  # `powershell -File` tidak bisa mengirim int[] (token kedua jatuh ke
+  # parameter posisi berikutnya). Kosong = pakai -Ports.
+  [string]  $PortList,
   [string]  $Profile   = 'Private',
   [string]  $LogPath   = 'D:\kilo\allow-lan-ports.log'
 )
@@ -33,6 +37,9 @@ param(
 $ErrorActionPreference = 'Continue'
 $AllowFrom = @($Sources -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($AllowFrom.Count -eq 0) { throw 'Daftar sumber kosong.' }
+if ($PortList) {
+  $Ports = @($PortList -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { [int]$_ })
+}
 New-Item -ItemType Directory -Path (Split-Path -Parent $LogPath) -Force | Out-Null
 Set-Content -LiteralPath $LogPath -Value ''
 function L { param([string]$m) Add-Content -LiteralPath $LogPath -Value ((Get-Date -Format 'HH:mm:ss') + ' ' + $m) }
