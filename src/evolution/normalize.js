@@ -303,14 +303,68 @@ function mediaLengthToNumber(value) {
   return null;
 }
 
-function extractQuotedContext(messageObj) {
-  // contextInfo ada di dalam sub-objek tipe pesan (extendedTextMessage.contextInfo, dst),
-  // bukan langsung di messageObj -- dicek beberapa kandidat paling umum.
+/**
+ * Label singkat untuk tipe media tanpa teks, dipakai sebagai `snippet` kutipan
+ * (padanan `buildQuotedSnippet` gateway lama, `connectionManager.js`).
+ */
+const QUOTED_MEDIA_LABELS = {
+  imageMessage: '[Foto]',
+  documentMessage: '[Dokumen]',
+  stickerMessage: '[Stiker]',
+  audioMessage: '[Audio]',
+  videoMessage: '[Video]',
+};
+const QUOTED_SNIPPET_MAX_CHARS = 200;
+
+/**
+ * Cuplikan singkat pesan yang DIKUTIP (bukan pesan masuk itu sendiri), dipakai
+ * CI4 sebagai fallback tampilan bila pesan sumber tidak ada di DB lokal
+ * (`InboxGatewayApi::resolveKutipanMasuk`). TANPA ini, kutipan ke pesan yang
+ * belum tersimpan muncul sebagai "Pesan tidak ditemukan" meski pelanggan
+ * jelas membalas sesuatu.
+ * @param {object|null|undefined} quotedMessageObj isi `contextInfo.quotedMessage`
+ * @returns {string|null}
+ */
+function buildQuotedSnippet(quotedMessageObj) {
+  if (!quotedMessageObj || typeof quotedMessageObj !== 'object') return null;
+  const text = extractText(quotedMessageObj);
+  if (typeof text === 'string' && text.trim()) {
+    return text.length > QUOTED_SNIPPET_MAX_CHARS ? text.slice(0, QUOTED_SNIPPET_MAX_CHARS) : text;
+  }
+  for (const [key, label] of Object.entries(QUOTED_MEDIA_LABELS)) {
+    if (quotedMessageObj[key]) return label;
+  }
+  return null;
+}
+
+/**
+ * `contextInfo` balasan (native reply) bisa muncul di DUA tempat tergantung
+ * tipe pesan pembalas:
+ *  - `record.contextInfo` (SEJAJAR `message`) -- balasan teks polos
+ *    (`message.conversation`). TERVERIFIKASI dari payload nyata produksi
+ *    (`evolution.log` 2026-10-02 14:22:35 WIB, conv id=6 message id=190
+ *    "Siap di goyang" membalas sticker id=183); lihat TODO-F4.
+ *  - di DALAM sub-objek tipe pesan (`extendedTextMessage.contextInfo`, dst)
+ *    -- balasan dengan caption/media, pola gateway Baileys lama
+ *    (`connectionManager.js` REQ-010).
+ * `record.contextInfo` dicek LEBIH DULU: tidak mengubah pesan yang memang
+ * tidak membalas apa pun (tetap mensyaratkan `stanzaId`).
+ * @param {object} record baris pesan Evolution (hasil `pickMessageRecord`)
+ * @param {object} messageObj isi `message` SETELAH dibuka pembungkus (`unwrapMessage`)
+ */
+function extractQuotedContext(record, messageObj) {
+  if (record && record.contextInfo && record.contextInfo.stanzaId) {
+    return record.contextInfo;
+  }
+  // contextInfo di dalam sub-objek tipe pesan -- paritas 6 tipe konten
+  // gateway Baileys lama (`connectionManager.js` INCOMING_QUOTE_CONTENT_KEYS).
   const candidates = [
     messageObj && messageObj.extendedTextMessage,
     messageObj && messageObj.imageMessage,
     messageObj && messageObj.documentMessage,
     messageObj && messageObj.stickerMessage,
+    messageObj && messageObj.audioMessage,
+    messageObj && messageObj.videoMessage,
   ].filter(Boolean);
   for (const c of candidates) {
     if (c.contextInfo && c.contextInfo.stanzaId) return c.contextInfo;
@@ -404,7 +458,7 @@ function normalizeMessagesUpsert(payload) {
   }
 
   const media = viewOnce ? null : extractMedia(messageObj);
-  const quotedContext = viewOnce ? null : extractQuotedContext(messageObj);
+  const quotedContext = viewOnce ? null : extractQuotedContext(record, messageObj);
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
   const senderJid = isGroup ? (key.participant || null) : (fromMe ? null : remoteJid);
@@ -429,6 +483,7 @@ function normalizeMessagesUpsert(payload) {
     quoted: quotedContext ? {
       wa_message_id: quotedContext.stanzaId,
       sender_jid: quotedContext.participant || null,
+      snippet: buildQuotedSnippet(quotedContext.quotedMessage),
     } : null,
     // Metadata mentah dipertahankan untuk dipakai quotedStore (key+message
     // lengkap Evolution) -- BUKAN dikirim ke CI4, hanya dipakai internal.
@@ -462,6 +517,8 @@ module.exports = {
   unwrapMessage,
   unsupportedLabel,
   extractExtra,
+  extractQuotedContext,
+  buildQuotedSnippet,
   noiseReason,
   toIsoTimestamp,
 };

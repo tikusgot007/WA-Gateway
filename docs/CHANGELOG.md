@@ -3,6 +3,43 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-02 — TODO-F4: kutipan balasan masuk hilang untuk balasan teks polos
+
+**Status**: terverifikasi lewat tes regresi (`npm test`); belum diuji ulang
+dengan kiriman nyata pasca-fix.
+
+- Akar: `extractQuotedContext()` (`src/evolution/normalize.js`) hanya membaca
+  `contextInfo` di DALAM sub-objek tipe pesan (`extendedTextMessage.contextInfo`,
+  dst). Payload nyata Evolution untuk balasan teks polos (`message.conversation`)
+  menaruh `contextInfo` SEJAJAR `message`, di `record.contextInfo` --
+  terverifikasi dari `evolution.log` produksi (conv id=6, message id=190
+  "Siap di goyang" seharusnya membalas sticker id=183). Akibatnya
+  `quoted_wa_message_id` tersimpan `NULL`, kutipan tidak tampil di Inbox
+  walau pesan sendiri tersimpan normal. Lihat `docs/TODO.md` AuliaPos (TODO-F4)
+  dan `X:\handoff\analisis-akar-masalah-gateway-f4-f5.md`.
+- Perbaikan:
+  - `extractQuotedContext()` kini menerima `record` juga, dan mengecek
+    `record.contextInfo.stanzaId` LEBIH DULU sebelum sub-objek (tidak
+    mengubah pesan yang memang bukan balasan).
+  - Daftar kandidat sub-objek dikembalikan ke 6 tipe (tambah `audioMessage`,
+    `videoMessage`) -- paritas gateway Baileys lama (`connectionManager.js`),
+    yang sebelumnya hanya 4 tipe di adapter Evolution.
+  - `quoted.snippet` dipulihkan (`buildQuotedSnippet()`, reuse `extractText`/
+    `detectMessageType` yang sudah ada): teks dipotong 200 karakter atau label
+    `[Foto]`/`[Dokumen]`/`[Stiker]`/`[Audio]`/`[Video]`. CI4
+    (`InboxGatewayApi::resolveKutipanMasuk`) sudah memvalidasi/memotong field
+    ini (SEC-002/SEC-003) -- field aditif, TIDAK ada perubahan CI4.
+- Tes baru di `test/simulate-evolution-adapter.js` (section "TODO-F4"): kasus
+  nyata `record.contextInfo` (conversation), non-regresi path lama
+  (`extendedTextMessage`), cakupan baru (`audioMessage`/`videoMessage`),
+  pemotongan snippet 200 karakter, dan `quoted.snippet` ikut terkirim ke CI4.
+- Belum diverifikasi (di luar cakupan fix ini, lihat dokumen analisis):
+  kutipan pada pesan yang dibungkus wrapper (`ephemeralMessage`/
+  `viewOnceMessage*`/`editedMessage`/`documentWithCaptionMessage`); pemetaan
+  `sender_jid` kutipan berbentuk `@lid` (CI4 saat ini tidak memakai
+  `quoted.sender_jid`, jadi risiko ini belum berdampak).
+
+
 ## 2026-10-01 — mediaMode `ondemand`: jaminan berkas besar tidak hilang senyap
 
 **Status**: terverifikasi di aulia3 (webhook `webhookBase64:false`; pesan nyata

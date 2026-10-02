@@ -349,6 +349,106 @@ function webhookPayload(overrides = {}) {
   assert.ok(!incomingBuffer.getDueEvents(100).some((e) => e.wa_message_id === 'WAMID-1'), 'baris ditandai completed');
   console.log('OK');
 
+  section('TODO-F4: balasan masuk (quoted) -- record.contextInfo, 6 tipe sub-objek, snippet');
+  const PN2 = '628222333444@s.whatsapp.net';
+
+  // Kasus NYATA dari payload produksi (evolution.log 2026-10-02 14:22:35 WIB,
+  // conv id=6 message id=190 "Siap di goyang" membalas sticker id=183):
+  // balasan teks polos (`conversation`) -> contextInfo SEJAJAR `message`
+  // (record.contextInfo), BUKAN di dalam extendedTextMessage. Sebelum
+  // perbaikan ini quoted_wa_message_id tersimpan NULL.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F4-CONV-1', remoteJid: PN2, fromMe: false },
+      pushName: 'Epo Bhulek',
+      message: { conversation: 'Siap di goyang' },
+      contextInfo: {
+        stanzaId: 'STICKER-SRC-183',
+        participant: '124846193250458@lid',
+        quotedMessage: { stickerMessage: { mimetype: 'image/webp' } },
+      },
+      messageType: 'conversation',
+    },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.success, true);
+  let f4Row = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-CONV-1');
+  assert.ok(f4Row, 'balasan conversation masuk antrean');
+  assert.ok(f4Row.quoted_json, 'quoted_json TERISI untuk balasan conversation (dulu NULL -- akar TODO-F4)');
+  let f4Quoted = JSON.parse(f4Row.quoted_json);
+  assert.strictEqual(f4Quoted.wa_message_id, 'STICKER-SRC-183');
+  assert.strictEqual(f4Quoted.snippet, '[Stiker]', 'snippet label media untuk kutipan sticker');
+
+  // Balasan tanpa contextInfo (bukan balasan) -> quoted TETAP null, tidak regresi.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'F4-NOQUOTE-1', remoteJid: PN2, fromMe: false }, message: { conversation: 'pesan biasa' }, messageType: 'conversation' },
+  }), { withAuth: false });
+  const f4NoQuoteRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-NOQUOTE-1');
+  assert.ok(f4NoQuoteRow, 'pesan non-balasan masuk antrean');
+  assert.strictEqual(f4NoQuoteRow.quoted_json, null, 'pesan non-balasan TIDAK punya quoted_json');
+
+  // Paritas gateway lama: balasan via extendedTextMessage (contextInfo di
+  // DALAM sub-objek, bukan di record) -- path lama tetap bekerja (tidak regresi).
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F4-EXT-1', remoteJid: PN2, fromMe: false },
+      message: { extendedTextMessage: { text: 'oke siap', contextInfo: { stanzaId: 'SRC-EXT', quotedMessage: { conversation: 'teks asal yang dibalas' } } } },
+      messageType: 'extendedTextMessage',
+    },
+  }), { withAuth: false });
+  const f4ExtRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-EXT-1');
+  assert.ok(f4ExtRow, 'balasan extendedTextMessage masuk antrean');
+  const f4ExtQuoted = JSON.parse(f4ExtRow.quoted_json);
+  assert.strictEqual(f4ExtQuoted.wa_message_id, 'SRC-EXT');
+  assert.strictEqual(f4ExtQuoted.snippet, 'teks asal yang dibalas', 'snippet teks diambil dari quotedMessage.conversation');
+
+  // Cakupan baru (dulu hilang, 4 dari 6 tipe): balasan ke/dari audioMessage
+  // dan videoMessage kini ikut membawa contextInfo, paritas 6 tipe gateway lama.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F4-AUDIO-1', remoteJid: PN2, fromMe: false },
+      message: { audioMessage: { mimetype: 'audio/ogg', contextInfo: { stanzaId: 'SRC-AUDIO' } } },
+      messageType: 'audioMessage',
+    },
+  }), { withAuth: false });
+  const f4AudioRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-AUDIO-1');
+  assert.ok(f4AudioRow, 'balasan ke audioMessage masuk antrean');
+  assert.strictEqual(JSON.parse(f4AudioRow.quoted_json).wa_message_id, 'SRC-AUDIO', 'audioMessage kini ikut dibaca kutipannya (dulu hilang)');
+
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F4-VIDEO-1', remoteJid: PN2, fromMe: false },
+      message: { videoMessage: { mimetype: 'video/mp4', contextInfo: { stanzaId: 'SRC-VIDEO' } } },
+      messageType: 'videoMessage',
+    },
+  }), { withAuth: false });
+  const f4VideoRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-VIDEO-1');
+  assert.ok(f4VideoRow, 'balasan ke videoMessage masuk antrean');
+  assert.strictEqual(JSON.parse(f4VideoRow.quoted_json).wa_message_id, 'SRC-VIDEO', 'videoMessage kini ikut dibaca kutipannya (dulu hilang)');
+
+  // snippet teks dipotong pada 200 karakter (SEC batas -- CI4 juga memotong,
+  // ini pengaman sisi adapter supaya payload tidak membengkak tanpa guna).
+  const teksPanjang = 'x'.repeat(250);
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F4-SNIPPET-LONG', remoteJid: PN2, fromMe: false },
+      message: { conversation: 'balas teks panjang' },
+      contextInfo: { stanzaId: 'SRC-LONG', quotedMessage: { conversation: teksPanjang } },
+      messageType: 'conversation',
+    },
+  }), { withAuth: false });
+  const f4LongRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F4-SNIPPET-LONG');
+  assert.strictEqual(JSON.parse(f4LongRow.quoted_json).snippet.length, 200, 'snippet dipotong 200 karakter');
+
+  // Kiriman ke CI4 WAJIB membawa field snippet baru (aditif, tidak mengubah
+  // field lama) -- verifikasi lewat incomingDelivery.deliverOne seperti kasus
+  // 'Webhook MESSAGES_UPSERT' di atas.
+  let f4Forwarded = null;
+  await incomingDelivery.deliverOne(f4Row, {
+    postToCI4: async (pathSuffix, body) => { f4Forwarded = body; return { ok: true, status: 200, json: { status: 'success' } }; },
+  });
+  assert.strictEqual(f4Forwarded.quoted.snippet, '[Stiker]', 'snippet ikut terkirim ke CI4 lewat body.quoted');
+  console.log('OK');
+
   section('Webhook: pesan grup tanpa participant dilewati (tetap 200)');
   wres = await post('/evolution/webhook', webhookPayload({ data: { key: { id: 'G1', remoteJid: '123@g.us', fromMe: false } } }), { withAuth: false });
   assert.strictEqual(wres.status, 200);
