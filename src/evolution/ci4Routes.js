@@ -121,6 +121,26 @@ function resolveQuoted(rawQuoted) {
   };
 }
 
+/**
+ * Simpan `{key, message}` pesan KELUAR yang baru terkirim supaya balasan
+ * berikutnya ke pesan itu (kasir membalas pesannya sendiri) tetap bisa
+ * berkutip. Tanpa ini `resolveQuoted()` tidak menemukan pesan keluar dan
+ * kutipan didegradasi (`quote_applied:false`), padahal pesan MASUK selalu
+ * disimpan lewat webhookRoutes.
+ *
+ * `base64` dibuang dari salinan yang disimpan (sama seperti pesan masuk)
+ * supaya tabel kutipan tidak membengkak oleh blob media.
+ */
+function storeOutgoingForQuote(result) {
+  if (!result || !result.messageId || !result.key) return;
+  let message = result.message;
+  if (message && typeof message === 'object' && message.base64) {
+    message = { ...message };
+    delete message.base64;
+  }
+  quotedStore.save(result.messageId, result.key, message || {});
+}
+
 const router = express.Router();
 const jsonSmall = express.json({ limit: '256kb' });
 const jsonMedia = express.json({ limit: config.mediaJsonBodyLimitBytes });
@@ -175,6 +195,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
       quoted,
     });
     if (result.messageId) ownSent.record(result.messageId);
+    storeOutgoingForQuote(result);
     return { ...result, forwardMarkerApplied: forward.requested ? 'text_fallback' : null };
   };
 
@@ -322,6 +343,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       });
     }
     if (result.messageId) ownSent.record(result.messageId);
+    storeOutgoingForQuote(result);
 
     // Evolution TIDAK memberi referensi Baileys (directPath/mediaKey) untuk
     // pesan terkirim, sehingga CI4 tidak punya cara memuat ulang media keluar

@@ -255,6 +255,27 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(stub.sent.length, 1, 'pesan tetap terkirim walau balas didegradasi');
   console.log('OK');
 
+  // Pesan KELUAR juga disimpan ke quotedStore, supaya balasan ke pesan yang
+  // dikirim kasir sendiri (atau lewat POS) tetap berkutip.
+  section('/send quoted: balas pesan KELUAR sendiri -> quote_applied true');
+  resetStub();
+  stub.impl = () => ({
+    messageId: 'EV-OWN-1',
+    timestamp: '2026-10-01T10:00:00.000Z',
+    quoteApplied: false,
+    key: { id: 'EV-OWN-1', remoteJid: CHAT, fromMe: true },
+    message: { conversation: 'pesan saya' },
+  });
+  res = await sendText({ operation_id: 'OP-OWN-1' });
+  assert.strictEqual(res.status, 200);
+  assert.ok(quotedStore.get('EV-OWN-1'), 'pesan keluar disimpan untuk balas');
+  resetStub();
+  res = await sendText({ operation_id: 'OP-OWN-2', quoted: { wa_message_id: 'EV-OWN-1' } });
+  assert.strictEqual(res.body.quote_applied, true, 'balas pesan sendiri kini berkutip');
+  assert.strictEqual(stub.sent[0].quoted.key.fromMe, true);
+  assert.strictEqual(stub.sent[0].quoted.message.conversation, 'pesan saya');
+  console.log('OK');
+
   section('/send-media: validasi + kirim gambar + sticker');
   const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]);
   const imgB64 = Buffer.from('GAMBAR').toString('base64');
