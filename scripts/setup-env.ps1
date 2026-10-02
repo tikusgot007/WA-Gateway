@@ -24,7 +24,14 @@ param(
   [string]$EvolutionDir   = 'D:\evolution-api-server',
   [string]$OldGatewayEnv  = 'D:\WA-Gateway\.env',
   [string]$Ci4BaseUrl     = 'http://AULIA-SERVER2/aulia',
+  # Token CI4 dari parameter installer. Kalau kosong, jatuh ke $OldGatewayEnv
+  # (perilaku aulia3). Di PC baru tidak ada gateway lama, jadi parameter ini
+  # yang dipakai.
+  [string]$Ci4GatewayToken,
   [string]$InstanceName   = 'aulia-toko',
+  # File acuan Evolution .env. Kalau kosong: .env.template bila ada, jika
+  # tidak pakai env.example bawaan sumber Evolution (selalu ada).
+  [string]$EvolutionEnvTemplate,
   [string]$PgHost         = '127.0.0.1',
   [int]   $PgPort         = 5432,
   [string]$PgDatabase     = 'evolution_gateway_pg',
@@ -102,7 +109,12 @@ function Write-Utf8NoBom {
 $adapterEnv   = Join-Path $AdapterDir '.env'
 $adapterEx    = Join-Path $AdapterDir '.env.example'
 $evolutionEnv = Join-Path $EvolutionDir '.env'
-$evolutionTpl = Join-Path $EvolutionDir '.env.template'
+$evolutionTpl = $EvolutionEnvTemplate
+if (-not $evolutionTpl) {
+  $tplCandidate = Join-Path $EvolutionDir '.env.template'
+  if (Test-Path -LiteralPath $tplCandidate) { $evolutionTpl = $tplCandidate }
+  else { $evolutionTpl = Join-Path $EvolutionDir 'env.example' }
+}
 
 Say '=== SETUP ENV EVOLUTION GATEWAY ===' 'White'
 Say ("computer: " + $env:COMPUTERNAME + " user: " + $env:USERNAME)
@@ -111,13 +123,25 @@ foreach ($ref in @($adapterEx, $evolutionTpl)) {
   if (-not (Test-Path -LiteralPath $ref)) { Say ("GAGAL: file acuan tidak ditemukan: " + $ref) 'Red'; throw "File acuan tidak ditemukan: $ref" }
 }
 
-# Reuse the token already trusted by AuliaPos production.
-$ci4Token = Get-EnvValue -Path $OldGatewayEnv -Key 'CI4_GATEWAY_TOKEN'
-if (-not $ci4Token) {
-  Say ("PERINGATAN: CI4_GATEWAY_TOKEN tidak ada di " + $OldGatewayEnv + ' (dilinteractive saja bila dijalankan manual)') 'Yellow'
+# Token: pakai parameter installer lebih dulu; kalau tidak ada, ambil dari
+# gateway lama (perilaku aulia3). Di PC baru tidak ada gateway lama.
+$ci4Token = $Ci4GatewayToken
+$tokenSource = 'parameter -Ci4GatewayToken'
+if (-not $ci4Token -and $env:CI4_GATEWAY_TOKEN_INPUT) {
+  # Installer mengirim token lewat environment supaya tidak tampil di
+  # command line proses.
+  $ci4Token = $env:CI4_GATEWAY_TOKEN_INPUT.Trim()
+  $tokenSource = 'environment CI4_GATEWAY_TOKEN_INPUT'
 }
-if (-not $ci4Token) { Say 'GAGAL: CI4_GATEWAY_TOKEN kosong.' 'Red'; throw 'CI4_GATEWAY_TOKEN kosong, dibatalkan.' }
-Say ('CI4_GATEWAY_TOKEN: diambil dari .env gateway lama (panjang ' + $ci4Token.Length + ' karakter).')
+if (-not $ci4Token) {
+  $ci4Token = Get-EnvValue -Path $OldGatewayEnv -Key 'CI4_GATEWAY_TOKEN'
+  $tokenSource = ('.env gateway lama ' + $OldGatewayEnv)
+}
+if (-not $ci4Token) {
+  Say ('GAGAL: token CI4 kosong (parameter -Ci4GatewayToken tidak diisi dan ' + $OldGatewayEnv + ' tidak berisi).') 'Red'
+  throw 'CI4_GATEWAY_TOKEN kosong, dibatalkan.'
+}
+Say ('CI4_GATEWAY_TOKEN: diambil dari ' + $tokenSource + ' (panjang ' + $ci4Token.Length + ' karakter).')
 
 $existing = @($adapterEnv, $evolutionEnv) | Where-Object { Test-Path -LiteralPath $_ }
 if ($existing.Count -gt 0 -and -not $Force) {
@@ -151,15 +175,29 @@ $adapterLines = Set-EnvLines -Lines (Get-Content -LiteralPath $adapterEx) -Value
 Write-Utf8NoBom -Path $adapterEnv -Lines $adapterLines
 Say ('adapter .env ditulis  : ' + $adapterEnv)
 
+# Nilai-nilai ini menyamakan Evolution dengan config produksi aulia3 yang
+# sudah terbukti (Redis/websocket/telemetry mati, simpan update pesan).
 $evolutionValues = @{
   'SERVER_PORT'                    = "$EvolutionPort"
   'SERVER_URL'                     = $EvolutionUrl
   'AUTHENTICATION_API_KEY'         = $apiKey
+  'AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES' = 'true'
   'DATABASE_PROVIDER'              = 'postgresql'
   'DATABASE_CONNECTION_URI'        = "'$dbUri'"
   'DATABASE_SAVE_DATA_NEW_MESSAGE' = 'true'
+  'DATABASE_SAVE_MESSAGE_UPDATE'   = 'true'
+  'DATABASE_DELETE_MESSAGE'        = 'true'
+  'DEL_INSTANCE'                   = 'false'
   'CACHE_REDIS_ENABLED'            = 'false'
   'CACHE_LOCAL_ENABLED'            = 'true'
+  'WEBSOCKET_ENABLED'              = 'false'
+  'WEBSOCKET_GLOBAL_EVENTS'        = 'false'
+  'TELEMETRY_ENABLED'              = 'false'
+  'LOG_BAILEYS'                    = 'error'
+  'CONFIG_SESSION_PHONE_CLIENT'    = 'Evolution API'
+  'CONFIG_SESSION_PHONE_NAME'      = 'Chrome'
+  'WEBHOOK_GLOBAL_ENABLED'         = 'false'
+  'QRCODE_LIMIT'                   = '30'
 }
 $evolutionLines = Set-EnvLines -Lines (Get-Content -LiteralPath $evolutionTpl) -Values $evolutionValues
 Write-Utf8NoBom -Path $evolutionEnv -Lines $evolutionLines

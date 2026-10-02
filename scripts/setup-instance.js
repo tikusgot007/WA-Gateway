@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * setup-instance.js -- provisioning Evolution untuk adapter, dijalankan DI aulia3.
+ * setup-instance.js -- provisioning Evolution untuk adapter.
  *
  * Melakukan tiga hal secara idempoten:
  *   1. Membuat instance WhatsApp (jika belum ada) dengan nama dari .env adapter.
@@ -13,7 +13,7 @@
  * lewat Evolution Manager, karena siapa pun yang melihat QR bisa menautkan
  * perangkat ke nomor tersebut.
  *
- * Dijalankan lewat D:\kilo\setup-instance.cmd; log ke D:\kilo\logs\setup-instance.log
+ * Dijalankan dengan cwd = folder adapter; konfigurasi dari .env adapter.
  */
 
 const config = require('../src/config');
@@ -91,7 +91,8 @@ async function main() {
   state = await getState();
   log('state akhir', { state });
   if (state !== 'open') {
-    log('BELUM TERTAUT -- buka Evolution Manager lalu scan QR: http://AULIA3:8080/manager (instance aulia-toko)');
+    const managerUrl = `${BASE.replace(/\/+$/, '')}/manager`;
+    log(`BELUM TERTAUT -- buka Evolution Manager lalu scan QR: ${managerUrl} (instance ${INSTANCE})`);
   }
   log('=== SELESAI ===');
 }
