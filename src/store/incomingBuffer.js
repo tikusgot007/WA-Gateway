@@ -175,11 +175,11 @@ class IncomingBufferSqlite {
     this.insertStmt = this.db.prepare(`
       INSERT OR IGNORE INTO incoming_queue
         (wa_message_id, chat_id, jid_type, contact_name, phone, sender_jid, group_name,
-         message_type, text, media_json, extra_json, identity_hint_json, quoted_json, message_timestamp,
+         message_type, text, media_json, extra_json, identity_hint_json, quoted_json, is_forwarded, message_timestamp,
          direction, status, attempts, next_attempt_at, created_at, updated_at)
       VALUES
         (@wa_message_id, @chat_id, @jid_type, @contact_name, @phone, @sender_jid, @group_name,
-         @message_type, @text, @media_json, @extra_json, @identity_hint_json, @quoted_json, @message_timestamp,
+         @message_type, @text, @media_json, @extra_json, @identity_hint_json, @quoted_json, @is_forwarded, @message_timestamp,
          @direction, 'pending', 0, @next_attempt_at, @now, @now)
     `);
 
@@ -331,6 +331,14 @@ class IncomingBufferSqlite {
       this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN extra_json TEXT`);
       logger.info('[MIGRASI] kolom extra_json ditambahkan ke incoming_queue (database SQLite lama).');
     }
+
+    if (!columnNames.includes('is_forwarded')) {
+      // TODO-F5: INTEGER 0/1, default 0 -- forward MASUK (dari pelanggan,
+      // contextInfo.isForwarded/forwardingScore). NULL/0 untuk pesan biasa
+      // (payload lama tidak berubah -- lihat normalize.js extractForwardFlag()).
+      this.db.exec(`ALTER TABLE incoming_queue ADD COLUMN is_forwarded INTEGER NOT NULL DEFAULT 0`);
+      logger.info('[MIGRASI] kolom is_forwarded ditambahkan ke incoming_queue (database SQLite lama).');
+    }
   }
 
   /**
@@ -376,6 +384,7 @@ class IncomingBufferSqlite {
       extra_json: event.extra ? JSON.stringify(event.extra) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
       quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
+      is_forwarded: event.is_forwarded ? 1 : 0,
       message_timestamp: event.timestamp,
       direction: event.direction === 'outgoing' ? 'outgoing' : 'incoming',
       next_attempt_at: now, // langsung boleh dicoba kirim saat itu juga
@@ -674,6 +683,7 @@ class IncomingBufferJsonFile {
       extra_json: event.extra ? JSON.stringify(event.extra) : null,
       identity_hint_json: event.identityHint ? JSON.stringify(event.identityHint) : null,
       quoted_json: event.quoted ? JSON.stringify(event.quoted) : null,
+      is_forwarded: event.is_forwarded ? 1 : 0,
       message_timestamp: event.timestamp,
       direction: event.direction === 'outgoing' ? 'outgoing' : 'incoming',
       status: 'pending',

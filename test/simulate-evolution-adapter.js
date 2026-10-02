@@ -449,6 +449,63 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(f4Forwarded.quoted.snippet, '[Stiker]', 'snippet ikut terkirim ke CI4 lewat body.quoted');
   console.log('OK');
 
+  section('TODO-F5: forward MASUK (dari pelanggan) ditandai is_forwarded');
+
+  // Kasus NYATA dari payload produksi (evolution.log 2026-10-02 16:41:37 WIB,
+  // chat 628563324637, waMessageId A5159B2E89F09DB93394D45A866ED431):
+  // forward masuk teks polos -- contextInfo.isForwarded/forwardingScore
+  // SEJAJAR message (record.contextInfo), sama seperti kutipan TODO-F4.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: {
+      key: { id: 'F5-FWD-1', remoteJid: PN2, fromMe: false },
+      pushName: 'Muhammad Anshar',
+      message: { conversation: 'ini dari acil Yani, pp kirim duit' },
+      contextInfo: { forwardingScore: 1, isForwarded: true, forwardOrigin: 0 },
+      messageType: 'conversation',
+    },
+  }), { withAuth: false });
+  assert.strictEqual(wres.body.success, true);
+  const f5FwdRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-FWD-1');
+  assert.ok(f5FwdRow, 'forward masuk masuk antrean');
+  assert.strictEqual(f5FwdRow.is_forwarded, 1, 'is_forwarded tersimpan 1 untuk pesan yang benar-benar diteruskan');
+
+  let f5Forwarded = null;
+  await incomingDelivery.deliverOne(f5FwdRow, {
+    postToCI4: async (pathSuffix, body) => { f5Forwarded = body; return { ok: true, status: 200, json: { status: 'success' } }; },
+  });
+  assert.strictEqual(f5Forwarded.is_forwarded, true, 'is_forwarded ikut terkirim ke CI4');
+
+  // Non-regresi: pesan biasa (bukan forward) -- is_forwarded TIDAK dikirim
+  // ke CI4 sama sekali (payload lama tidak berubah bentuk).
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'F5-NORMAL-1', remoteJid: PN2, fromMe: false }, message: { conversation: 'pesan biasa bukan forward' }, messageType: 'conversation' },
+  }), { withAuth: false });
+  const f5NormalRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-NORMAL-1');
+  assert.strictEqual(f5NormalRow.is_forwarded, 0, 'pesan biasa tidak ditandai forwarded');
+  let f5NormalForwarded = null;
+  await incomingDelivery.deliverOne(f5NormalRow, {
+    postToCI4: async (pathSuffix, body) => { f5NormalForwarded = body; return { ok: true, status: 200, json: { status: 'success' } }; },
+  });
+  assert.strictEqual('is_forwarded' in f5NormalForwarded, false, 'field is_forwarded tidak dikirim untuk pesan biasa (payload lama tidak berubah)');
+
+  // forwardingScore saja (tanpa isForwarded eksplisit) -- fallback kompatibilitas.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'F5-SCORE-ONLY', remoteJid: PN2, fromMe: false }, message: { conversation: 'forward versi lama' }, contextInfo: { forwardingScore: 1 }, messageType: 'conversation' },
+  }), { withAuth: false });
+  const f5ScoreOnlyRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-SCORE-ONLY');
+  assert.strictEqual(f5ScoreOnlyRow.is_forwarded, 1, 'forwardingScore>0 tanpa isForwarded tetap terdeteksi (fallback kompatibilitas)');
+
+  // Forward KELUAR tersinkron (fromMe=true) -- DI LUAR cakupan TODO-F5,
+  // TIDAK boleh ditandai is_forwarded oleh jalur ini (jalur keluar sudah
+  // ditangani terpisah oleh kirimKeConversation() di CI4).
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'F5-OUT-1', remoteJid: PN2, fromMe: true }, message: { conversation: 'staf meneruskan dari WA Web' }, contextInfo: { forwardingScore: 1, isForwarded: true }, messageType: 'conversation' },
+  }), { withAuth: false });
+  const f5OutRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-OUT-1');
+  assert.ok(f5OutRow, 'forward keluar tersinkron tetap masuk antrean');
+  assert.strictEqual(f5OutRow.is_forwarded, 0, 'forward KELUAR tersinkron TIDAK ditandai oleh jalur ini (di luar cakupan TODO-F5)');
+  console.log('OK');
+
   section('Webhook: pesan grup tanpa participant dilewati (tetap 200)');
   wres = await post('/evolution/webhook', webhookPayload({ data: { key: { id: 'G1', remoteJid: '123@g.us', fromMe: false } } }), { withAuth: false });
   assert.strictEqual(wres.status, 200);

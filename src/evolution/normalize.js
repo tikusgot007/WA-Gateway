@@ -372,6 +372,27 @@ function extractQuotedContext(record, messageObj) {
   return null;
 }
 
+/**
+ * Forward MASUK (dari pelanggan) -- TODO-F5. Sinyal WhatsApp untuk pesan yang
+ * diteruskan ada di `record.contextInfo`, SEJAJAR `message`, sama seperti
+ * kutipan (lihat `extractQuotedContext()`). TERVERIFIKASI dari payload nyata
+ * produksi (`evolution.log` 2026-10-02 16:41:37 WIB, conv 628563324637,
+ * waMessageId A5159B2E89F09DB93394D45A866ED431, messageType 'conversation'):
+ * `contextInfo: { forwardingScore: 1, isForwarded: true, forwardOrigin: 0 }`.
+ * `isForwarded` dicek lebih dulu (boolean eksplisit); `forwardingScore > 0`
+ * sebagai fallback untuk kompatibilitas versi WhatsApp yang mungkin hanya
+ * mengirim salah satunya (gateway Baileys lama menulis keduanya saat
+ * forward KELUAR, lihat `forwardMarker.js`).
+ * @param {object} record baris pesan Evolution (hasil `pickMessageRecord`)
+ * @returns {boolean}
+ */
+function extractForwardFlag(record) {
+  const ctx = record && record.contextInfo;
+  if (!ctx || typeof ctx !== 'object') return false;
+  if (ctx.isForwarded === true) return true;
+  return Number(ctx.forwardingScore) > 0;
+}
+
 function toIsoTimestamp(messageTimestamp) {
   const n = Number(messageTimestamp);
   if (Number.isFinite(n) && n > 0) {
@@ -459,6 +480,10 @@ function normalizeMessagesUpsert(payload) {
 
   const media = viewOnce ? null : extractMedia(messageObj);
   const quotedContext = viewOnce ? null : extractQuotedContext(record, messageObj);
+  // Forward MASUK -- lingkup TODO-F5 adalah pesan dari pelanggan saja
+  // (fromMe=false); forward KELUAR tersinkron (WA Web/HP, fromMe=true) sudah
+  // ditangani jalur lain (kirimKeConversation di CI4) dan BUKAN cakupan ini.
+  const isForwardedIncoming = !fromMe && !viewOnce ? extractForwardFlag(record) : false;
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
   const senderJid = isGroup ? (key.participant || null) : (fromMe ? null : remoteJid);
@@ -480,6 +505,10 @@ function normalizeMessagesUpsert(payload) {
     extra: extra || null, // Tahap 4: data terstruktur untuk location/contact
     timestamp: toIsoTimestamp(record.messageTimestamp),
     direction: fromMe ? 'outgoing' : 'incoming',
+    // TODO-F5: boolean eksplisit di objek event internal; caller (buffer/
+    // delivery) yang memutuskan field ini hanya DIPERSIST/DIKIRIM bila true
+    // (pola aditif sama dengan quoted/extra -- payload pesan biasa tidak berubah).
+    is_forwarded: isForwardedIncoming,
     quoted: quotedContext ? {
       wa_message_id: quotedContext.stanzaId,
       sender_jid: quotedContext.participant || null,
@@ -518,6 +547,7 @@ module.exports = {
   unsupportedLabel,
   extractExtra,
   extractQuotedContext,
+  extractForwardFlag,
   buildQuotedSnippet,
   noiseReason,
   toIsoTimestamp,

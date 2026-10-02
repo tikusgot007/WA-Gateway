@@ -69,6 +69,12 @@ async function deliverOne(event, dependencies = {}) {
     body.extra = JSON.parse(event.extra_json);
   }
 
+  // TODO-F5: forward MASUK hanya dikirim bila benar -- payload pesan biasa
+  // (bukan forward) TIDAK berubah (field `is_forwarded` tidak dikirim).
+  if (event.is_forwarded) {
+    body.is_forwarded = true;
+  }
+
   const result = await post('/api/inbox/gateway/messages', body);
 
   if (result.ok) {

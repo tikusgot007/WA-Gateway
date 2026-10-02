@@ -3,6 +3,39 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-02 — TODO-F5: pesan masuk yang diteruskan pelanggan kini ditandai
+
+**Status**: terverifikasi lewat tes regresi (`npm test`); belum diuji ulang
+dengan kiriman nyata pasca-fix.
+
+- Akar: adapter tidak pernah membaca sinyal "diteruskan" dari webhook
+  WhatsApp, dan rantai transport masuk (adapter -> buffer SQLite -> POST ->
+  CI4) tidak punya tempat untuk field itu. Akibatnya kolom
+  `messages.is_forwarded` di `aulia_inboxdb` selalu `0` untuk pesan MASUK.
+  Fitur "Teruskan" untuk pesan KELUAR sudah lengkap di CI4; gap murni di sisi
+  masuk. Lihat `docs/TODO.md` AuliaPos (TODO-F5).
+- Sampel nyata (prasyarat investigasi, `evolution.log` 2026-10-02 16:41:37
+  WIB, chat 628563324637, `messageType: 'conversation'`):
+  `contextInfo: { forwardingScore: 1, isForwarded: true, forwardOrigin: 0 }`,
+  SEJAJAR `message` di level `record` -- sama seperti posisi `stanzaId`
+  kutipan (TODO-F4).
+- Perbaikan (semua aditif, payload pesan biasa tidak berubah bentuk):
+  - `src/evolution/normalize.js` `extractForwardFlag()`: baca
+    `record.contextInfo.isForwarded === true` (utama) atau
+    `forwardingScore > 0` (fallback kompatibilitas). Hanya berlaku untuk
+    pesan MASUK (`fromMe=false`) -- forward KELUAR tersinkron di luar cakupan.
+  - `src/store/incomingBuffer.js`: kolom `is_forwarded INTEGER NOT NULL
+    DEFAULT 0` (migrasi `ALTER TABLE` idempoten), diisi di `enqueue()`.
+  - `src/delivery/incomingDelivery.js`: kirim `is_forwarded: true` HANYA bila
+    benar (pola sama dengan `quoted`/`extra`).
+  - CI4 `InboxGatewayApi::messages()` membaca & menyimpan field opsional itu ke
+    kolom `messages.is_forwarded` yang SUDAH ADA (reuse, tanpa migrasi baru);
+    UI "Diteruskan" sudah membacanya. Perubahan CI4 terpisah (repo aulia-app).
+- Tes baru di `test/simulate-evolution-adapter.js` (section "TODO-F5"):
+  forward masuk ditandai, pesan biasa tidak membawa field, fallback
+  `forwardingScore` saja, dan forward KELUAR tersinkron TIDAK ikut ditandai.
+
+
 ## 2026-10-02 — TODO-F4: kutipan balasan masuk hilang untuk balasan teks polos
 
 **Status**: terverifikasi lewat tes regresi (`npm test`); belum diuji ulang
