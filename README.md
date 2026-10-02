@@ -14,6 +14,8 @@ Rencana eksekusi lengkap (termasuk keputusan desain, risiko, dan status
 verifikasi) ada di `plan/2026-10-01-evolution-gateway-adapter.md` pada repo
 `aulia-app`.
 
+Backlog lintas-repo: `aulia-app/docs/TODO.md`.
+
 ## Status implementasi
 
 - ✅ **Tahap 1** (skeleton + kontrak CI4 + test assert-based) — **selesai**,
