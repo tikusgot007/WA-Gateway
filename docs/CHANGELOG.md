@@ -3,6 +3,27 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-03 — TODO-O3: rotasi log otomatis saat boot + prune arsip
+
+**Status**: logika rotate/prune/gzip terverifikasi lokal (folder temp); belum
+dijalankan di aulia3.
+
+- Akar: `adapter.log` & `evolution.log` ditulis proses lewat `>>` (file dipegang
+  selama proses hidup) tanpa rotasi apa pun → tumbuh tanpa batas (~49 MB/tahun
+  dan ~620 MB/tahun). Tidak ada task terjadwal untuk merawat log.
+- Perbaikan:
+  - `scripts/rotate-logs.ps1` (baru): pindahkan log non-kosong ke
+    `logs\arsip\<nama>_<stamp>.log` (+gzip) lalu buat file kosong baru; prune
+    arsip lebih tua dari `KeepDays` (default 180 hari). Mode tanpa `-LogName`
+    hanya prune (tidak menyentuh log hidup).
+  - `run-adapter.cmd` / `run-evolution.cmd`: panggil rotate SEBELUM node start
+    (saat file belum dipegang) → karena PC gateway mati tiap malam, tiap boot
+    menghasilkan rotasi praktis harian tanpa downtime tambahan.
+  - `register-services.ps1`: task baru `AuliaLogRotate` (harian 09:00, SYSTEM)
+    menjalankan prune arsip.
+- Catatan: rotasi live saat proses hidup TIDAK mungkin di Windows (file
+  dipegang), karena itu pendekatannya rotasi-saat-boot.
+
 ## 2026-10-03 — TODO-O2: aktifkan retensi (media, kutipan, antrean completed)
 
 **Status**: terverifikasi lewat tes regresi (`npm test`, termasuk

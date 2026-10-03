@@ -17,5 +17,7 @@ timeout /t 2 /nobreak >nul
 goto waitpg
 :ready
 cd /d D:\evolution-api-server || exit /b 1
+rem Rotasi log lama sebelum node memegang handle-nya.
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\evolution-gateway\scripts\rotate-logs.ps1 -LogName evolution.log
 "D:\node\node.exe" node_modules\tsx\dist\cli.mjs src\main.ts >> D:\kilo\logs\evolution.log 2>&1
 endlocal
