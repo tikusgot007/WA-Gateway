@@ -76,18 +76,36 @@ async function refreshStateFromEvolution() {
   // (404). Kalau itu dihitung sukses, penghitung kegagalan tidak pernah jalan
   // dan status optimistis 'connected' bertahan selamanya (badge "Terhubung"
   // padahal Evolution menolak) -- justru laporan palsu yang mau dihilangkan.
-  if (!evolutionState.mapEvolutionState(rawState)) {
+  const status = evolutionState.mapEvolutionState(rawState);
+  if (!status) {
     notePollFailure('state tidak dikenal: ' + JSON.stringify(rawState));
     return;
   }
 
   pollFailures = 0;
 
-  // Pertahankan nomor yang sudah diketahui: endpoint connectionState hanya
-  // mengembalikan state, bukan nomor.
-  evolutionState.setConnectionState(rawState, {
-    phone: evolutionState.getSnapshot().connectedNumber,
-  });
+  let phone = evolutionState.getSnapshot().connectedNumber;
+
+  // TODO-F2: nomor di memori cuma terisi dari webhook CONNECTION_UPDATE,
+  // yang TIDAK dikirim ulang Evolution kalau state tidak berubah --
+  // setelah adapter restart dengan sesi yang sudah connected sebelumnya,
+  // nomor jadi tidak pernah terisi. Backfill SEKALI dari Evolution sendiri
+  // (bukan tiap siklus 15 detik) hanya saat belum ada nomor di memori DAN
+  // instance memang connected -- kalau gagal, tetap kirim tanpa nomor
+  // seperti perilaku lama (bukan regresi).
+  if (!phone && status === 'connected') {
+    try {
+      phone = await evolutionClient.getInstancePhone(config.evolution.statusPollTimeoutMs);
+    } catch (err) {
+      // getInstancePhone() sendiri sudah menangani kegagalannya sendiri
+      // (lihat komentar di client.js) dan tidak seharusnya throw -- try/catch
+      // ini cuma pengaman kedua, supaya kegagalan tak terduga di sini tidak
+      // pernah menggagalkan heartbeat (status koneksi tetap harus terkirim).
+      phone = null;
+    }
+  }
+
+  evolutionState.setConnectionState(rawState, { phone });
 }
 
 async function sendHeartbeat() {
