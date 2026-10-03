@@ -3,6 +3,27 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-03 — TODO-F6: forward KELUAR tersinkron dari WA Web/HP kini ditandai "Diteruskan"
+
+- Akar: `normalize.js` `extractForwardFlag()` sudah bisa membaca
+  `contextInfo.isForwarded`/`forwardingScore` untuk arah mana pun, tapi
+  dibatasi `!fromMe` -- jadi staf yang meneruskan pesan langsung dari WA
+  Web/HP (bukan lewat tombol "Teruskan" POS) tidak pernah ditandai
+  `is_forwarded`. Bukti payload nyata: `evolution.log` 2026-10-02 baris
+  7925-7969 (`fromMe:true` + `forwardingScore:1`).
+- Perbaikan: buang batas `!fromMe` di `normalize.js` (variabel
+  `isForwardedIncoming` -> `isForwarded`, sekarang dihitung untuk kedua
+  arah). Tidak ada perubahan kontrak CI4 -- `is_forwarded` tetap field
+  opsional yang sama di `POST /api/inbox/gateway/messages`.
+- Tidak terdampak: forward lewat tombol "Teruskan" POS tetap ditandai dari
+  jalur CI4-nya sendiri (`kirimKeConversation()` di `Inbox.php`, repo
+  AuliaPos) -- itu jalur terpisah, tidak lewat webhook adapter ini. Echo
+  pesan kiriman adapter sendiri tetap difilter `ownSentRegistry` sebelum
+  sampai ke pengecekan forward, jadi tidak ada penandaan dobel.
+- Belum diverifikasi: bentuk `contextInfo` pada forward KELUAR tersinkron di
+  instance Evolution nyata (stub test memakai bentuk yang sama dengan
+  payload masuk TODO-F5, yang sudah terverifikasi nyata).
+
 ## 2026-10-03 — TODO-O1: backup terjadwal (PostgreSQL + SQLite + media + .env)
 
 **Status**: helper SQLite terverifikasi lokal; backup penuh belum dijalankan di aulia3.

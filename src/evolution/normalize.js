@@ -480,10 +480,12 @@ function normalizeMessagesUpsert(payload) {
 
   const media = viewOnce ? null : extractMedia(messageObj);
   const quotedContext = viewOnce ? null : extractQuotedContext(record, messageObj);
-  // Forward MASUK -- lingkup TODO-F5 adalah pesan dari pelanggan saja
-  // (fromMe=false); forward KELUAR tersinkron (WA Web/HP, fromMe=true) sudah
-  // ditangani jalur lain (kirimKeConversation di CI4) dan BUKAN cakupan ini.
-  const isForwardedIncoming = !fromMe && !viewOnce ? extractForwardFlag(record) : false;
+  // TODO-F5 (masuk, fromMe=false) + TODO-F6 (keluar tersinkron dari WA
+  // Web/HP, fromMe=true): keduanya memakai contextInfo yang SAMA
+  // (extractForwardFlag()), jadi tidak ada lagi batas `!fromMe`. Forward
+  // keluar lewat tombol "Teruskan" POS (kirimKeConversation di CI4) tetap
+  // tidak terpengaruh -- itu jalur CI4 yang berbeda, tidak lewat sini.
+  const isForwarded = !viewOnce ? extractForwardFlag(record) : false;
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
   const senderJid = isGroup ? (key.participant || null) : (fromMe ? null : remoteJid);
@@ -505,10 +507,11 @@ function normalizeMessagesUpsert(payload) {
     extra: extra || null, // Tahap 4: data terstruktur untuk location/contact
     timestamp: toIsoTimestamp(record.messageTimestamp),
     direction: fromMe ? 'outgoing' : 'incoming',
-    // TODO-F5: boolean eksplisit di objek event internal; caller (buffer/
-    // delivery) yang memutuskan field ini hanya DIPERSIST/DIKIRIM bila true
-    // (pola aditif sama dengan quoted/extra -- payload pesan biasa tidak berubah).
-    is_forwarded: isForwardedIncoming,
+    // TODO-F5/TODO-F6: boolean eksplisit di objek event internal, arah apa
+    // pun; caller (buffer/delivery) yang memutuskan field ini hanya
+    // DIPERSIST/DIKIRIM bila true (pola aditif sama dengan quoted/extra --
+    // payload pesan biasa tidak berubah).
+    is_forwarded: isForwarded,
     quoted: quotedContext ? {
       wa_message_id: quotedContext.stanzaId,
       sender_jid: quotedContext.participant || null,
