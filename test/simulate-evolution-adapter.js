@@ -9,6 +9,7 @@
  *   - forward -> prefix teks,
  *   - quoted -> memakai quotedStore (key+message),
  *   - webhook Evolution -> buffer durable (idempoten) -> diteruskan ke CI4,
+ *   - webhook forward (masuk dan keluar tersinkron dari WA Web/HP) -> is_forwarded,
  *   - filter echo pesan kiriman sendiri,
  *   - tipe tak didukung -> penanda teks (bukan dead), pembungkus dokumen-
  *     berjudul/ephemeral/diedit dibuka, view-once -> penanda tanpa media, dan
@@ -470,7 +471,7 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(f4Forwarded.quoted.snippet, '[Stiker]', 'snippet ikut terkirim ke CI4 lewat body.quoted');
   console.log('OK');
 
-  section('TODO-F5: forward MASUK (dari pelanggan) ditandai is_forwarded');
+  section('TODO-F5/TODO-F6: forward (masuk DAN keluar tersinkron) ditandai is_forwarded');
 
   // Kasus NYATA dari payload produksi (evolution.log 2026-10-02 16:41:37 WIB,
   // chat 628563324637, waMessageId A5159B2E89F09DB93394D45A866ED431):
@@ -516,15 +517,35 @@ function webhookPayload(overrides = {}) {
   const f5ScoreOnlyRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-SCORE-ONLY');
   assert.strictEqual(f5ScoreOnlyRow.is_forwarded, 1, 'forwardingScore>0 tanpa isForwarded tetap terdeteksi (fallback kompatibilitas)');
 
-  // Forward KELUAR tersinkron (fromMe=true) -- DI LUAR cakupan TODO-F5,
-  // TIDAK boleh ditandai is_forwarded oleh jalur ini (jalur keluar sudah
-  // ditangani terpisah oleh kirimKeConversation() di CI4).
+  // TODO-F6: forward KELUAR tersinkron dari WA Web/HP (fromMe=true, BUKAN
+  // lewat tombol "Teruskan" POS -- itu jalur CI4 kirimKeConversation() yang
+  // berbeda, tidak lewat webhook) KINI ditandai juga -- payload nyata
+  // evolution.log 2026-10-02 baris 7925-7969: fromMe:true + forwardingScore:1.
   wres = await post('/evolution/webhook', webhookPayload({
-    data: { key: { id: 'F5-OUT-1', remoteJid: PN2, fromMe: true }, message: { conversation: 'staf meneruskan dari WA Web' }, contextInfo: { forwardingScore: 1, isForwarded: true }, messageType: 'conversation' },
+    data: { key: { id: 'F6-OUT-1', remoteJid: PN2, fromMe: true }, message: { conversation: 'staf meneruskan dari WA Web' }, contextInfo: { forwardingScore: 1, isForwarded: true }, messageType: 'conversation' },
   }), { withAuth: false });
-  const f5OutRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F5-OUT-1');
-  assert.ok(f5OutRow, 'forward keluar tersinkron tetap masuk antrean');
-  assert.strictEqual(f5OutRow.is_forwarded, 0, 'forward KELUAR tersinkron TIDAK ditandai oleh jalur ini (di luar cakupan TODO-F5)');
+  const f6OutRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F6-OUT-1');
+  assert.ok(f6OutRow, 'forward keluar tersinkron tetap masuk antrean');
+  assert.strictEqual(f6OutRow.is_forwarded, 1, 'forward KELUAR tersinkron (fromMe:true) kini ditandai is_forwarded (TODO-F6)');
+  let f6OutForwarded = null;
+  await incomingDelivery.deliverOne(f6OutRow, {
+    postToCI4: async (pathSuffix, body) => { f6OutForwarded = body; return { ok: true, status: 200, json: { status: 'success' } }; },
+  });
+  assert.strictEqual(f6OutForwarded.is_forwarded, true, 'is_forwarded ikut terkirim ke CI4 untuk forward keluar tersinkron');
+
+  // Non-regresi TODO-F6: pesan KELUAR tersinkron biasa (bukan forward,
+  // bukan echo kiriman adapter) -- is_forwarded TETAP tidak ditandai/dikirim.
+  wres = await post('/evolution/webhook', webhookPayload({
+    data: { key: { id: 'F6-OUT-NORMAL-1', remoteJid: PN2, fromMe: true }, message: { conversation: 'balasan staf biasa dari HP, bukan forward' }, messageType: 'conversation' },
+  }), { withAuth: false });
+  const f6OutNormalRow = incomingBuffer.getDueEvents(500).find((e) => e.wa_message_id === 'F6-OUT-NORMAL-1');
+  assert.ok(f6OutNormalRow, 'pesan keluar tersinkron biasa tetap masuk antrean');
+  assert.strictEqual(f6OutNormalRow.is_forwarded, 0, 'pesan KELUAR biasa (bukan forward) tidak ditandai forwarded');
+  let f6OutNormalForwarded = null;
+  await incomingDelivery.deliverOne(f6OutNormalRow, {
+    postToCI4: async (pathSuffix, body) => { f6OutNormalForwarded = body; return { ok: true, status: 200, json: { status: 'success' } }; },
+  });
+  assert.strictEqual('is_forwarded' in f6OutNormalForwarded, false, 'field is_forwarded tidak dikirim untuk pesan keluar biasa (payload lama tidak berubah)');
   console.log('OK');
 
   section('Webhook: pesan grup tanpa participant dilewati (tetap 200)');
