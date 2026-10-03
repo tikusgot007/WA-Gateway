@@ -1,6 +1,7 @@
 'use strict';
 
 const config = require('../config');
+const { jidToPhone } = require('./jid');
 
 /**
  * Klien REST Evolution API (v2.3.7) untuk adapter.
@@ -222,6 +223,50 @@ async function getConnectionState(timeoutMs) {
 }
 
 /**
+ * GET /instance/fetchInstances?instanceName={instance} -- `number`/`ownerJid`
+ * instance ini, dipakai heartbeat.js untuk mengisi ulang nomor yang hilang
+ * dari memori setelah adapter restart (TODO-F2): `getConnectionState()` di
+ * atas TIDAK mengembalikan nomor, hanya `state`, dan nomor di memori
+ * (`evolution/state.js`) cuma terisi dari webhook CONNECTION_UPDATE, yang
+ * TIDAK dikirim ulang Evolution kalau state tidak berubah sejak restart.
+ *
+ * BELUM DIVERIFIKASI ke instance Evolution nyata (v2.3.7) -- bentuk respons
+ * di sini diambil dari dokumentasi publik Evolution API, bukan source code
+ * resmi seperti fungsi lain di file ini. WAJIB dicek manual ke instance
+ * sungguhan sebelum dianggap final (lihat catatan di atas file ini).
+ *
+ * Gagal/bentuk tak terduga -> null, TIDAK throw -- dipanggil dari siklus
+ * heartbeat, kegagalan di sini tidak boleh menggagalkan heartbeat itu
+ * sendiri (sama seperti pola getConnectionState()).
+ * @returns {Promise<string|null>} nomor polos (digit saja) atau null.
+ */
+async function getInstancePhone(timeoutMs) {
+  if (!isConfigured()) return null;
+
+  let res;
+  try {
+    res = await withTimeout((signal) => fetch(
+      `${config.evolution.baseUrl}/instance/fetchInstances?instanceName=${encodeURIComponent(config.evolution.instance)}`,
+      { method: 'GET', headers: { apikey: config.evolution.apiKey }, signal }
+    ), timeoutMs);
+  } catch (err) {
+    return null;
+  }
+
+  const { json } = await parseJsonSafely(res);
+  if (!json) return null;
+
+  // Bentuk respons bisa array (daftar instance) atau objek tunggal --
+  // ditangani keduanya karena belum diverifikasi ke instance nyata (lihat
+  // komentar di atas).
+  const entry = Array.isArray(json) ? json[0] : json;
+  if (!entry || typeof entry !== 'object') return null;
+
+  const nomor = entry.number || jidToPhone(entry.ownerJid);
+  return nomor ? String(nomor).replace(/[^0-9]/g, '') || null : null;
+}
+
+/**
  * GET /group/findGroupInfos/{instance}?groupJid=<jid> -- subject grup +
  * daftar peserta. `participants[].phoneNumber` dipakai memetakan identitas
  * LID peserta -> JID nomor (WhatsApp kini banyak memakai `@lid`).
@@ -342,6 +387,7 @@ module.exports = {
   sendMedia,
   sendSticker,
   getConnectionState,
+  getInstancePhone,
   getGroupInfo,
   setWebhook,
   getMediaBase64,

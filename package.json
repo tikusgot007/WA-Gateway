@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/app/evolution.js",
     "dev": "node --watch src/app/evolution.js",
-    "test": "node test/simulate-evolution-adapter.js && node test/simulate-evolution-boot.js",
+    "test": "node test/simulate-evolution-adapter.js && node test/simulate-evolution-phone-backfill.js && node test/simulate-evolution-boot.js",
     "webhook:set": "node scripts/set-webhook.js",
     "webhook:info": "node scripts/webhook-info.js"
   },
