@@ -3,6 +3,25 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-03 — insiden ops: Avast aulia3 mengarantina script gateway
+
+- Gejala: adapter (port 3000) mati tanpa error di `adapter.log`; file
+  `scripts\run-adapter.cmd`, `scripts\watchdog-stack.ps1`,
+  `scripts\backup-stack.ps1` **hilang** dan tak bisa ditulis ulang
+  ("Access denied"); task `AuliaAdapter`/`AuliaStackWatchdog`/`AuliaBackup`
+  ikut lenyap -> tak ada auto-heal.
+- Penyebab: **Avast Antivirus** di aulia3 mengarantina script yang menjalankan node.
+- Tindakan: tambahkan pengecualian Avast (**Exceptions** + **Ransomware Shield
+  allowed folder**) untuk `D:\evolution-gateway` (opsional: `D:\kilo`, `D:\node`,
+  `D:\evolution-api-server`). Setelah exclusion, nama standar dipulihkan dan task
+  didaftarkan ulang.
+- **Penting**: exclusion Avast **tidak bisa diatur via remote/CLI** (Avast Free
+  tak punya `ashCmd`; setelan hanya lewat UI). Wajib RDP/UI aulia3.
+- Pemulihan sementara saat insiden: runner nama alternatif (`run-adapter2.cmd`
+  dll.) karena nama lama diblokir Avast; file `*2` dihapus setelah exclusion.
+- Verifikasi pasca: `D:\evolution-gateway\scripts\*` tetap ada, task lengkap,
+  port 3000 listen, Evolution `open`.
+
 ## 2026-10-03 — TODO-O1: backup terjadwal (PostgreSQL + SQLite + media + .env)
 
 **Status**: helper SQLite terverifikasi lokal; backup penuh belum dijalankan di aulia3.
