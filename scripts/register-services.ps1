@@ -12,6 +12,7 @@
     AuliaAdapter       : run-adapter.cmd    (AtStartup, SYSTEM)
     AuliaStackWatchdog : watchdog-stack.ps1 (AtStartup + tiap 5 menit, SYSTEM)
     AuliaLogRotate     : rotate-logs.ps1    (harian 09:00, prune arsip, SYSTEM)
+    AuliaBackup        : backup-stack.ps1   (harian 20:00, backup, SYSTEM)
 
   Hanya cmdlet + schtasks (tanpa socket mentah). Output: D:\kilo\register-services.log
 #>
@@ -67,6 +68,17 @@ function Register-LogRotate {
   L ("  $TaskName didaftarkan (harian 09:00, prune arsip, SYSTEM)")
 }
 
+function Register-Backup {
+  param([string]$TaskName, [string]$ScriptPath)
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+    -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $ScriptPath + '"')
+  $trigger = New-ScheduledTaskTrigger -Daily -At '20:00'
+  $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Principal $principal -Settings (New-AppSettings) -Force | Out-Null
+  L ("  $TaskName didaftarkan (harian 20:00, backup, SYSTEM)")
+}
+
 try {
   L '=== REGISTER SERVICES + WATCHDOG ==='
   L ('computer: ' + $env:COMPUTERNAME)
@@ -75,9 +87,10 @@ try {
   Register-AppTask -TaskName 'AuliaAdapter'   -CmdFile 'D:\evolution-gateway\scripts\run-adapter.cmd'   -WorkDir 'D:\evolution-gateway'
   Register-Watchdog -TaskName 'AuliaStackWatchdog' -ScriptPath 'D:\evolution-gateway\scripts\watchdog-stack.ps1'
   Register-LogRotate -TaskName 'AuliaLogRotate' -ScriptPath 'D:\evolution-gateway\scripts\rotate-logs.ps1'
+  Register-Backup -TaskName 'AuliaBackup' -ScriptPath 'D:\evolution-gateway\scripts\backup-stack.ps1'
 
   L '--- verifikasi task ---'
-  foreach ($n in @('AuliaEvolution', 'AuliaAdapter', 'AuliaStackWatchdog', 'AuliaLogRotate')) {
+  foreach ($n in @('AuliaEvolution', 'AuliaAdapter', 'AuliaStackWatchdog', 'AuliaLogRotate', 'AuliaBackup')) {
     $t = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
     if (-not $t) { L ("  $n : TIDAK ADA"); continue }
     $trg = ($t.Triggers | ForEach-Object { $_.CimClass.CimClassName }) -join ','

@@ -3,6 +3,24 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-03 — TODO-O1: backup terjadwal (PostgreSQL + SQLite + media + .env)
+
+**Status**: helper SQLite terverifikasi lokal; backup penuh belum dijalankan di aulia3.
+
+- Akar: belum ada backup terjadwal untuk PostgreSQL Evolution, SQLite antrean,
+  `data/media`, dan `.env`.
+- Perbaikan:
+  - `scripts/backup-sqlite.js` (baru): backup SQLite ONLINE via
+    `better-sqlite3 db.backup()` (aman saat adapter hidup).
+  - `scripts/backup-stack.ps1` (baru): `pg_dump -Fc` (kredensial dibaca dari
+    `DATABASE_CONNECTION_URI` env Evolution), backup SQLite, zip `media`, zip
+    `.env` (rahasia) ke `D:\backup\aulia3\`; retensi 30 hari; log
+    `D:\kilo\backup.log`; fail-soft, exit 1 bila ada bagian gagal.
+  - `register-services.ps1`: task baru `AuliaBackup` (harian 20:00, SYSTEM,
+    StartWhenAvailable).
+- Catatan: backup berada di disk yang SAMA (D: aulia3) -- belum melindungi dari
+  kerusakan disk; salin ke share bisa ditambah kemudian.
+
 ## 2026-10-03 — TODO-O3: rotasi log otomatis saat boot + prune arsip
 
 **Status**: logika rotate/prune/gzip terverifikasi lokal (folder temp); belum
