@@ -237,6 +237,12 @@ class IncomingBufferSqlite {
       SELECT COUNT(*) AS n FROM incoming_queue WHERE status IN ('pending', 'failed')
     `);
 
+    // TODO-O2: hanya baris `completed` yang dipangkas; `pending`/`failed`/
+    // `dead` tidak boleh disentuh supaya retry & dead-letter tetap utuh.
+    this.pruneCompletedStmt = this.db.prepare(`
+      DELETE FROM incoming_queue WHERE status = 'completed' AND updated_at < @cutoff
+    `);
+
     logger.info('SQLite incoming buffer siap', {
       path: dbPath,
       pendingSaatStartup: this.countPending(),
@@ -478,6 +484,18 @@ class IncomingBufferSqlite {
 
   countPending() {
     return this.countPendingStmt.get().n;
+  }
+
+  /**
+   * TODO-O2: buang baris `completed` yang lebih tua dari retensi supaya
+   * tabel tidak tumbuh tanpa batas. Padanan prune internal fallback JSON.
+   * Status `pending`/`failed`/`dead` tidak pernah disentuh.
+   *
+   * @returns {number} jumlah baris dihapus.
+   */
+  pruneCompleted(olderThanMs) {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    return this.pruneCompletedStmt.run({ cutoff }).changes;
   }
 
   close() {
@@ -795,6 +813,24 @@ class IncomingBufferJsonFile {
 
   countPending() {
     return this.rows.filter((row) => row.status === 'pending' || row.status === 'failed').length;
+  }
+
+  /**
+   * TODO-O2: buang baris `completed` tua; `pending`/`failed`/`dead` tetap.
+   * Hanya menulis ulang file kalau memang ada yang dibuang.
+   *
+   * @returns {number} jumlah baris dihapus.
+   */
+  pruneCompleted(olderThanMs) {
+    const cutoff = Date.now() - olderThanMs;
+    const before = this.rows.length;
+    this.rows = this.rows.filter((row) => {
+      if (row.status !== 'completed') return true;
+      return new Date(row.updated_at).getTime() >= cutoff;
+    });
+    const removed = before - this.rows.length;
+    if (removed > 0) this._persist();
+    return removed;
   }
 
   close() {

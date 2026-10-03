@@ -7,6 +7,8 @@ const incomingDelivery = require('../delivery/incomingDelivery');
 const evolutionHeartbeat = require('../evolution/heartbeat');
 const incomingBuffer = require('../store/incomingBuffer');
 const outgoingOperationService = require('../delivery/outgoingOperationService');
+const mediaStore = require('../evolution/mediaStore');
+const quotedStore = require('../evolution/quotedStore');
 
 /**
  * Entry point ADAPTER EVOLUTION. Jalankan: npm start (atau node src/app/evolution.js).
@@ -17,6 +19,39 @@ const outgoingOperationService = require('../delivery/outgoingOperationService')
  * durable + worker delivery ke CI4 (src/store, src/delivery) dan kontrak
  * HTTP CI4 yang sama.
  */
+/**
+ * TODO-O2: jalankan retensi yang sudah ada tapi sebelumnya tak pernah
+ * dipanggil -- media (MEDIA_RETENTION_DAYS), kutipan (QUOTED_STORE_TTL_MS),
+ * dan baris `completed` di incoming_queue (INCOMING_QUEUE_RETENTION_DAYS).
+ * Semua fail-soft: kegagalan prune dicatat, TIDAK menghalangi start.
+ */
+function runMaintenancePrune() {
+  try {
+    const media = mediaStore.prune();
+    if (media > 0) logger.info('[MAINTENANCE] media dipangkas', { removed: media });
+  } catch (err) {
+    logger.error('[MAINTENANCE] gagal memangkas media', { error: err.message });
+  }
+
+  try {
+    const quoted = quotedStore.prune();
+    if (quoted > 0) logger.info('[MAINTENANCE] kutipan dipangkas', { removed: quoted });
+  } catch (err) {
+    logger.error('[MAINTENANCE] gagal memangkas kutipan', { error: err.message });
+  }
+
+  try {
+    const completed = incomingBuffer.pruneCompleted(
+      config.incomingQueueRetentionDays * 24 * 3600 * 1000
+    );
+    if (completed > 0) logger.info('[MAINTENANCE] antrean completed dipangkas', { removed: completed });
+  } catch (err) {
+    logger.error('[MAINTENANCE] gagal memangkas antrean completed', { error: err.message });
+  }
+}
+
+const MAINTENANCE_INTERVAL_MS = 24 * 3600 * 1000;
+
 async function main() {
   logger.info('[EVOLUTION] adapter starting', {
     host: config.host,
@@ -39,6 +74,8 @@ async function main() {
 
   incomingBuffer.logDeadLetterStartup();
   outgoingOperationService.runStartupRecovery();
+  runMaintenancePrune();
+  setInterval(runMaintenancePrune, MAINTENANCE_INTERVAL_MS).unref();
 
   const shutdown = (signal) => {
     logger.info(`[EVOLUTION] menerima ${signal}, shutting down...`);

@@ -149,7 +149,16 @@ const config = {
   //               yang memberi jaminan "kasir selalu tahu" untuk berkas besar.
   mediaMode: (process.env.EVOLUTION_MEDIA_MODE || 'base64').trim().toLowerCase(),
   mediaStoreDir: path.resolve(process.cwd(), process.env.MEDIA_STORE_DIR || './data/media'),
-  mediaRetentionDays: Math.max(1, toInt(process.env.MEDIA_RETENTION_DAYS, 7)),
+  // TODO-O2 keputusan user 2026-10-03: retensi media PANJANG (default 180
+  // hari, bukan 7). Media store gateway adalah fallback live-fetch kalau
+  // prefetch POS gagal, jadi memangkasnya terlalu cepat bisa membuat media
+  // lama tak bisa diunduh.
+  mediaRetentionDays: Math.max(1, toInt(process.env.MEDIA_RETENTION_DAYS, 180)),
+
+  // TODO-O2: batas umur baris `completed` di tabel incoming_queue (SQLite)
+  // supaya tabel tidak tumbuh tanpa batas. Fallback JSON sudah memangkas
+  // completed >30 hari sendiri (_persist); ini menyamakannya untuk SQLite.
+  incomingQueueRetentionDays: Math.max(1, toInt(process.env.INCOMING_QUEUE_RETENTION_DAYS, 30)),
 
   // Batas ukuran media MASUK. Berkas di atas ini tidak diunduh/disimpan --
   // adapter mengirim baris penanda teks supaya pesannya tidak hilang tanpa

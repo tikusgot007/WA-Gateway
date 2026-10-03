@@ -3,6 +3,29 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-03 — TODO-O2: aktifkan retensi (media, kutipan, antrean completed)
+
+**Status**: terverifikasi lewat tes regresi (`npm test`, termasuk
+`test/simulate-maintenance.js`); belum diuji dengan data produksi nyata.
+
+- Akar: `mediaStore.prune()` (`src/evolution/mediaStore.js:90`) dan
+  `quotedStore.prune()` (`src/evolution/quotedStore.js:80`) sudah ada tapi
+  TIDAK PERNAH dipanggil, sehingga `MEDIA_RETENTION_DAYS` & `QUOTED_STORE_TTL_MS`
+  tak berefek. Tabel SQLite `incoming_queue` juga tak punya prune untuk baris
+  `completed` (hanya fallback JSON yang membuang completed >30 hari).
+- Perbaikan:
+  - `src/store/incomingBuffer.js`: `pruneCompleted(olderThanMs)` di kedua
+    implementasi (SQLite `DELETE ... WHERE status='completed' AND updated_at <
+    cutoff`; JSON filter + `_persist()`). `pending`/`failed`/`dead` tidak disentuh.
+  - `src/config/index.js`: env baru `INCOMING_QUEUE_RETENTION_DAYS` (default 30).
+  - `src/app/evolution.js`: `runMaintenancePrune()` memanggil ketiga prune,
+    fail-soft (kegagalan dicatat, tak menghalangi start); dijalankan saat start
+    dan tiap 24 jam (`setInterval(...).unref()`).
+- Keputusan retensi media: dinaikkan ke **180 hari** (default kode & `.env.example`,
+  dari sebelumnya 7) karena media store gateway adalah fallback live-fetch bila
+  prefetch POS gagal -- memangkas 7 hari berisiko media lama tak bisa diunduh.
+- Tes baru `test/simulate-maintenance.js` (ditambahkan ke `npm test`).
+
 ## 2026-10-02 — TODO-F5: pesan masuk yang diteruskan pelanggan kini ditandai
 
 **Status**: terverifikasi lewat tes regresi (`npm test`); belum diuji ulang
