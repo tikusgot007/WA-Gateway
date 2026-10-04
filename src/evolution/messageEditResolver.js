@@ -24,6 +24,7 @@ function candidateStoredSenders(key) {
     key.remoteJid,
     key.participantAlt,
     key.remoteJidAlt,
+    key.remoteJidLid,
   ].filter((value) => typeof value === 'string' && value.trim() !== '');
 }
 
