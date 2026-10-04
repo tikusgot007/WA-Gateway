@@ -64,3 +64,15 @@ Use the fixture offline to validate, in this order:
 5. extraction of edited text
 
 Only after those checks pass should TODO-F8 production integration be added.
+
+## Status implementasi decryptor
+
+Branch ini sekarang juga memuat decryptor TODO-F8 yang terpisah dari normalizer:
+
+- src/evolution/messageEditCrypto.js: HKDF-SHA256 -> AES-256-GCM -> minimal strict protobuf wire/text validation.
+- src/evolution/messageEditResolver.js: mengambil messageSecret dari pesan original, menyusun sender candidates, lalu hanya mengembalikan teks bila GCM dan protobuf valid.
+- EVOLUTION_DECRYPT_MESSAGE_EDIT=1 mengaktifkan integrasi hasil dekripsi ke lifecycle event.
+- Bila dekripsi gagal, TODO-F7 tetap mengirim marker edited tanpa mengganti teks lama.
+- AuliaPos menerima edited_text hanya pada event edited; teks tersebut menggantikan teks pesan ASLI, sementara edited_at tetap first-seen/idempoten.
+
+Integrasi produksi tetap OFF by default sampai satu real fixture WhatsApp berhasil didecrypt dan decode. Synthetic test hanya memvalidasi framing AES-GCM, candidate fallback, serta parser protobuf; synthetic round-trip bukan bukti interoperabilitas WhatsApp.
