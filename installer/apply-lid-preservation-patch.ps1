@@ -73,7 +73,7 @@ try {
       $new.Add($indent + '// remoteJid remains PN for existing Inbox/chat consumers; the LID')
       $new.Add($indent + '// is carried only as adapter metadata for MESSAGE_EDIT key derivation.')
       $new.Add($line)
-      $new.Add($indent + '  messageRaw.key.remoteJidLid = messageRaw.key.remoteJid;')
+      $new.Add($indent + '  (messageRaw.key as any).remoteJidLid = messageRaw.key.remoteJid;')
       continue
     }
 
