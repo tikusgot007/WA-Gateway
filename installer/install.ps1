@@ -206,6 +206,7 @@ try {
   Remove-Item Env:\HUSKY -ErrorAction SilentlyContinue
 
   Invoke-ChildScript -Script (Join-Path $here 'apply-viewonce-patch.ps1') -ScriptArgs @('-EvolutionDir', $evoDir, '-LogPath', (Join-Path $logDir 'apply-viewonce-patch.log')) -Label 'apply-viewonce-patch'
+  Invoke-ChildScript -Script (Join-Path $here 'apply-lid-preservation-patch.ps1') -ScriptArgs @('-EvolutionDir', $evoDir, '-LogPath', (Join-Path $logDir 'apply-lid-preservation-patch.log')) -Label 'apply-lid-preservation-patch'
 
   # Token diteruskan lewat environment, bukan command line, supaya tidak
   # tampil di daftar proses. setup-env.ps1 membacanya dari variabel ini.
