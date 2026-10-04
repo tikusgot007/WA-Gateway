@@ -161,6 +161,54 @@ try {
   assert.ok(resolverResult);
   assert.strictEqual(resolverResult.text, 'teks hasil edit');
 
+  // Regression: Evolution must preserve the original customer LID under
+  // the dedicated metadata field without repurposing remoteJidAlt.
+  const lidSenders = {
+    origMsgSender: '149701252890753@lid',
+    editSender: '149701252890753@lid',
+  };
+  const lidSealed = seal(extendedText('edit dengan LID'), secret, lidSenders);
+  const lidResult = resolveMessageEditText({
+    record: {
+      key: {
+        id: 'EDIT-LID-1',
+        fromMe: false,
+        remoteJid: '628563324637@s.whatsapp.net',
+        remoteJidLid: lidSenders.editSender,
+      },
+    },
+    messageObj: {
+      secretEncryptedMessage: {
+        secretEncType: 2,
+        targetMessageKey: {
+          id: ORIG_ID,
+          fromMe: false,
+          remoteJid: '628563324637@s.whatsapp.net',
+          remoteJidLid: lidSenders.origMsgSender,
+        },
+        encIv: lidSealed.encIv,
+        encPayload: lidSealed.encPayload,
+      },
+    },
+    quotedStore: {
+      get(id) {
+        return id === ORIG_ID
+          ? {
+              key: {
+                id: ORIG_ID,
+                fromMe: false,
+                remoteJid: '628563324637@s.whatsapp.net',
+                remoteJidLid: lidSenders.origMsgSender,
+              },
+              message: { messageContextInfo: { messageSecret: secret } },
+            }
+          : null;
+      },
+    },
+  });
+  assert.ok(lidResult);
+  assert.strictEqual(lidResult.text, 'edit dengan LID');
+
   const wrapped = unwrapMessage({
     ephemeralMessage: {
       message: {
