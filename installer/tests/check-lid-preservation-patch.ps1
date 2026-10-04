@@ -38,7 +38,7 @@ $ok = (
   $c1 -gt 0 -and
   $c2 -eq $c1 -and
   $backups -eq 1 -and
-  $content1 -match 'remoteJidLid = messageRaw.key.remoteJid' -and
+  $content1 -match '\(messageRaw\.key as any\)\.remoteJidLid = messageRaw\.key\.remoteJid' -and
   $content1 -match 'messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt' -and
   $content1 -notmatch 'console\.log\(messageRaw\)' -and
   $content1 -notmatch 'this\.logger\.verbose\(messageRaw\)' -and
