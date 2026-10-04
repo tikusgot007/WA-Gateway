@@ -216,7 +216,7 @@ function decodeEditedTextPayload(plaintext) {
   // Current WAProto.Message wire layout relevant to text:
   //   field 1 = conversation (string)
   //   field 6 = extendedTextMessage (message; nested field 1 = text)
-  //   field 12 = protocolMessage (message; nested field 4 = editedMessage)
+  //   field 12 = protocolMessage (message; nested field 14 = editedMessage)
   //   field 58 = editedMessage (FutureProofMessage; nested field 1 = message)
   //
   // We validate the complete protobuf wire stream first. For the wrapper forms,
@@ -249,8 +249,8 @@ function decodeEditedTextPayload(plaintext) {
       if (field.fieldNumber === 12) {
         const protocol = readFields(field.value);
         for (const child of protocol) {
-          // ProtocolMessage.editedMessage is field 4.
-          if (child.fieldNumber === 4 && child.wireType === 2) {
+          // ProtocolMessage.editedMessage is field 14.
+          if (child.fieldNumber === 14 && child.wireType === 2) {
             const edited = readFields(child.value);
             for (const editedField of edited) {
               if (editedField.fieldNumber === 1 && editedField.wireType === 2) {
