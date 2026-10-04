@@ -8,6 +8,7 @@ const incomingBuffer = require('../store/incomingBuffer');
 const { enqueueWithRetry } = require('../store/enqueueRetry');
 const { normalizeMessagesUpsert, normalizeConnectionUpdate, pickMessageRecord, unwrapMessage } = require('./normalize');
 const { captureMessageEditFixture } = require('./messageEditFixture');
+const { isDecryptEnabled, resolveMessageEditText } = require('./messageEditResolver');
 const evolutionState = require('./state');
 const quotedStore = require('./quotedStore');
 const mediaStore = require('./mediaStore');
@@ -119,6 +120,28 @@ async function handleMessagesUpsert(req, res, payload) {
         });
       } else if (capture.reason !== 'disabled' && capture.reason !== 'target_mismatch') {
         logger.debug('[TODO-F8] fixture MESSAGE_EDIT tidak dicapture', { reason: capture.reason });
+      }
+
+      // TODO-F8: dekripsi produksi sengaja feature-flagged. Bila aktif dan
+      // plaintext + protobuf valid, attach teks ke lifecycle event yang sama;
+      // bila gagal, TODO-F7 tetap berjalan dengan marker saja.
+      if (isDecryptEnabled()) {
+        try {
+          const decrypted = resolveMessageEditText({
+            record,
+            messageObj,
+            quotedStore,
+          });
+          if (decrypted && typeof decrypted.text === 'string') {
+            normalized.lifecycle.editedText = decrypted.text;
+          } else {
+            logger.debug('[TODO-F8] MESSAGE_EDIT belum dapat didekripsi/validasi protobuf');
+          }
+        } catch (err) {
+          logger.debug('[TODO-F8] MESSAGE_EDIT decrypt gagal; lifecycle marker tetap dikirim', {
+            reason: err.message,
+          });
+        }
       }
     } catch (err) {
       // Fixture capture is diagnostic-only. Never block TODO-F7 lifecycle.
@@ -332,7 +355,14 @@ async function enqueueLifecycle(res, lifecycle) {
     messageType: 'lifecycle',
     text: '',
     media: null,
-    extra: { kind: 'lifecycle', event: lifecycle.event, target_wa_message_id: lifecycle.targetWaMessageId },
+    extra: {
+      kind: 'lifecycle',
+      event: lifecycle.event,
+      target_wa_message_id: lifecycle.targetWaMessageId,
+      ...(typeof lifecycle.editedText === 'string'
+        ? { edited_text: lifecycle.editedText }
+        : {}),
+    },
     timestamp: lifecycle.timestamp,
     direction: 'incoming',
     is_forwarded: false,
