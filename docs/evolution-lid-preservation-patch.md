@@ -38,7 +38,7 @@ Sebelum overwrite PN:
 
 ```ts
 if (messageRaw.key.remoteJid?.includes('@lid') && messageRaw.key.remoteJidAlt) {
-  messageRaw.key.remoteJidLid = messageRaw.key.remoteJid;
+  (messageRaw.key as any).remoteJidLid = messageRaw.key.remoteJid;
   messageRaw.key.remoteJid = messageRaw.key.remoteJidAlt;
 }
 ```
