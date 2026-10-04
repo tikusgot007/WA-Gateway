@@ -581,6 +581,7 @@ function normalizeConnectionUpdate(payload) {
 
 module.exports = {
   normalizeMessagesUpsert,
+  pickMessageRecord,
   normalizeConnectionUpdate,
   detectMessageType,
   extractText,
