@@ -6,7 +6,8 @@ const config = require('../config');
 const logger = require('../logging');
 const incomingBuffer = require('../store/incomingBuffer');
 const { enqueueWithRetry } = require('../store/enqueueRetry');
-const { normalizeMessagesUpsert, normalizeConnectionUpdate } = require('./normalize');
+const { normalizeMessagesUpsert, normalizeConnectionUpdate, pickMessageRecord, unwrapMessage } = require('./normalize');
+const { captureMessageEditFixture } = require('./messageEditFixture');
 const evolutionState = require('./state');
 const quotedStore = require('./quotedStore');
 const mediaStore = require('./mediaStore');
@@ -97,9 +98,32 @@ async function handleMessagesUpsert(req, res, payload) {
     return res.json({ success: true, skipped: true, reason: normalized.reason });
   }
 
-  // Edit pelanggan (TODO-F7): BUKAN pesan baru -- enqueue penanda lifecycle
-  // (menandai pesan ASLI "diedit"), tidak lewat jalur konten di bawah.
+  // Edit pelanggan (TODO-F7): BUKAN pesan baru -- enqueue penanda lifecycle.
+  // Saat capture fixture TODO-F8 diaktifkan, gunakan pesan original dari
+  // quotedStore untuk menyusun fixture offline. Capture ini one-shot dan
+  // disabled by default; kegagalan capture TIDAK mengubah lifecycle path.
   if (normalized.lifecycle) {
+    try {
+      const record = pickMessageRecord(payload.data);
+      const messageObj = record ? unwrapMessage(record.message || {}) : null;
+      const capture = captureMessageEditFixture({
+        record,
+        messageObj,
+        quotedStore,
+        instance: payload.instance || null,
+      });
+      if (capture.captured) {
+        logger.warn('[TODO-F8] fixture MESSAGE_EDIT berhasil dicapture', {
+          target: capture.targetId,
+          path: capture.path,
+        });
+      } else if (capture.reason !== 'disabled' && capture.reason !== 'target_mismatch') {
+        logger.debug('[TODO-F8] fixture MESSAGE_EDIT tidak dicapture', { reason: capture.reason });
+      }
+    } catch (err) {
+      // Fixture capture is diagnostic-only. Never block TODO-F7 lifecycle.
+      logger.warn('[TODO-F8] fixture capture gagal; lifecycle tetap diteruskan', { error: err.message });
+    }
     return enqueueLifecycle(res, normalized.lifecycle);
   }
 
