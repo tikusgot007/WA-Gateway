@@ -42,6 +42,7 @@ function messageAuthorJids(key, ownJids = {}) {
     key.remoteJid,
     key.participantAlt,
     key.remoteJidAlt,
+    key.remoteJidLid,
   ]);
 }
 
@@ -58,6 +59,7 @@ function messageEditSenderCandidates({
       targetKey?.remoteJid,
       targetKey?.participantAlt,
       targetKey?.remoteJidAlt,
+      targetKey?.remoteJidLid,
     ]),
     ...storedSenders,
   ]);
