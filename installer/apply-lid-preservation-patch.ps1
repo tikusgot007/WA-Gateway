@@ -90,7 +90,7 @@ try {
 
   $after = @(Get-Content -LiteralPath $target)
   $markerCount = @($after | Where-Object { $_ -like ('*' + $marker + '*') }).Count
-  $lidCount = @($after | Where-Object { $_ -like '*messageRaw.key.remoteJidLid = messageRaw.key.remoteJid;*' }).Count
+  $lidCount = @($after | Where-Object { $_ -like '*(messageRaw.key as any).remoteJidLid = messageRaw.key.remoteJid;*' }).Count
   $consoleCount = @($after | Where-Object { $_.Trim() -eq 'console.log(messageRaw);' }).Count
   $verboseCount = @($after | Where-Object { $_.Trim() -eq 'this.logger.verbose(messageRaw);' }).Count
 
