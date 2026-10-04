@@ -12,6 +12,8 @@ const {
   decryptAndDecodeEditedText,
   messageEditSenderCandidates,
 } = require('../src/evolution/messageEditCrypto');
+const { resolveMessageEditText } = require('../src/evolution/messageEditResolver');
+const { unwrapMessage } = require('../src/evolution/normalize');
 
 const ORIG_ID = '3EB0F8TESTMESSAGE';
 const SENDERS = {
@@ -124,6 +126,53 @@ try {
   });
   assert.ok(endToEnd);
   assert.strictEqual(endToEnd.text, 'teks hasil edit');
+
+  const resolverResult = resolveMessageEditText({
+    record: {
+      key: {
+        id: 'EDIT-1',
+        fromMe: false,
+        remoteJid: SENDERS.editSender,
+      },
+    },
+    messageObj: {
+      secretEncryptedMessage: {
+        secretEncType: 2,
+        targetMessageKey: {
+          id: ORIG_ID,
+          fromMe: false,
+          remoteJid: SENDERS.origMsgSender,
+        },
+        encIv: sealed.encIv,
+        encPayload: sealed.encPayload,
+      },
+    },
+    quotedStore: {
+      get(id) {
+        return id === ORIG_ID
+          ? {
+              key: { id: ORIG_ID, fromMe: false, remoteJid: SENDERS.origMsgSender },
+              message: { messageContextInfo: { messageSecret: secret } },
+            }
+          : null;
+      },
+    },
+  });
+  assert.ok(resolverResult);
+  assert.strictEqual(resolverResult.text, 'teks hasil edit');
+
+  const wrapped = unwrapMessage({
+    ephemeralMessage: {
+      message: {
+        conversation: 'isi',
+      },
+    },
+    messageContextInfo: {
+      messageSecret: secret,
+    },
+  });
+  assert.strictEqual(wrapped.conversation, 'isi');
+  assert.deepStrictEqual(wrapped.messageContextInfo.messageSecret, secret);
 
   assert.strictEqual(
     decodeEditedTextPayload(conversation('versi percakapan')).text,
