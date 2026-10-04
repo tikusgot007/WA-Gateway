@@ -76,3 +76,16 @@ Branch ini sekarang juga memuat decryptor TODO-F8 yang terpisah dari normalizer:
 - AuliaPos menerima edited_text hanya pada event edited; teks tersebut menggantikan teks pesan ASLI, sementara edited_at tetap first-seen/idempoten.
 
 Integrasi produksi tetap OFF by default sampai satu real fixture WhatsApp berhasil didecrypt dan decode. Synthetic test hanya memvalidasi framing AES-GCM, candidate fallback, serta parser protobuf; synthetic round-trip bukan bukti interoperabilitas WhatsApp.
+
+## Koreksi akar masalah LID (2026-10-04)
+
+Audit terhadap upstream Evolution API 2.3.7 menunjukkan perilaku LID -> PN memang ada di source upstream, bukan semata patch lokal. Karena TODO-F8 membutuhkan LID asli untuk KDF MESSAGE_EDIT, branch ini sekarang menyiapkan patch deployment terpisah:
+
+- `installer/apply-lid-preservation-patch.ps1` menyimpan LID asli ke `key.remoteJidLid` sebelum `remoteJid` diubah menjadi PN.
+- `remoteJidAlt` tidak di-repurpose.
+- raw `messageRaw` logging di jalur tersebut dihapus.
+- `installer/install.ps1` menerapkan patch LID setelah Rekonstruksi View-Once.
+- Rekonstruksi View-Once tetap dipertahankan karena Evolution 2.3.7 membuang view-once stanza tanpa `message` sebelum `MESSAGES_UPSERT`.
+- resolver F8 memasukkan `remoteJidLid` ke kandidat sender original/edit.
+
+Validasi synthetic baru menutup jalur `remoteJidLid`; validasi produksi tetap mensyaratkan satu edit WhatsApp nyata melalui seluruh jalur webhook.
