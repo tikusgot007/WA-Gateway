@@ -78,21 +78,42 @@ const VIEW_ONCE_WRAPPERS = ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMes
 function unwrapMessage(recordMessage) {
   let inner = recordMessage;
   let outerBase64 = inner && typeof inner.base64 === 'string' ? inner.base64 : null;
+  let outerMessageContextInfo = inner && typeof inner.messageContextInfo === 'object'
+    ? inner.messageContextInfo
+    : null;
+
   for (let i = 0; i < 10; i += 1) {
     if (!inner || typeof inner !== 'object') break;
     const wrapper = MESSAGE_WRAPPERS.find(
       (k) => inner[k] && typeof inner[k] === 'object' && inner[k].message,
     );
     if (!wrapper) break;
+
     outerBase64 = outerBase64 || (typeof inner.base64 === 'string' ? inner.base64 : null);
+    if (!outerMessageContextInfo && inner.messageContextInfo
+      && typeof inner.messageContextInfo === 'object') {
+      outerMessageContextInfo = inner.messageContextInfo;
+    }
     inner = inner[wrapper].message;
   }
+
   // `base64` (webhook_base64=true) kadang menempel di lapisan LUAR, bukan di node
   // media dalam. Kalau lapisan dalam tidak punya, turunkan supaya extractMedia
   // tetap menemukan blob-nya.
-  if (inner && typeof inner === 'object' && !inner.base64 && outerBase64) {
-    inner = { ...inner, base64: outerBase64 };
+  if (inner && typeof inner === 'object') {
+    const carry = {};
+    if (!inner.base64 && outerBase64) carry.base64 = outerBase64;
+
+    // WhatsApp dapat menaruh messageSecret pada messageContextInfo di luar
+    // ephemeral/view-once wrapper. Secret tersebut harus tetap ikut ke konten
+    // terdalam supaya quotedStore dapat menyimpannya untuk decrypt MESSAGE_EDIT.
+    if (!inner.messageContextInfo && outerMessageContextInfo) {
+      carry.messageContextInfo = outerMessageContextInfo;
+    }
+
+    if (Object.keys(carry).length > 0) inner = { ...inner, ...carry };
   }
+
   return inner || {};
 }
 
