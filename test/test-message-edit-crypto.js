@@ -18,7 +18,7 @@ const { unwrapMessage } = require('../src/evolution/normalize');
 const ORIG_ID = '3EB0F8TESTMESSAGE';
 const SENDERS = {
   origMsgSender: '628123456789@s.whatsapp.net',
-  editSender: '628123456789@s.whatsapp.net',
+  editSender: '628987654321@s.whatsapp.net',
 };
 
 function varint(value) {
