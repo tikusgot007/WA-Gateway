@@ -43,6 +43,14 @@ function extendedText(text) {
   return field(6, field(1, text));
 }
 
+function protocolEdited(text) {
+  return field(12, field(14, conversation(text)));
+}
+
+function futureProofEdited(text) {
+  return field(58, field(1, extendedText(text)));
+}
+
 function seal(plaintext, messageSecret, senders = SENDERS) {
   const iv = crypto.randomBytes(12);
   const key = messageEditKey({
@@ -120,6 +128,16 @@ try {
   assert.strictEqual(
     decodeEditedTextPayload(conversation('versi percakapan')).text,
     'versi percakapan',
+  );
+
+  assert.strictEqual(
+    decodeEditedTextPayload(protocolEdited('versi protocol')).text,
+    'versi protocol',
+  );
+
+  assert.strictEqual(
+    decodeEditedTextPayload(futureProofEdited('versi future-proof')).text,
+    'versi future-proof',
   );
 
   assert.strictEqual(
