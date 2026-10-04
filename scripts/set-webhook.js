@@ -10,13 +10,14 @@
  *
  * Event yang didaftarkan: MESSAGES_UPSERT (pesan masuk/keluar),
  * MESSAGES_UPDATE (status kirim), CONNECTION_UPDATE (status koneksi),
- * QRCODE_UPDATED (QR mode Baileys).
+ * QRCODE_UPDATED (QR mode Baileys), MESSAGES_DELETE (pesan dihapus pelanggan
+ * -- TODO-F7; Evolution hanya mengirim event ini bila dilanggan).
  */
 const config = require('../src/config');
 const logger = require('../src/logging');
 const evolutionClient = require('../src/evolution/client');
 
-const EVENTS = ['MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'CONNECTION_UPDATE', 'QRCODE_UPDATED'];
+const EVENTS = ['MESSAGES_UPSERT', 'MESSAGES_UPDATE', 'CONNECTION_UPDATE', 'QRCODE_UPDATED', 'MESSAGES_DELETE'];
 
 async function main() {
   const publicUrl = (process.env.WEBHOOK_PUBLIC_URL || '').trim();

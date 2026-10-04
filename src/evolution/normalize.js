@@ -119,6 +119,26 @@ function detectMessageType(messageObj) {
 }
 
 /**
+ * Deteksi pesan EDIT pelanggan (mekanisme baru WhatsApp): node
+ * `secretEncryptedMessage` dengan `secretEncType === 2` (MESSAGE_EDIT).
+ * Isi hasil edit ada di `encPayload` dan TERENKRIPSI -- Baileys tidak
+ * men-dekodenya, jadi teks baru tidak bisa dibaca (spike TODO-F7).
+ * Yang bisa dipakai: `targetMessageKey.id` = wa_message_id pesan ASLI,
+ * untuk memberi penanda "diedit" di CI4.
+ *
+ * @param {object} messageObj pesan yang SUDAH di-unwrap
+ * @returns {string|null} wa_message_id pesan asli, atau null bila bukan edit
+ */
+function extractEditTarget(messageObj) {
+  const sem = messageObj && messageObj.secretEncryptedMessage;
+  if (!sem || typeof sem !== 'object') return null;
+  if (Number(sem.secretEncType) !== 2) return null; // 2 = MESSAGE_EDIT
+  const key = sem.targetMessageKey;
+  if (!key || typeof key.id !== 'string' || key.id === '') return null;
+  return key.id;
+}
+
+/**
  * Data terstruktur untuk tipe yang tidak berbentuk file: lokasi & kontak.
  * Dikirim apa adanya ke CI4 lewat field `extra` dan disimpan di kolom JSON.
  * @returns {object|null}
@@ -451,6 +471,24 @@ function normalizeMessagesUpsert(payload) {
     if (noise) {
       return { ok: false, skip: true, reason: 'pesan sistem/metadata dilewati: ' + noise };
     }
+
+    // Edit pelanggan (secretEncryptedMessage): BUKAN konten baru -- tandai
+    // pesan ASLI "diedit" lewat jalur lifecycle, JANGAN buat baris noise
+    // 'unsupported' (TODO-F7). Teks hasil edit tidak terbaca (terenkripsi).
+    const editTarget = extractEditTarget(messageObj);
+    if (editTarget) {
+      return {
+        ok: true,
+        lifecycle: {
+          event: 'edited',
+          targetWaMessageId: editTarget,
+          chatId: remoteJid,
+          jidType: isGroup ? 'group' : 'pn',
+          timestamp: toIsoTimestamp(record.messageTimestamp),
+          sender: { name: record.pushName || null, jid: null, phone: null },
+        },
+      };
+    }
   }
 
   let messageType = null;
@@ -551,6 +589,7 @@ module.exports = {
   extractExtra,
   extractQuotedContext,
   extractForwardFlag,
+  extractEditTarget,
   buildQuotedSnippet,
   noiseReason,
   toIsoTimestamp,

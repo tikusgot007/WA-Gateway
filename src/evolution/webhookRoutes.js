@@ -70,6 +70,12 @@ router.post('/webhook', jsonBody, async (req, res) => {
     return res.json({ success: true });
   }
 
+  if (eventName === 'messagesdelete') {
+    // TODO-F7: pelanggan menghapus pesan (untuk semua). Evolution hanya
+    // mengirim event ini bila instance melanggan MESSAGES_DELETE.
+    return handleMessagesDelete(res, payload);
+  }
+
   if (eventName === 'messagesupdate' || eventName === 'sendmessage') {
     // Status kirim (delivered/read) -- belum dikonsumsi CI4. Dicatat singkat
     // untuk diagnosis, tidak diproses lebih jauh.
@@ -89,6 +95,12 @@ async function handleMessagesUpsert(req, res, payload) {
     const logAt = normalized.skip ? logger.debug : logger.warn;
     logAt('[EVOLUTION-IN] payload webhook dilewati', { reason: normalized.reason });
     return res.json({ success: true, skipped: true, reason: normalized.reason });
+  }
+
+  // Edit pelanggan (TODO-F7): BUKAN pesan baru -- enqueue penanda lifecycle
+  // (menandai pesan ASLI "diedit"), tidak lewat jalur konten di bawah.
+  if (normalized.lifecycle) {
+    return enqueueLifecycle(res, normalized.lifecycle);
   }
 
   const { event } = normalized;
@@ -277,5 +289,79 @@ async function siapkanMediaMasuk({ event, media, evolutionKey, batasMb }) {
   };
 }
 
+/**
+ * Enqueue penanda "lifecycle" (diedit / dihapus pelanggan) ke buffer durable,
+ * lalu diteruskan `deliverOne()` ke endpoint CI4 `message-event` (TODO-F7).
+ *
+ * messageId SINTETIS (`lifecycle:<event>:<target>`) -- BUKAN wa_message_id
+ * target, supaya tidak bentrok dengan UNIQUE `wa_message_id` baris pesan asli
+ * yang mungkin masih ada di buffer. Idempotent: edit/hapus berulang pada pesan
+ * yang sama memakai messageId yang sama -> INSERT OR IGNORE (status duplicate).
+ */
+async function enqueueLifecycle(res, lifecycle) {
+  const event = {
+    messageId: `lifecycle:${lifecycle.event}:${lifecycle.targetWaMessageId}`,
+    chatId: lifecycle.chatId,
+    jidType: lifecycle.jidType === 'group' ? 'group' : 'pn',
+    sender: lifecycle.sender || { name: null, phone: null, jid: null },
+    sender_jid: null,
+    messageType: 'lifecycle',
+    text: '',
+    media: null,
+    extra: { kind: 'lifecycle', event: lifecycle.event, target_wa_message_id: lifecycle.targetWaMessageId },
+    timestamp: lifecycle.timestamp,
+    direction: 'incoming',
+    is_forwarded: false,
+    quoted: null,
+  };
+
+  try {
+    const result = await enqueueWithRetry(incomingBuffer, event);
+    logger.info('[EVOLUTION-IN] penanda lifecycle tersimpan di buffer durable', {
+      event: lifecycle.event,
+      target: lifecycle.targetWaMessageId,
+      status: result.status,
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    logger.error('[EVOLUTION-IN] GAGAL menyimpan penanda lifecycle ke buffer durable', {
+      event: lifecycle.event,
+      target: lifecycle.targetWaMessageId,
+      error: err.message,
+    });
+    return res.status(500).json({ success: false, error: 'enqueue_failed' });
+  }
+}
+
+/**
+ * Handler webhook `messages.delete` (TODO-F7). Payload: satu objek
+ * `{ id, remoteJid, remoteJidAlt, fromMe, status:'DELETED', ... }`;
+ * `id` = wa_message_id pesan yang dihapus pelanggan.
+ */
+function handleMessagesDelete(res, payload) {
+  const data = payload.data || {};
+  const targetId = typeof data.id === 'string' ? data.id : '';
+  if (!targetId) {
+    logger.warn('[EVOLUTION-IN] messages.delete tanpa data.id -- dilewati');
+    return res.json({ success: true, skipped: true, reason: 'messages.delete tanpa data.id' });
+  }
+
+  const chatId = data.remoteJidAlt || data.remoteJid || '';
+  if (!chatId) {
+    logger.warn('[EVOLUTION-IN] messages.delete tanpa chat id -- dilewati');
+    return res.json({ success: true, skipped: true, reason: 'messages.delete tanpa chat id' });
+  }
+
+  return enqueueLifecycle(res, {
+    event: 'deleted',
+    targetWaMessageId: targetId,
+    chatId,
+    jidType: typeof chatId === 'string' && chatId.includes('@g.us') ? 'group' : 'pn',
+    timestamp: new Date().toISOString(),
+  });
+}
+
 module.exports = router;
 module.exports.normalizeEventName = normalizeEventName;
+module.exports.handleMessagesDelete = handleMessagesDelete;
+module.exports.enqueueLifecycle = enqueueLifecycle;

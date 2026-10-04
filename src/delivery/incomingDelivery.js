@@ -31,6 +31,13 @@ async function deliverOne(event, dependencies = {}) {
   const post = dependencies.postToCI4 || postToCI4;
   const buffer = dependencies.incomingBuffer || incomingBuffer;
   const deliveryLogger = dependencies.logger || logger;
+
+  // TODO-F7: penanda lifecycle (pesan diedit/dihapus pelanggan) punya
+  // endpoint & payload sendiri -- JANGAN dibungkus sebagai pesan biasa.
+  if (event.message_type === 'lifecycle') {
+    return deliverLifecycle(event, { post, buffer, deliveryLogger });
+  }
+
   const body = {
     wa_message_id: event.wa_message_id,
     chat_id: event.chat_id,
@@ -167,6 +174,62 @@ function stop() {
   }
 }
 
+/**
+ * Kirim penanda lifecycle (TODO-F7) ke CI4: `POST /api/inbox/gateway/message-event`
+ * dengan `{wa_message_id, event}` (target dibaca dari `extra_json`). Aturan
+ * sukses/retry/dead-letter SAMA dengan pesan biasa (lihat `deliverOne`).
+ */
+async function deliverLifecycle(event, { post, buffer, deliveryLogger }) {
+  let extra = {};
+  try {
+    extra = event.extra_json ? JSON.parse(event.extra_json) : {};
+  } catch (err) {
+    extra = {};
+  }
+
+  const targetWaMessageId = extra.target_wa_message_id;
+  const lifecycleEvent = extra.event;
+  if (!targetWaMessageId || (lifecycleEvent !== 'edited' && lifecycleEvent !== 'deleted')) {
+    // Data penanda rusak -- buang permanen supaya tidak mengulang selamanya.
+    buffer.markPermanentDead(event.id, 'penanda lifecycle tanpa target/event valid');
+    deliveryLogger.warn('[DELIVERY] penanda lifecycle tidak valid -- dibuang', {
+      waMessageId: event.wa_message_id,
+      extra: event.extra_json,
+    });
+    return;
+  }
+
+  const result = await post('/api/inbox/gateway/message-event', {
+    wa_message_id: targetWaMessageId,
+    event: lifecycleEvent,
+  });
+
+  if (result.ok) {
+    buffer.markCompleted(event.id);
+    deliveryLogger.info('[DELIVERY] penanda lifecycle diteruskan ke CI4', {
+      target: targetWaMessageId,
+      event: lifecycleEvent,
+      matched: result.json?.matched,
+    });
+    return;
+  }
+
+  if (result.status === 400 || result.status === 422) {
+    buffer.markPermanentDead(event.id, result.error);
+    return;
+  }
+
+  const failure = buffer.markFailedAttempt(event.id, event.attempts, result.error);
+  deliveryLogger.warn('[DELIVERY] gagal meneruskan penanda lifecycle ke CI4', {
+    target: targetWaMessageId,
+    event: lifecycleEvent,
+    httpStatus: result.status,
+    error: result.error,
+    retryInMs: failure.delayMs,
+    deadLettered: failure.deadLettered,
+  });
+}
+
 // `tick` diekspos supaya test/simulate-*.js bisa memanggil satu siklus worker
 // secara langsung (deterministik, tanpa menunggu timer nyata).
-module.exports = { start, stop, tick, deliverOne };
+module.exports = { start, stop, tick, deliverOne, deliverLifecycle };
