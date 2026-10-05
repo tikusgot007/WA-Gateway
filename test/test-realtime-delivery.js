@@ -22,10 +22,12 @@ function makeTicket(userId = 3) {
     sub: userId,
     exp: Math.floor(Date.now() / 1000) + 60,
   })).toString('base64url');
+  // Sama dengan AuliaPos (hash_hmac default) dan verifyTicket gateway: HEX,
+  // bukan base64url -- kalau tidak, gateway membalas 401.
   const signature = crypto
     .createHmac('sha256', config.ci4.gatewayToken)
     .update(payload)
-    .digest('base64url');
+    .digest('hex');
   return `${payload}.${signature}`;
 }
 
