@@ -7,6 +7,10 @@ const logger = require('../logging');
 
 const clients = new Set();
 
+// Heartbeat protocol-level (bukan JSON application message): server ping,
+// browser/`ws` auto-balas pong. Tanpa pong pada cycle berikutnya -> terminate.
+const HEARTBEAT_INTERVAL_MS = 30000;
+
 function base64UrlDecode(value) {
   const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
   const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
@@ -85,7 +89,11 @@ function broadcast(payload) {
   }
 }
 
-function attachRealtime(server) {
+function attachRealtime(server, options = {}) {
+  const heartbeatIntervalMs = Number.isFinite(options.heartbeatIntervalMs) && options.heartbeatIntervalMs > 0
+    ? options.heartbeatIntervalMs
+    : HEARTBEAT_INTERVAL_MS;
+
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: 16 * 1024,
@@ -119,6 +127,10 @@ function attachRealtime(server) {
 
   wss.on('connection', (ws, request, auth) => {
     clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
 
     logger.info('[REALTIME] browser connected', {
       userId: auth.userId,
@@ -152,10 +164,55 @@ function attachRealtime(server) {
     });
   });
 
+  function heartbeatTick() {
+    for (const ws of clients) {
+      if (ws.readyState !== ws.OPEN) continue;
+
+      if (ws.isAlive === false) {
+        // Tidak ada pong pada cycle sebelumnya -> anggap koneksi half-open/mati.
+        clients.delete(ws);
+        try {
+          ws.terminate();
+        } catch (_) {
+          // Abaikan; client lain tetap diproses.
+        }
+        logger.warn('[REALTIME] heartbeat timeout; client terminated', {
+          clients: clients.size,
+        });
+        continue;
+      }
+
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch (err) {
+        // ping() juga operasi jaringan; perlakukan sama seperti send failure 5B.
+        clients.delete(ws);
+        try {
+          ws.terminate();
+        } catch (_) {
+          // Abaikan; client lain tetap diproses.
+        }
+        logger.warn('[REALTIME] heartbeat ping failed; client removed', {
+          error: err.message,
+          clients: clients.size,
+        });
+      }
+    }
+  }
+
+  const heartbeatInterval = setInterval(heartbeatTick, heartbeatIntervalMs);
+  // Jangan biarkan timer heartbeat menahan event loop hidup saat shutdown.
+  if (typeof heartbeatInterval.unref === 'function') heartbeatInterval.unref();
+
   return {
-    close: () => wss.close(),
+    close: () => {
+      clearInterval(heartbeatInterval);
+      wss.close();
+    },
     broadcast,
     clientCount: () => clients.size,
+    heartbeatTick,
   };
 }
 

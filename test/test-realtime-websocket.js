@@ -16,6 +16,18 @@ const assert = require('assert');
 const crypto = require('crypto');
 const http = require('http');
 const WebSocket = require('ws');
+const { WebSocketServer } = require('ws');
+
+// Milestone 5B: test-level hook untuk menangkap instance ws sisi-server, supaya
+// SATU client bisa dibuat gagal secara deterministik tanpa mengubah src/.
+const serverSockets = [];
+const _origHandleUpgrade = WebSocketServer.prototype.handleUpgrade;
+WebSocketServer.prototype.handleUpgrade = function (req, socket, head, cb) {
+  return _origHandleUpgrade.call(this, req, socket, head, function (wsInstance, req2) {
+    serverSockets.push(wsInstance);
+    return cb(wsInstance, req2);
+  });
+};
 
 process.env.CI4_BASE_URL = 'http://127.0.0.1:39999';
 process.env.CI4_GATEWAY_TOKEN = 'realtime-ws-test-token';
@@ -188,7 +200,262 @@ function check(name, fn) {
       ok.ws.close();
       await waitFor(() => realtime.clientCount() === 0);
     });
+
+    // ================================================================
+    // Milestone 5B -- broadcast failure isolation
+    // ================================================================
+    const sockBase = serverSockets.length;
+    const ca = await connectRealtime(base, '/realtime', makeTicket(41));
+    const cb2 = await connectRealtime(base, '/realtime', makeTicket(42));
+    const cc = await connectRealtime(base, '/realtime', makeTicket(43));
+    assert.ok(ca.ready && cb2.ready && cc.ready, '5B: 3 client harus terhubung');
+    const sa = serverSockets[sockBase];
+    const sb = serverSockets[sockBase + 1];
+    const sc = serverSockets[sockBase + 2];
+    assert.ok(sa && sb && sc, '5B: server-side sockets harus ter-capture');
+    const ta = trackMessages(ca.ws);
+    const tb2 = trackMessages(cb2.ws);
+    const tc = trackMessages(cc.ws);
+    // terminate() sisi-server bisa memunculkan 'error' di client A; jangan
+    // biarkan menjadi unhandled error pada proses test.
+    [ca, cb2, cc].forEach((c) => c.ws.on('error', () => {}));
+    const payload5B = (id) => ({ type: 'message.created', version: 1, conversation_id: 9, wa_message_id: id, direction: 'incoming', message_type: 'text', duplicate: false, server_time: new Date().toISOString() });
+
+    await check('5B-A normal broadcast -> A=1 B=1 C=1', async () => {
+      ta.length = 0; tb2.length = 0; tc.length = 0;
+      broadcast(payload5B('5B-A'));
+      await sleep(150);
+      assert.strictEqual(ta.length, 1, 'A');
+      assert.strictEqual(tb2.length, 1, 'B');
+      assert.strictEqual(tc.length, 1, 'C');
+    });
+
+    await check('5B-B satu client gagal send -> B/C tetap menerima, server hidup', async () => {
+      ta.length = 0; tb2.length = 0; tc.length = 0;
+      const realSend = sa.send;
+      sa.send = function () { throw new Error('synthetic send failure'); };
+      let threw = null;
+      try { broadcast(payload5B('5B-B')); } catch (e) { threw = e; }
+      await sleep(150);
+      sa.send = realSend;
+      assert.ok(
+        threw === null && tb2.length === 1 && tc.length === 1 && ta.length === 0 && realtime.clientCount() === 2,
+        'expected: throw=null, A=0, B=1, C=1, clientCount=2 | actual: throw=' + (threw && threw.message) + ', A=' + ta.length + ', B=' + tb2.length + ', C=' + tc.length + ', clientCount=' + realtime.clientCount()
+      );
+    });
+
+    await check('5B-C broadcast kedua setelah failure -> B/C tetap menerima', async () => {
+      tb2.length = 0; tc.length = 0;
+      const realSend = sa.send;
+      sa.send = function () { throw new Error('synthetic send failure'); };
+      let threw = null;
+      try { broadcast(payload5B('5B-C')); } catch (e) { threw = e; }
+      await sleep(150);
+      sa.send = realSend;
+      assert.ok(
+        threw === null && tb2.length === 1 && tc.length === 1,
+        'expected: throw=null, B=1, C=1 | actual: throw=' + (threw && threw.message) + ', B=' + tb2.length + ', C=' + tc.length
+      );
+    });
+
+    await check('5B-D client closing race -> di-skip, healthy client menerima', async () => {
+      tb2.length = 0;
+      sa.close(); // server-side A -> CLOSING
+      let threw = null;
+      try { broadcast(payload5B('5B-D')); } catch (e) { threw = e; }
+      await sleep(150);
+      assert.strictEqual(threw, null, 'broadcast tidak boleh throw saat ada client closing');
+      assert.strictEqual(tb2.length, 1, 'B harus menerima');
+    });
+
+    await check('5B-E cleanup regression -> A=0, B=1', async () => {
+      await waitFor(() => realtime.clientCount() <= 2, 2000);
+      ta.length = 0; tb2.length = 0;
+      broadcast(payload5B('5B-E'));
+      await sleep(150);
+      assert.strictEqual(ta.length, 0, 'A harus 0 event');
+      assert.strictEqual(tb2.length, 1, 'B harus 1 event');
+    });
+
+    // Tutup semua client 5B supaya server.close() tidak menggantung.
+    ca.ws.terminate();
+    cb2.ws.close();
+    cc.ws.close();
+    await waitFor(() => realtime.clientCount() === 0, 2000);
+
+    // ================================================================
+    // Milestone 5C -- heartbeat / stale connection (evaluasi, test-only)
+    // ================================================================
+    // 5C-B: apakah library `ws` otomatis membalas protocol ping dengan pong?
+    await check('5C-B protocol ping -> server auto-pong (library ws)', async () => {
+      const c = await connectRealtime(base, '/realtime', makeTicket(51));
+      assert.ok(c.ready, 'harus terhubung');
+      const gotPong = await new Promise((resolve) => {
+        const t = setTimeout(() => resolve(false), 1500);
+        c.ws.once('pong', () => { clearTimeout(t); resolve(true); });
+        c.ws.ping();
+      });
+      assert.ok(gotPong, 'server harus auto-balas pong (library ws)');
+      c.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    // 5C-D: surrogate "stale" -- readyState OPEN, send() tidak throw, tapi peer
+    // tidak menerima apa pun. Ini BUKAN half-open OS-level (tidak bisa
+    // direproduksi deterministik in-process tanpa manipulasi OS/network); ini
+    // test-level surrogate untuk mengukur dampak registry.
+    const dBase = serverSockets.length;
+    const da = await connectRealtime(base, '/realtime', makeTicket(52));
+    const db = await connectRealtime(base, '/realtime', makeTicket(53));
+    const sa2 = serverSockets[dBase];
+    const daMsgs = trackMessages(da.ws);
+    const dbMsgs = trackMessages(db.ws);
+    [da, db].forEach((c) => c.ws.on('error', () => {}));
+
+    await check('5C-D stale surrogate (OPEN, send no-op) -> B menerima, A tetap di registry', async () => {
+      daMsgs.length = 0; dbMsgs.length = 0;
+      const before = realtime.clientCount();
+      const realSend = sa2.send;
+      sa2.send = function () {}; // peer tidak menerima, TAPI tidak throw
+      let threw = null;
+      try { broadcast(payload5B('5C-D')); } catch (e) { threw = e; }
+      await sleep(150);
+      const after = realtime.clientCount();
+      sa2.send = realSend;
+      assert.strictEqual(threw, null, 'broadcast tidak boleh throw');
+      assert.strictEqual(dbMsgs.length, 1, 'healthy B harus menerima');
+      assert.strictEqual(daMsgs.length, 0, 'stale A tidak menerima (surrogate)');
+      assert.strictEqual(after, before, 'stale A TETAP di registry (tak terdeteksi tanpa heartbeat): before=' + before + ' after=' + after);
+    });
+
+    da.ws.terminate();
+    db.ws.close();
+    await waitFor(() => realtime.clientCount() === 0, 2000);
+
+    // ================================================================
+    // Milestone 5D -- server WebSocket heartbeat
+    // Kontrol deterministik lewat realtime.heartbeatTick(); interval default
+    // (30 dtk) tidak menyala selama test, jadi tidak mengganggu.
+    // ================================================================
+    await check('5D-A healthy heartbeat -> ping terkirim, pong, client tetap', async () => {
+      const c = await connectRealtime(base, '/realtime', makeTicket(61));
+      assert.ok(c.ready, 'harus connection.ready');
+      let pings = 0;
+      c.ws.on('ping', () => { pings++; });
+      realtime.heartbeatTick();
+      assert.ok(await waitFor(() => pings >= 1, 1000), 'server harus mengirim ping');
+      await sleep(100);
+      assert.strictEqual(realtime.clientCount(), 1, 'client tetap di registry (pong diterima)');
+      c.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-B 3 client x 2 cycle -> tetap connected, clientCount=3', async () => {
+      const a = await connectRealtime(base, '/realtime', makeTicket(62));
+      const b = await connectRealtime(base, '/realtime', makeTicket(63));
+      const c = await connectRealtime(base, '/realtime', makeTicket(64));
+      assert.ok(a.ready && b.ready && c.ready);
+      assert.strictEqual(realtime.clientCount(), 3);
+      realtime.heartbeatTick(); await sleep(80);
+      realtime.heartbeatTick(); await sleep(80);
+      assert.strictEqual(realtime.clientCount(), 3, 'semua tetap connected');
+      a.ws.close(); b.ws.close(); c.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-C stale (isAlive=false) -> terminate, removed; B/C tetap', async () => {
+      const sBase = serverSockets.length;
+      const a = await connectRealtime(base, '/realtime', makeTicket(65));
+      const b = await connectRealtime(base, '/realtime', makeTicket(66));
+      const c = await connectRealtime(base, '/realtime', makeTicket(67));
+      const sa = serverSockets[sBase];
+      assert.ok(a.ready && b.ready && c.ready);
+      await waitFor(() => realtime.clientCount() === 3, 2000);
+      sa.isAlive = false;
+      realtime.heartbeatTick();
+      assert.ok(await waitFor(() => realtime.clientCount() === 2, 1000), 'A harus dibuang, B/C tetap');
+      a.ws.terminate(); b.ws.close(); c.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-D pong memperbarui isAlive -> cycle berikutnya tidak terminate', async () => {
+      const sBase = serverSockets.length;
+      const a = await connectRealtime(base, '/realtime', makeTicket(68));
+      const sa = serverSockets[sBase];
+      assert.strictEqual(sa.isAlive, true, 'connection baru harus isAlive=true');
+      realtime.heartbeatTick();
+      assert.strictEqual(sa.isAlive, false, 'setelah cycle, isAlive=false sampai pong');
+      assert.ok(await waitFor(() => sa.isAlive === true, 1000), 'pong harus set isAlive=true');
+      realtime.heartbeatTick();
+      await sleep(60);
+      assert.strictEqual(realtime.clientCount(), 1, 'client TIDAK diterminasi pada cycle berikutnya');
+      a.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-E no pong -> terminate; healthy client tetap', async () => {
+      const sBase = serverSockets.length;
+      const a = await connectRealtime(base, '/realtime', makeTicket(69));
+      const b = await connectRealtime(base, '/realtime', makeTicket(70));
+      const sa = serverSockets[sBase];
+      await waitFor(() => realtime.clientCount() === 2, 2000);
+      realtime.heartbeatTick();          // cycle N: A & B -> isAlive=false + ping
+      await sleep(100);                  // biarkan pong B tiba; A kita paksa tanpa pong
+      sa.isAlive = false;                // simulasi A tidak mengirim pong
+      realtime.heartbeatTick();          // cycle N+1: A isAlive=false -> terminate
+      assert.ok(await waitFor(() => realtime.clientCount() === 1, 1000), 'A diterminasi, B tetap');
+      a.ws.terminate(); b.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-F heartbeat + broadcast -> A/C menerima, stale B tidak, server hidup', async () => {
+      const sBase = serverSockets.length;
+      const a = await connectRealtime(base, '/realtime', makeTicket(71));
+      const b = await connectRealtime(base, '/realtime', makeTicket(72));
+      const c = await connectRealtime(base, '/realtime', makeTicket(73));
+      const sb = serverSockets[sBase + 1];
+      const ma = trackMessages(a.ws);
+      const mc = trackMessages(c.ws);
+      await waitFor(() => realtime.clientCount() === 3, 2000);
+      sb.isAlive = false;
+      realtime.heartbeatTick();
+      await waitFor(() => realtime.clientCount() === 2, 1000);
+      broadcast({ type: 'message.created', version: 1, conversation_id: 7, wa_message_id: '5D-F', direction: 'incoming', message_type: 'text', duplicate: false, server_time: new Date().toISOString() });
+      await sleep(150);
+      assert.strictEqual(ma.length, 1, 'A menerima');
+      assert.strictEqual(mc.length, 1, 'C menerima');
+      assert.strictEqual(realtime.clientCount(), 2, 'B sudah keluar; A/C tetap');
+      a.ws.close(); b.ws.terminate(); c.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-G reconnect: koneksi baru setelah terminate -> connection.ready', async () => {
+      const a = await connectRealtime(base, '/realtime', makeTicket(74));
+      a.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+      const a2 = await connectRealtime(base, '/realtime', makeTicket(74));
+      assert.ok(a2.ready && a2.ready.type === 'connection.ready', 'koneksi baru harus connection.ready');
+      a2.ws.close();
+      await waitFor(() => realtime.clientCount() === 0, 2000);
+    });
+
+    await check('5D-H close() menghentikan heartbeat interval (proses tidak menggantung)', async () => {
+      const s = http.createServer((req, res) => { res.statusCode = 200; res.end('x'); });
+      const r = attachRealtime(s, { heartbeatIntervalMs: 20 });
+      await new Promise((res) => s.listen(0, '127.0.0.1', res));
+      const b = 'http://127.0.0.1:' + s.address().port;
+      const c = await connectRealtime(b, '/realtime', makeTicket(75));
+      assert.ok(c.ready);
+      await sleep(80); // biarkan beberapa cycle interval nyata berjalan
+      assert.strictEqual(r.clientCount(), 1, 'client harus tetap hidup (pong otomatis)');
+      c.ws.close();
+      await waitFor(() => r.clientCount() === 0, 2000);
+      r.close(); // harus clearInterval; kalau tidak, proses test akan menggantung
+      await new Promise((res) => s.close(res));
+    });
   } finally {
+    WebSocketServer.prototype.handleUpgrade = _origHandleUpgrade;
+    realtime.close();
     await new Promise((r) => server.close(r));
   }
 
