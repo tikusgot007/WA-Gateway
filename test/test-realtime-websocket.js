@@ -15,6 +15,8 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const http = require('http');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const WebSocket = require('ws');
 const { WebSocketServer } = require('ws');
 
@@ -452,6 +454,102 @@ function check(name, fn) {
       await waitFor(() => r.clientCount() === 0, 2000);
       r.close(); // harus clearInterval; kalau tidak, proses test akan menggantung
       await new Promise((res) => s.close(res));
+    });
+
+    // ================================================================
+    // Milestone 5E -- realtime shutdown lifecycle
+    // ================================================================
+    const serverE = http.createServer((req, res) => { res.statusCode = 200; res.end('x'); });
+    const realtimeE = attachRealtime(serverE, { heartbeatIntervalMs: 40 });
+    await new Promise((r) => serverE.listen(0, '127.0.0.1', r));
+    const baseE = 'http://127.0.0.1:' + serverE.address().port;
+    const ea = await connectRealtime(baseE, '/realtime', makeTicket(81));
+    const eb = await connectRealtime(baseE, '/realtime', makeTicket(82));
+    const ec = await connectRealtime(baseE, '/realtime', makeTicket(83));
+    const mea = trackMessages(ea.ws), meb = trackMessages(eb.ws), mec = trackMessages(ec.ws);
+    const closeFlags = { a: false, b: false, c: false };
+    ea.ws.on('close', () => { closeFlags.a = true; });
+    eb.ws.on('close', () => { closeFlags.b = true; });
+    ec.ws.on('close', () => { closeFlags.c = true; });
+    [ea, eb, ec].forEach((c) => c.ws.on('error', () => {}));
+
+    await check('5E-A 3 client connected, clientCount=3', async () => {
+      assert.ok(ea.ready && eb.ready && ec.ready, 'ketiganya connection.ready');
+      assert.strictEqual(realtimeE.clientCount(), 3);
+    });
+
+    await check('5E-B realtime.close() tidak throw; tidak ada heartbeat cycle setelah close', async () => {
+      let threw = null;
+      try { realtimeE.close(); } catch (e) { threw = e; }
+      assert.strictEqual(threw, null, 'close() pertama tidak boleh throw');
+      await sleep(160); // > interval 40ms; interval yang masih hidup akan terlihat dari aktivitas
+    });
+
+    await check('5E-C setelah close, client dilepas (async) & clientCount=0', async () => {
+      const allClosed = await waitFor(() => closeFlags.a && closeFlags.b && closeFlags.c, 2000);
+      console.log('  5E-C close flags: A=' + closeFlags.a + ' B=' + closeFlags.b + ' C=' + closeFlags.c);
+      assert.ok(allClosed, 'A/B/C harus menerima close (async); flags=' + JSON.stringify(closeFlags));
+      assert.strictEqual(realtimeE.clientCount(), 0, 'clientCount harus 0 setelah close');
+    });
+
+    await check('5E-D setelah shutdown: broadcast tidak sampai ke client, tidak throw, registry bersih', async () => {
+      mea.length = 0; meb.length = 0; mec.length = 0;
+      const countAfter = realtimeE.clientCount();
+      const clientReady = [ea.ws.readyState, eb.ws.readyState, ec.ws.readyState]; // 1 = OPEN
+      let threw = null;
+      try {
+        broadcast({ type: 'message.created', version: 1, conversation_id: 1, wa_message_id: '5E-D', direction: 'incoming', message_type: 'text', duplicate: false, server_time: new Date().toISOString() });
+      } catch (e) { threw = e; }
+      await sleep(150);
+      const received = mea.length + meb.length + mec.length;
+      assert.ok(
+        threw === null && received === 0 && countAfter === 0,
+        'expected: threw=null, received=0, clientCount=0 | actual: threw=' + (threw && threw.message) + ', received=' + received + ', clientCount=' + countAfter + ', clientReadyState(1=OPEN)=' + JSON.stringify(clientReady)
+      );
+    });
+
+    await check('5E-E child process exit bersih; heartbeat timer benar-benar dibersihkan', async () => {
+      const lines = [
+        "const http=require('http');const crypto=require('crypto');const WebSocket=require('ws');",
+        "process.env.CI4_GATEWAY_TOKEN='child-token';",
+        "const {attachRealtime}=require('./src/realtime/server');",
+        "const token='child-token';",
+        "const p=Buffer.from(JSON.stringify({sub:1,exp:Math.floor(Date.now()/1000)+60})).toString('base64url');",
+        "const s=crypto.createHmac('sha256',token).update(p).digest('hex');",
+        "const server=http.createServer(function(q,r){r.end('x')});",
+        "const rt=attachRealtime(server,{heartbeatIntervalMs:25});",
+        "server.listen(0,'127.0.0.1',function(){",
+        "  const port=server.address().port;",
+        "  const ws=new WebSocket('ws://127.0.0.1:'+port+'/realtime?ticket='+encodeURIComponent(p+'.'+s));",
+        "  ws.on('message',function(){",
+        "    setTimeout(function(){",
+        "      rt.close();server.close();ws.terminate();",
+        "      setImmediate(function(){",
+        "        var t=process.getActiveResourcesInfo().filter(function(x){return x==='Timeout';}).length;",
+        "        console.log('TIMEOUTS='+t);",
+        "      });",
+        "    },60);",
+        "  });",
+        "});",
+      ];
+      const run = spawnSync(process.execPath, ['-e', lines.join('\n')], { cwd: path.join(__dirname, '..'), timeout: 5000, encoding: 'utf8' });
+      assert.strictEqual(run.signal, null, 'child tidak boleh timeout/dibunuh; stderr=' + run.stderr);
+      assert.strictEqual(run.status, 0, 'child harus exit 0; stderr=' + run.stderr);
+      assert.match(run.stdout, /TIMEOUTS=0/, 'heartbeat timer harus benar-benar dibersihkan; stdout=' + run.stdout);
+    });
+
+    await check('5E-F close() idempotent (dipanggil 2x) tanpa throw', async () => {
+      let threw = null;
+      try { realtimeE.close(); } catch (e) { threw = e; }
+      assert.strictEqual(threw, null, 'close kedua tidak boleh throw');
+    });
+
+    await check('5E-G koneksi baru setelah realtime.close() ditolak (HTTP masih hidup)', async () => {
+      const r = await connectRealtime(baseE, '/realtime', makeTicket(84));
+      assert.strictEqual(r.opened, false, 'koneksi baru tidak boleh establish setelah shutdown');
+      assert.ok(r.status !== null || r.error, 'harus ditolak (503/error); status=' + r.status + ' error=' + r.error);
+      if (typeof serverE.closeAllConnections === 'function') serverE.closeAllConnections();
+      await new Promise((res) => serverE.close(() => res()));
     });
   } finally {
     WebSocketServer.prototype.handleUpgrade = _origHandleUpgrade;
