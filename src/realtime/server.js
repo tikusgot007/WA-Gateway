@@ -82,6 +82,7 @@ function attachRealtime(server) {
     }
 
     if (url.pathname !== '/realtime') {
+      socket.destroy();
       return;
     }
 
