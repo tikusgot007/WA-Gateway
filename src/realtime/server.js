@@ -61,7 +61,27 @@ function sendJson(ws, payload) {
 function broadcast(payload) {
   const message = JSON.stringify(payload);
   for (const ws of clients) {
-    if (ws.readyState === ws.OPEN) ws.send(message);
+    if (ws.readyState !== ws.OPEN) continue;
+
+    try {
+      ws.send(message);
+    } catch (err) {
+      // Satu client yang rusak tidak boleh memutus fan-out ke client lain.
+      // Hapus dari registry segera; event close juga akan membersihkan jika
+      // transport masih hidup, dan terminate memastikan socket yang gagal
+      // tidak terus menjadi target broadcast berikutnya.
+      clients.delete(ws);
+      try {
+        ws.terminate();
+      } catch (_) {
+        // Ignore cleanup failure; broadcast ke client lain tetap berjalan.
+      }
+
+      logger.warn('[REALTIME] broadcast send failed; client removed', {
+        error: err.message,
+        clients: clients.size,
+      });
+    }
   }
 }
 
