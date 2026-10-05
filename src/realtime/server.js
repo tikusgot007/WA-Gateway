@@ -88,8 +88,7 @@ function attachRealtime(server) {
 
     const auth = verifyTicket(url.searchParams.get('ticket'));
     if (!auth) {
-      socket.write('HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n');
-      socket.destroy();
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       return;
     }
 
