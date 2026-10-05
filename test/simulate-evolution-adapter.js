@@ -869,8 +869,38 @@ function webhookPayload(overrides = {}) {
   captured.length = 0;
   global.fetch = async (url, opts) => {
     captured.push({ url, opts });
-    return new Response(JSON.stringify({ webhook: {} }), { status: 201 });
+    return new Response(
+      JSON.stringify({ key: { id: 'MEDIA-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }),
+      { status: 201 }
+    );
   };
+  const mediaBytes = Buffer.from('GAMBAR-UJI');
+  const realMedia = await realClient.sendMedia({
+    number: '628999',
+    mediatype: 'image',
+    buffer: mediaBytes,
+    mimetype: 'image/jpeg',
+    fileName: 'uji.jpg',
+    caption: 'balas gambar',
+    quoted: {
+      key: { id: 'QIMG-1', remoteJid: '628999@s.whatsapp.net', fromMe: false },
+      message: { imageMessage: { mimetype: 'image/jpeg', caption: 'gambar asal' } },
+    },
+  });
+  const mediaCall = captured[0];
+  assert.ok(mediaCall.url.endsWith('/message/sendMedia/inst-uji'), 'path sendMedia benar');
+  assert.strictEqual(mediaCall.opts.headers['Content-Type'], 'application/json', 'sendMedia dengan quote dikirim sebagai JSON');
+  assert.strictEqual(typeof mediaCall.opts.body, 'string', 'sendMedia body JSON string, bukan FormData');
+  const mediaBody = JSON.parse(mediaCall.opts.body);
+  assert.strictEqual(mediaBody.number, '628999');
+  assert.strictEqual(mediaBody.mediatype, 'image');
+  assert.strictEqual(mediaBody.media, mediaBytes.toString('base64'), 'media dikirim sebagai base64');
+  assert.strictEqual(mediaBody.fileName, 'uji.jpg');
+  assert.strictEqual(mediaBody.mimetype, 'image/jpeg');
+  assert.strictEqual(mediaBody.caption, 'balas gambar');
+  assert.strictEqual(mediaBody.quoted.key.id, 'QIMG-1', 'quoted tetap object pada sendMedia');
+  assert.strictEqual(mediaBody.quoted.message.imageMessage.caption, 'gambar asal');
+  assert.strictEqual(realMedia.messageId, 'MEDIA-1');
   await realClient.setWebhook({ url: 'http://127.0.0.1:3000/evolution/webhook', events: ['MESSAGES_UPSERT'] });
   const webhookCall = captured[0];
   assert.ok(webhookCall.url.endsWith('/webhook/set/inst-uji'), 'path webhook/set benar');
