@@ -127,23 +127,36 @@ async function sendText({ number, text, quoted = null }) {
 async function sendMedia({ number, mediatype, buffer, fileName, mimetype, caption = null, quoted = null }) {
   if (!isConfigured()) throw notConfiguredError();
 
-  const form = new FormData();
-  form.append('number', String(number));
-  form.append('mediatype', String(mediatype));
-  if (caption) form.append('caption', String(caption));
-  if (fileName) form.append('fileName', String(fileName));
-  if (quoted && quoted.key && quoted.key.id) {
-    form.append('quoted', JSON.stringify({ key: quoted.key, message: quoted.message || {} }));
-  }
-  const blob = new Blob([buffer], mimetype ? { type: mimetype } : undefined);
-  form.append('file', blob, fileName || 'file');
+  // Gunakan body JSON + base64, bukan multipart/form-data.
+  //
+  // Field multipart `quoted` masuk sebagai string pada req.body di Evolution.
+  // Schema Evolution mengharapkan quoted sebagai object dan router tidak
+  // melakukan JSON.parse pada field multipart tersebut. Karena itu quoted
+  // media dapat ditolak sebelum mencapai Baileys.
+  //
+  // Evolution menerima media sebagai base64 melalui field `media`, sehingga
+  // body JSON menjaga quoted tetap berupa object seperti pada sendText.
+  const body = {
+    number: String(number),
+    mediatype: String(mediatype),
+    media: buffer.toString('base64'),
+    ...(mimetype ? { mimetype: String(mimetype) } : {}),
+    ...(fileName ? { fileName: String(fileName) } : {}),
+    ...(caption ? { caption: String(caption) } : {}),
+    ...(quoted && quoted.key && quoted.key.id
+      ? { quoted: { key: quoted.key, message: quoted.message || {} } }
+      : {}),
+  };
 
   let res;
   try {
     res = await withTimeout((signal) => fetch(instancePath('/message/sendMedia'), {
       method: 'POST',
-      headers: { apikey: config.evolution.apiKey },
-      body: form,
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: config.evolution.apiKey,
+      },
+      body: JSON.stringify(body),
       signal,
     }));
   } catch (err) {
