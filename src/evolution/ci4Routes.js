@@ -392,7 +392,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     const { status, body } = outgoingOperationService.toHttpResponse(decision, {
       operationId,
       withMediaRef: true,
-      withQuoteApplied: false,
+      withQuoteApplied: quoteRequested,
       withForwardMarker: forward.requested,
     });
     return res.status(status).json(body);
