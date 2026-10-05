@@ -5,6 +5,7 @@ const logger = require('../logging');
 const incomingBuffer = require('../store/incomingBuffer');
 const { overflowBuffer } = require('../store/overflowBuffer');
 const { postToCI4 } = require('./ci4Client');
+const { broadcast } = require('../realtime/server');
 
 /**
  * Worker pengiriman pesan MASUK: Gateway -> CI4.
@@ -87,6 +88,21 @@ async function deliverOne(event, dependencies = {}) {
 
   if (result.ok) {
     buffer.markCompleted(event.id);
+
+    // CI4 200 = persistence sudah berhasil/terdeteksi duplicate.
+    // Broadcast dilakukan SETELAH ACK, sehingga browser tidak melihat
+    // event sebelum DB menjadi source of truth.
+    broadcast({
+      type: 'message.created',
+      version: 1,
+      conversation_id: result.json?.conversation_id ?? null,
+      wa_message_id: event.wa_message_id,
+      direction: event.direction || 'incoming',
+      message_type: event.message_type,
+      duplicate: Boolean(result.json?.duplicate),
+      server_time: new Date().toISOString(),
+    });
+
     deliveryLogger.info('[DELIVERY] pesan masuk berhasil diteruskan ke CI4', {
       waMessageId: event.wa_message_id,
       duplicate: Boolean(result.json?.duplicate),
