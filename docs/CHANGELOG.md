@@ -22,6 +22,11 @@ Format bebas, kronologis terbaru di atas.
 - Verifikasi: `npm test` semua suite OK (realtime websocket 30/30);
   `installer/tests/check-lid-preservation-patch.ps1` PASS; E2E nyata
   WhatsApp → Evolution (LID preserved) → gateway → POS dikonfirmasi user.
+- Rollout produksi 2026-10-05 (aulia3 `D:\evolution-gateway`): build di-copy manual
+  (bukan git; `npm` tidak ada → `ws@8.22.0` disalin ke `node_modules`), patch LID
+  dipasang ke `D:\evolution-api-server`, Evolution + adapter di-restart, lalu
+  `EVOLUTION_DECRYPT_MESSAGE_EDIT=1` diaktifkan. F7 & F8 terverifikasi nyata;
+  rollback lewat backup `D:\backup\evolution-gateway-pre-f8-*` / mengosongkan flag.
 
 ## 2026-10-03 — TODO-F6: forward KELUAR tersinkron dari WA Web/HP kini ditandai "Diteruskan"
 
