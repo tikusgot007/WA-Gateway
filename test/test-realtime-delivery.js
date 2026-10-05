@@ -156,6 +156,31 @@ async function openRealtime(baseUrl) {
     wsFailure.close();
 
     console.log('OK');
+    console.log('--- M2 regression: duplicate ACK -> duplicate:true + conversation_id ---');
+    const duplicateWs = await openRealtime(baseUrl);
+    const duplicateEvent = { ...event, id: 103, wa_message_id: 'M2-REGRESSION-DUP' };
+    const duplicateReceived = waitForMessage(duplicateWs);
+    await deliverOne(duplicateEvent, {
+      incomingBuffer: {
+        markCompleted(id) { assert.strictEqual(id, 103); },
+      },
+      postToCI4: async () => ({
+        ok: true,
+        status: 200,
+        json: {
+          status: 'success',
+          duplicate: true,
+          conversation_id: 22,
+        },
+      }),
+    });
+    const duplicateMessage = await duplicateReceived;
+    assert.strictEqual(duplicateMessage.type, 'message.created');
+    assert.strictEqual(duplicateMessage.conversation_id, 22);
+    assert.strictEqual(duplicateMessage.duplicate, true);
+    duplicateWs.close();
+    console.log('OK');
+
     console.log('PASS: Milestone 2 realtime delivery regression');
   } finally {
     await new Promise((resolve) => server.close(resolve));
