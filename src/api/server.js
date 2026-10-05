@@ -5,6 +5,7 @@ const config = require('../config');
 const logger = require('../logging');
 const evolutionCi4Routes = require('../evolution/ci4Routes');
 const evolutionWebhookRoutes = require('../evolution/webhookRoutes');
+const { attachRealtime } = require('../realtime/server');
 
 /**
  * Server HTTP adapter Evolution. TIDAK memuat apa pun dari Baileys -- sesi
@@ -53,6 +54,11 @@ function startServer() {
       );
     }
   });
+
+  // Spike Inbox realtime: WebSocket memakai HTTP server yang sama, jadi tidak
+  // perlu port tambahan. Autentikasi dilakukan dengan short-lived ticket dari CI4.
+  attachRealtime(server);
+
   return server;
 }
 
