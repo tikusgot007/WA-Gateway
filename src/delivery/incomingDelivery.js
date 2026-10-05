@@ -215,10 +215,18 @@ async function deliverLifecycle(event, { post, buffer, deliveryLogger }) {
     return;
   }
 
-  const result = await post('/api/inbox/gateway/message-event', {
+  const editedText = lifecycleEvent === 'edited'
+    && typeof extra.edited_text === 'string'
+    ? extra.edited_text
+    : null;
+
+  const lifecycleBody = {
     wa_message_id: targetWaMessageId,
     event: lifecycleEvent,
-  });
+    ...(editedText !== null ? { edited_text: editedText } : {}),
+  };
+
+  const result = await post('/api/inbox/gateway/message-event', lifecycleBody);
 
   if (result.ok) {
     buffer.markCompleted(event.id);
