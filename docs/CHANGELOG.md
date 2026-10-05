@@ -3,6 +3,26 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-05 — TODO-F8 masuk `evolution` (dekripsi teks pesan diedit + patch LID)
+
+- `evolution` di-fast-forward ke `integration/realtime-f8` (`ba4bcf3..e653de5`),
+  yang memuat F8 **dan** kerja realtime. PR #5 (`todo-f8-capture-fixture`) merged.
+- Isi F8: `src/evolution/messageEditCrypto.js` (HKDF-SHA256 + AES-256-GCM +
+  decode protobuf `WAProto.Message`), `src/evolution/messageEditResolver.js`
+  (kandidat `origMsgSender`/`editSender` termasuk `remoteJidLid`), dan
+  pengiriman `edited_text` tervalidasi ke CI4 saat event `edited`.
+- Patch deployment LID: `installer/apply-lid-preservation-patch.ps1`
+  menyimpan LID asli ke `key.remoteJidLid` sebelum `remoteJid` dinormalisasi ke
+  PN, dan menghapus log raw (`console.log(messageRaw)` /
+  `this.logger.verbose(messageRaw)`) di jalur `MESSAGES_UPSERT`. Harus
+  di-reapply tiap upgrade Evolution (pola TODO-F3).
+- **Perilaku default tidak berubah**: dekripsi edit hanya aktif bila
+  `EVOLUTION_DECRYPT_MESSAGE_EDIT=1`. Bila dekripsi gagal, perilaku TODO-F7
+  (marker `edited` tanpa mengganti teks) tetap berjalan.
+- Verifikasi: `npm test` semua suite OK (realtime websocket 30/30);
+  `installer/tests/check-lid-preservation-patch.ps1` PASS; E2E nyata
+  WhatsApp → Evolution (LID preserved) → gateway → POS dikonfirmasi user.
+
 ## 2026-10-03 — TODO-F6: forward KELUAR tersinkron dari WA Web/HP kini ditandai "Diteruskan"
 
 - Akar: `normalize.js` `extractForwardFlag()` sudah bisa membaca
