@@ -99,13 +99,20 @@ function attachRealtime(server, options = {}) {
     maxPayload: 16 * 1024,
   });
 
-  server.on('upgrade', (request, socket, head) => {
+  let closed = false;
+
+  function handleUpgrade(request, socket, head) {
     let url;
 
     try {
       url = new URL(request.url, 'http://localhost');
     } catch (_) {
       socket.destroy();
+      return;
+    }
+
+    if (closed) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       return;
     }
 
@@ -123,7 +130,9 @@ function attachRealtime(server, options = {}) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request, auth);
     });
-  });
+  }
+
+  server.on('upgrade', handleUpgrade);
 
   wss.on('connection', (ws, request, auth) => {
     clients.add(ws);
@@ -207,7 +216,20 @@ function attachRealtime(server, options = {}) {
 
   return {
     close: () => {
+      if (closed) return;
+      closed = true;
       clearInterval(heartbeatInterval);
+      server.removeListener('upgrade', handleUpgrade);
+
+      for (const ws of clients) {
+        clients.delete(ws);
+        try {
+          ws.terminate();
+        } catch (_) {
+          // Abaikan kegagalan cleanup; registry tetap dibersihkan.
+        }
+      }
+
       wss.close();
     },
     broadcast,
