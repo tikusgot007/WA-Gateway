@@ -1,0 +1,20 @@
+<service>
+  <id>__SERVICE_ID__</id>
+  <name>__SERVICE_DISPLAY_NAME__</name>
+  <description>Adapter evolution-gateway (AuliaPos CI4 &lt;-&gt; Evolution API bridge). Installed by evolution-gateway installer; do not edit manually, re-run install.ps1 instead.</description>
+  <executable>__NODE_EXE__</executable>
+  <arguments>src\app\evolution.js</arguments>
+  <workingdirectory>__WORKDIR__</workingdirectory>
+  <depend>__EVOLUTION_SERVICE_ID__</depend>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="5 sec"/>
+  <onfailure action="restart" delay="15 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>20 sec</stoptimeout>
+  <logpath>__LOG_DIR__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

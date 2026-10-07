@@ -2,10 +2,12 @@
   install.ps1 -- paket instalasi gateway WhatsApp untuk PC Windows baru
   (bootstrap ONLINE). Memasang: PostgreSQL 16 + Evolution API (tag terpin) +
   adapter evolution-gateway, lalu menyiapkan .env, database, patch view-once,
-  firewall, instance, dan webhook.
+  firewall, instance, dan webhook. Evolution + adapter didaftarkan sebagai
+  Windows Service (WinSW): auto-start saat boot, auto-restart saat crash.
 
   Prasyarat: Windows x64, PowerShell 5.1+, Administrator, akses internet.
-  Start/stop manual: installer\start.ps1 / stop.ps1 / status.ps1.
+  Start/stop/status manual: installer\start.ps1 / stop.ps1 / status.ps1.
+  Verifikasi service: installer\tests\check-service.ps1.
 
   Contoh (token lewat file, tidak tampil di command line):
     powershell -ExecutionPolicy Bypass -File installer\install.ps1 `
@@ -35,6 +37,12 @@ param(
   [string]$AdapterRef = 'master',
   [string]$PgVersion = '16.15-1',
   [string]$ServiceName = 'postgresql-auliagw',
+
+  # Windows Service (WinSW) untuk Evolution + adapter. Dua nama service ini
+  # dipakai oleh start.ps1/stop.ps1/status.ps1 dan check-service.ps1.
+  [string]$WinswVersion = '2.12.0',
+  [string]$EvolutionServiceName = 'AuliaGatewayEvolution',
+  [string]$AdapterServiceName = 'AuliaGatewayAdapter',
 
   [switch]$SkipPrereqs,
   [string]$LogPath
@@ -110,6 +118,60 @@ function Ensure-Postgres {
   }
   Expand-RepoZip -ZipPath $zip -DestDir $pgRoot
   if (-not (Test-Path -LiteralPath $initdb)) { throw 'binari PostgreSQL tidak ditemukan setelah ekstrak.' }
+}
+
+# Unduh biner WinSW (Windows Service Wrapper) sekali ke folder downloads.
+# Dipin ke satu versi supaya hasil instalasi reproducible, sama seperti pin
+# versi PostgreSQL/Evolution di atas.
+function Ensure-WinSW {
+  param([string]$Version)
+  $exe = Join-Path $dlDir ('WinSW-' + $Version + '.exe')
+  if (Test-Path -LiteralPath $exe) { Write-Log ('winsw: sudah ada ' + $exe); return $exe }
+  $url = 'https://github.com/winsw/winsw/releases/download/v' + $Version + '/WinSW-x64.exe'
+  Get-RemoteFile -Url $url -OutFile $exe -Label ('WinSW ' + $Version)
+  return $exe
+}
+
+# Render satu service WinSW dari template: tulis XML, salin biner WinSW (hanya
+# sekali -- biner yang sedang Running tidak bisa ditimpa), lalu `install`
+# lewat SCM kalau belum terdaftar. Idempotent: dipanggil ulang tiap kali
+# install.ps1 jalan, XML selalu disegarkan supaya path/port yang berubah ikut
+# terbawa; biner & registrasi SCM hanya disentuh sekali.
+function Install-WinSwService {
+  param(
+    [Parameter(Mandatory = $true)][string]$WinswExe,
+    [Parameter(Mandatory = $true)][string]$ServiceId,
+    [Parameter(Mandatory = $true)][string]$DisplayName,
+    [Parameter(Mandatory = $true)][string]$TemplatePath,
+    [Parameter(Mandatory = $true)][string]$DestDir,
+    [Parameter(Mandatory = $true)][hashtable]$Tokens,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  if (-not (Test-Path -LiteralPath $DestDir)) { New-Item -ItemType Directory -Path $DestDir -Force | Out-Null }
+  $svcExe = Join-Path $DestDir ($ServiceId + '.exe')
+  $svcXml = Join-Path $DestDir ($ServiceId + '.xml')
+
+  if (-not (Test-Path -LiteralPath $svcExe)) {
+    Copy-Item -LiteralPath $WinswExe -Destination $svcExe -Force
+    Write-Log ($Label + ': biner WinSW disalin ke ' + $svcExe)
+  } else {
+    Write-Log ($Label + ': biner WinSW sudah ada, dilewati (' + $svcExe + ').')
+  }
+
+  $xml = Get-Content -LiteralPath $TemplatePath -Raw
+  foreach ($key in $Tokens.Keys) { $xml = $xml.Replace(('__' + $key + '__'), [string]$Tokens[$key]) }
+  [IO.File]::WriteAllText($svcXml, $xml, (New-Object System.Text.UTF8Encoding($false)))
+  Write-Log ($Label + ': konfigurasi ditulis -> ' + $svcXml)
+
+  $existing = Get-Service -Name $ServiceId -ErrorAction SilentlyContinue
+  if ($existing) {
+    Write-Log ($Label + ': service ' + $ServiceId + ' sudah terdaftar (dilewati install, config disegarkan).')
+  } else {
+    $r = Invoke-Native -Exe $svcExe -NativeArgs @('install') -Label ($Label + ' install')
+    if ($r.Code -ne 0) { throw ($Label + ': gagal mendaftarkan service (exit ' + $r.Code + ').') }
+    Write-Log ($Label + ': service ' + $ServiceId + ' terdaftar.')
+  }
+  Set-Service -Name $ServiceId -StartupType Automatic
 }
 
 function Ensure-Source {
@@ -266,10 +328,44 @@ try {
   $r = Invoke-Native -Exe $tools.Node.Source -NativeArgs @($prismaCli, 'migrate', 'deploy', '--schema', 'prisma\postgresql-schema.prisma') -Label 'prisma migrate' -WorkDir $evoDir
   if ($r.Code -ne 0) { throw 'prisma migrate deploy gagal.' }
 
+  # Daftarkan Evolution + adapter sebagai Windows Service (WinSW), agar
+  # auto-start saat boot dan auto-restart saat proses node mati (onfailure).
+  # PostgreSQL sudah lebih dulu berupa service native (install-postgres.ps1);
+  # Evolution bergantung padanya lewat <depend> supaya SCM tidak menyalakan
+  # Evolution sebelum PostgreSQL siap menerima koneksi.
+  $winswExe = Ensure-WinSW -Version $WinswVersion
+  $servicesDir = Join-Path $root 'services'
+
+  Install-WinSwService -WinswExe $winswExe -ServiceId $EvolutionServiceName `
+    -DisplayName 'Evolution API (Aulia Gateway)' `
+    -TemplatePath (Join-Path $here 'services\evolution-service.xml.template') `
+    -DestDir $servicesDir -Label 'service-evolution' `
+    -Tokens @{
+      SERVICE_ID           = $EvolutionServiceName
+      SERVICE_DISPLAY_NAME = 'Evolution API (Aulia Gateway)'
+      NODE_EXE             = $tools.Node.Source
+      WORKDIR              = $evoDir
+      PG_SERVICE_NAME      = $ServiceName
+      LOG_DIR              = $logDir
+    }
+
+  Install-WinSwService -WinswExe $winswExe -ServiceId $AdapterServiceName `
+    -DisplayName 'Adapter evolution-gateway (Aulia Gateway)' `
+    -TemplatePath (Join-Path $here 'services\adapter-service.xml.template') `
+    -DestDir $servicesDir -Label 'service-adapter' `
+    -Tokens @{
+      SERVICE_ID           = $AdapterServiceName
+      SERVICE_DISPLAY_NAME = 'Adapter evolution-gateway (Aulia Gateway)'
+      NODE_EXE             = $tools.Node.Source
+      WORKDIR              = $adapterDir
+      EVOLUTION_SERVICE_ID = $EvolutionServiceName
+      LOG_DIR              = $logDir
+    }
+
   Invoke-ChildScript -Script (Join-Path $here 'start.ps1') -ScriptArgs @(
     '-InstallRoot', $root, '-PgService', $ServiceName,
+    '-EvolutionServiceName', $EvolutionServiceName, '-AdapterServiceName', $AdapterServiceName,
     '-PgPort', "$PgPort", '-EvolutionPort', "$EvolutionPort", '-AdapterPort', "$AdapterPort",
-    '-NodeExe', $tools.Node.Source,
     '-LogPath', (Join-Path $logDir 'start.log')
   ) -Label 'start'
 
@@ -291,6 +387,7 @@ try {
 
   Invoke-ChildScript -Script (Join-Path $here 'status.ps1') -ScriptArgs @(
     '-InstallRoot', $root, '-PgService', $ServiceName,
+    '-EvolutionServiceName', $EvolutionServiceName, '-AdapterServiceName', $AdapterServiceName,
     '-PgPort', "$PgPort", '-EvolutionPort', "$EvolutionPort", '-AdapterPort', "$AdapterPort",
     '-LogPath', (Join-Path $logDir 'status.log')
   ) -Label 'status'
@@ -316,7 +413,9 @@ try {
     '2. Di server AuliaPos, samakan:',
     ('   inbox.gatewayBaseUrl = http://' + $lan + ':' + $AdapterPort),
     '   inbox.gatewayToken   = (token yang Anda berikan saat instalasi)',
-    '3. Start/stop/status manual: installer\start.ps1 | stop.ps1 | status.ps1',
+    ('3. Service (auto-start saat boot, auto-restart saat crash): ' + $EvolutionServiceName + ', ' + $AdapterServiceName),
+    '   Start/stop/status manual tetap bisa: installer\start.ps1 | stop.ps1 | status.ps1',
+    '   Verifikasi service: installer\tests\check-service.ps1',
     ('4. Panduan lengkap: ' + (Join-Path $root 'petunjuk-penggunaan.md'))
   )
   [IO.File]::WriteAllLines((Join-Path $root 'install-summary.txt'), $summary, (New-Object System.Text.UTF8Encoding($false)))

@@ -85,25 +85,52 @@ Selesai. Ringkasan tersimpan di `<InstallRoot>\install-summary.txt`.
 
 ---
 
-## 3. Start / Stop / Status (manual)
+## 3. Start / Stop / Status (sekarang berbasis Windows Service)
 
-Semua perintah dijalankan dari folder paket sebagai Administrator.
+Evolution API dan adapter berjalan sebagai **Windows Service** (dibungkus
+[WinSW](https://github.com/winsw/winsw)), terdaftar otomatis oleh
+`install.ps1`:
+
+| Service | Nama default | Dependensi |
+|---|---|---|
+| PostgreSQL | `postgresql-auliagw` (native, `pg_ctl register`) | — |
+| Evolution API | `AuliaGatewayEvolution` | PostgreSQL (menunggu PostgreSQL *Running* sebelum start) |
+| Adapter `evolution-gateway` | `AuliaGatewayAdapter` | Evolution API |
+
+Konsekuensi:
+
+- **Auto-start saat boot**: ketiga service `StartType=Automatic`. PC gateway
+  yang di-restart (listrik mati, Windows Update, dll.) akan menyalakan ulang
+  seluruh stack **tanpa perlu login operator**.
+- **Auto-restart saat crash**: bila proses `node.exe` Evolution atau adapter
+  mati di luar jalur normal (crash, dimatikan antivirus, dsb.), Windows
+  Service Control Manager menyalakannya kembali **dalam hitungan detik**
+  (percobaan pertama setelah 5 detik), tanpa menunggu siklus watchdog manual.
+- Perintah `start.ps1`/`stop.ps1`/`status.ps1` **tetap tersedia** dan sekarang
+  memanggil `Start-Service`/`Stop-Service`/`Get-Service` di balik layar.
+  Semua perintah dijalankan dari folder paket sebagai Administrator:
 
 ```powershell
-# Menyalakan PostgreSQL (service) + Evolution + adapter
+# Menyalakan PostgreSQL + Evolution + adapter (service)
 powershell -ExecutionPolicy Bypass -File installer\start.ps1 -InstallRoot C:\AuliaGateway
 
-# Mematikan Evolution + adapter (PostgreSQL tetap jalan)
+# Mematikan Evolution + adapter (PostgreSQL tetap jalan kecuali -StopPostgres)
 powershell -ExecutionPolicy Bypass -File installer\stop.ps1  -InstallRoot C:\AuliaGateway
 
 # Status: service, port, proses, status instance, ekor log
 powershell -ExecutionPolicy Bypass -File installer\status.ps1 -InstallRoot C:\AuliaGateway
+
+# Verifikasi khusus: ketiga service terdaftar DAN Running
+powershell -ExecutionPolicy Bypass -File installer\tests\check-service.ps1
 ```
 
-- `start.ps1` idempotent: komponen yang portnya sudah listen dilewati.
-- `stop.ps1` hanya mematikan proses node yang command line-nya cocok dengan
-  adapter/Evolution; port milik proses lain tidak diganggu.
-- Untuk juga mematikan PostgreSQL: tambahkan `-StopPostgres` pada `stop.ps1`.
+- Melihat service secara native Windows (tanpa skrip):
+  `Get-Service AuliaGatewayEvolution, AuliaGatewayAdapter` atau
+  `services.msc`.
+- Untuk juga mematikan PostgreSQL lewat `stop.ps1`: tambahkan `-StopPostgres`.
+- Mengganti konfigurasi (port, path) setelah instalasi awal: jalankan ulang
+  `install.ps1` dengan parameter yang sama — konfigurasi service (file XML
+  WinSW) disegarkan otomatis; registrasi service itu sendiri tidak diulang.
 
 ---
 

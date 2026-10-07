@@ -9,6 +9,8 @@
 param(
   [string]$InstallRoot = 'C:\AuliaGateway',
   [string]$PgService = 'postgresql-auliagw',
+  [string]$EvolutionServiceName = 'AuliaGatewayEvolution',
+  [string]$AdapterServiceName = 'AuliaGatewayAdapter',
   [int]$PgPort = 5432,
   [int]$EvolutionPort = 8080,
   [int]$AdapterPort = 3000,
@@ -31,6 +33,13 @@ Write-Log '--- service PostgreSQL ---'
 $svc = Get-Service -Name $PgService -ErrorAction SilentlyContinue
 if ($svc) { Write-Log ('  ' + $PgService + ': ' + $svc.Status + ' (start=' + $svc.StartType + ')') }
 else { Write-Log ('  ' + $PgService + ': tidak terdaftar') }
+
+Write-Log '--- service Evolution/adapter ---'
+foreach ($svcName in @($EvolutionServiceName, $AdapterServiceName)) {
+  $s = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+  if ($s) { Write-Log ('  ' + $svcName + ': ' + $s.Status + ' (start=' + $s.StartType + ')') }
+  else { Write-Log ('  ' + $svcName + ': tidak terdaftar') }
+}
 
 Write-Log '--- port listen ---'
 foreach ($p in @($PgPort, $EvolutionPort, $AdapterPort)) {

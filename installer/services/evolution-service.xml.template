@@ -1,0 +1,20 @@
+<service>
+  <id>__SERVICE_ID__</id>
+  <name>__SERVICE_DISPLAY_NAME__</name>
+  <description>Evolution API (WhatsApp session server) for the Aulia gateway stack. Installed by evolution-gateway installer; do not edit manually, re-run install.ps1 instead.</description>
+  <executable>__NODE_EXE__</executable>
+  <arguments>node_modules\tsx\dist\cli.mjs src\main.ts</arguments>
+  <workingdirectory>__WORKDIR__</workingdirectory>
+  <depend>__PG_SERVICE_NAME__</depend>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="5 sec"/>
+  <onfailure action="restart" delay="15 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>20 sec</stoptimeout>
+  <logpath>__LOG_DIR__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

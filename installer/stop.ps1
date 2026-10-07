@@ -1,17 +1,20 @@
 <#
-  stop.ps1 -- hentikan Evolution dan adapter secara MANUAL.
+  stop.ps1 -- hentikan Evolution dan adapter (keduanya Windows Service).
 
-  Pengaman (pola scripts/restart-adapter.ps1): proses pemilik port HANYA
-  dimatikan kalau namanya node DAN command line-nya cocok dengan komponen
-  yang dimaksud. Port yang dipakai proses lain TIDAK ikut dimatikan.
+  Evolution & adapter dihentikan lewat Stop-Service (bukan lagi pencarian proses
+  pemilik port). PostgreSQL (service) secara bawaan TIDAK dihentikan; pakai
+  -StopPostgres kalau memang ingin mematikannya juga.
 
-  PostgreSQL (service) secara bawaan TIDAK dihentikan; pakai -StopPostgres
-  kalau memang ingin mematikannya juga.
+  Pemeriksaan port di akhir tetap dipertahankan sebagai jaring pengaman
+  independen: kalau port stack masih listen setelah service dihentikan, skrip
+  keluar dengan kode 1 (tidak melaporkan sukses palsu).
 #>
 [CmdletBinding()]
 param(
   [string]$InstallRoot = 'C:\AuliaGateway',
   [string]$PgService = 'postgresql-auliagw',
+  [string]$EvolutionServiceName = 'AuliaGatewayEvolution',
+  [string]$AdapterServiceName = 'AuliaGatewayAdapter',
   [int]$PgPort = 5432,
   [int]$EvolutionPort = 8080,
   [int]$AdapterPort = 3000,
@@ -28,41 +31,26 @@ if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path 
 if (-not $LogPath) { $LogPath = Join-Path $logDir 'stop.log' }
 Initialize-AuliaLog -Path $LogPath -Reset
 
-function Stop-OwnedProcess {
+function Stop-ServiceSafe {
   param(
-    [int]$Port,
-    [string]$Match,
+    [string]$Name,
     [string]$Label
   )
-  $pids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-    ForEach-Object { $_.OwningProcess } | Sort-Object -Unique)
-  if ($pids.Count -eq 0) { Write-Log ($Label + ': tidak ada proses di port ' + $Port + ' (sudah mati).'); return }
-
-  $killed = 0
-  foreach ($procId in $pids) {
-    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if (-not $proc) { continue }
-    $cmd = $null
-    try { $cmd = (Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $procId) -ErrorAction Stop).CommandLine } catch { }
-    $isOurs = ($proc.ProcessName -like 'node*') -and $cmd -and ($cmd -match $Match)
-    if (-not $isOurs) {
-      Write-Log ('  ' + $Label + ': BUKAN proses kita -- pid=' + $procId + ' nama=' + $proc.ProcessName + ' cmd=' + $cmd + ' (dilewati)')
-      continue
-    }
-    try { Stop-Process -Id $procId -Force -ErrorAction Stop; $killed++; Write-Log ('  ' + $Label + ': stop pid ' + $procId + ' OK') }
-    catch { Write-Log ('  ' + $Label + ': stop pid ' + $procId + ' GAGAL: ' + $_.Exception.Message) }
-  }
-
+  $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+  if (-not $svc) { Write-Log ($Label + ': service ' + $Name + ' tidak terdaftar (dilewati).'); return }
+  if ($svc.Status -eq 'Stopped') { Write-Log ($Label + ': sudah Stopped.'); return }
+  Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
   foreach ($i in 1..15) {
-    if (-not (Test-Listen -Port $Port)) { Write-Log ('  ' + $Label + ': port ' + $Port + ' bebas.'); return }
+    if ((Get-Service -Name $Name).Status -eq 'Stopped') { break }
     Start-Sleep -Seconds 1
   }
-  Write-Log ('  ' + $Label + ': PERINGATAN -- port ' + $Port + ' masih listen setelah 15 detik.')
+  $final = (Get-Service -Name $Name).Status
+  Write-Log ($Label + ': Stop-Service selesai, status=' + $final + '.')
 }
 
 Write-Log '=== STOP STACK GATEWAY ==='
-Stop-OwnedProcess -Port $AdapterPort -Match 'evolution-gateway|src[\\/]app[\\/]evolution\.js' -Label 'adapter'
-Stop-OwnedProcess -Port $EvolutionPort -Match 'evolution-api-server|src[\\/]main\.ts' -Label 'evolution'
+Stop-ServiceSafe -Name $AdapterServiceName -Label 'adapter'
+Stop-ServiceSafe -Name $EvolutionServiceName -Label 'evolution'
 
 if ($StopPostgres) {
   $svc = Get-Service -Name $PgService -ErrorAction SilentlyContinue
