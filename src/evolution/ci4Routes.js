@@ -493,6 +493,176 @@ router.post('/read', jsonSmall, requireCI4Token, async (req, res) => {
   }
 });
 
+// --- POST /delete -------------------------------------------------------
+// AuliaPos meminta adapter menghapus pesan keluar untuk semua
+// (delete for everyone). Idempotensi opsional via operation_id.
+router.post('/delete', jsonSmall, requireCI4Token, async (req, res) => {
+  const { chat_id: chatId, wa_message_id: waMessageId } = req.body || {};
+
+  const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
+  if (!operation.ok) return invalidOperationIdResponse(res);
+  const { operationId } = operation;
+
+  if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_CHAT_ID',
+      message: `chat_id tidak valid/tidak dapat didecode sebagai JID: ${chatId}`,
+    });
+  }
+
+  if (typeof waMessageId !== 'string' || waMessageId.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_MESSAGE_ID',
+      message: 'Field "wa_message_id" wajib diisi (string).',
+    });
+  }
+
+  const doDelete = async () => {
+    const result = await evolutionClient.deleteMessageForEveryone({
+      id: waMessageId,
+      fromMe: true,
+      remoteJid: chatId,
+    });
+    return result;
+  };
+
+  // Idempotensi opsional untuk delete
+  if (operationId) {
+    const decision = await outgoingOperationService.runOperation({
+      operationId,
+      payloadHash: outgoingOperationService.computePayloadHash({
+        kind: 'delete',
+        chatId,
+        text: null,
+        mediaMeta: null,
+        targetMessageId: waMessageId,
+      }),
+      kind: 'delete',
+      chatId,
+      isReady,
+      send: doDelete,
+    });
+    const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId });
+    // Override state dari 'sent' menjadi 'deleted'
+    if (body.state === 'sent') body.state = 'deleted';
+    return res.status(status).json(body);
+  }
+
+  outgoingOperationService.warnWithoutOperationIdOnce();
+
+  if (!isReady()) {
+    return res.status(409).json({
+      success: false,
+      error_code: 'NOT_CONNECTED',
+      message: 'WhatsApp belum connected.',
+    });
+  }
+
+  try {
+    const result = await doDelete();
+    logger.info('[DELETE-EVOLUTION] pesan dari POS berhasil dihapus', { chatId, waMessageId });
+    return res.json({
+      success: true,
+      state: 'deleted',
+      replayed: false,
+      timestamp: result.timestamp,
+    });
+  } catch (err) {
+    logger.error('[DELETE-EVOLUTION] gagal menghapus pesan dari POS', { chatId, waMessageId, error: err.message });
+    return res.status(500).json({
+      success: false,
+      error_code: err.code || 'DELETE_FAILED',
+      message: err.message,
+    });
+  }
+});
+
+// --- POST /edit ---------------------------------------------------------
+// AuliaPos meminta adapter mengedit pesan keluar. Idempotensi WAJIB via
+// operation_id (target message dapat berbeda dengan teks yang sama).
+router.post('/edit', jsonSmall, requireCI4Token, async (req, res) => {
+  const { chat_id: chatId, wa_message_id: waMessageId, new_text: newText } = req.body || {};
+
+  const operation = outgoingOperationService.validateOperationId((req.body || {}).operation_id);
+  if (!operation.ok) return invalidOperationIdResponse(res);
+  const { operationId } = operation;
+
+  // Edit WAJIB punya operation_id untuk idempotensi
+  if (!operationId) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'MISSING_OPERATION_ID',
+      message: 'Field "operation_id" wajib diisi untuk edit pesan (idempotensi).',
+    });
+  }
+
+  if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_CHAT_ID',
+      message: `chat_id tidak valid/tidak dapat didecode sebagai JID: ${chatId}`,
+    });
+  }
+
+  if (typeof waMessageId !== 'string' || waMessageId.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_MESSAGE_ID',
+      message: 'Field "wa_message_id" wajib diisi (string).',
+    });
+  }
+
+  if (typeof newText !== 'string' || newText.trim().length === 0) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_TEXT',
+      message: 'Field "new_text" wajib diisi (string).',
+    });
+  }
+
+  if (newText.length > 4096) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'TEXT_TOO_LONG',
+      message: 'Teks pesan terlalu panjang (maks 4096 karakter).',
+    });
+  }
+
+  const doEdit = async () => {
+    const result = await evolutionClient.updateMessage({
+      number: jidToPhone(chatId),
+      key: {
+        id: waMessageId,
+        remoteJid: chatId,
+        fromMe: true,
+      },
+      text: newText,
+    });
+    return result;
+  };
+
+  const decision = await outgoingOperationService.runOperation({
+    operationId,
+    payloadHash: outgoingOperationService.computePayloadHash({
+      kind: 'edit',
+      chatId,
+      text: newText,
+      mediaMeta: null,
+      targetMessageId: waMessageId,
+    }),
+    kind: 'edit',
+    chatId,
+    isReady,
+    send: doEdit,
+  });
+  const { status, body } = outgoingOperationService.toHttpResponse(decision, { operationId });
+  // Override state dari 'sent' menjadi 'edited'
+  if (body.state === 'sent') body.state = 'edited';
+  return res.status(status).json(body);
+});
+
 // --- POST /media/download -----------------------------------------------
 // Adapter menyimpan media MASUK secara lokal dan menyerahkan ref opaque
 // `evolution-media:<id>` sebagai `direct_path`. Endpoint ini menyajikan blob

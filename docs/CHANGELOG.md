@@ -3,6 +3,44 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-07 — Fix: VALID_KINDS di outgoingOperations.js
+
+- Bug: `/edit` dan `/delete` gagal dengan `OPERATION_STORE_ERROR` sebelum memanggil Evolution API.
+- Akar: `VALID_KINDS` di `src/store/outgoingOperations.js` (dipakai `begin()`) masih
+  `['text', 'media']` — belum include `'delete'`/`'edit'`.
+- Implementasi awal hanya mengubah `VALID_KINDS` di `outgoingOperationService.js`, padahal
+  di file itu grep tidak menemukan `VALID_KINDS` sama sekali. Kesalahan tempat.
+- Fix: ubah `src/store/outgoingOperations.js:38` jadi
+  `const VALID_KINDS = ['text', 'media', 'delete', 'edit'];`
+- Verifikasi: E2E di C:\AuliaGateway-test — `/edit` dan `/delete` sekarang sukses
+  (`state=edited`/`state=deleted`).
+
+## 2026-10-07 — Endpoint `/delete` & `/edit` untuk hapus/edit pesan keluar
+
+- Endpoint baru `POST /delete` (Bearer CI4 token): AuliaPos meminta adapter
+  menghapus pesan keluar untuk semua (delete for everyone) ->
+  Evolution `DELETE /chat/deleteMessageForEveryone/{instance}` body
+  `{ id, fromMe:true, remoteJid }`. Idempotensi opsional via `operation_id`;
+  delete tanpa `operation_id` tetap jalan (idempoten natural di Evolution).
+- Endpoint baru `POST /edit` (Bearer CI4 token): AuliaPos meminta adapter
+  mengedit teks pesan keluar -> Evolution `POST /chat/updateMessage/{instance}`
+  body `{ number, key: { id, remoteJid, fromMe:true }, text }`. Idempotensi
+  WAJIB via `operation_id` (untuk membedakan target message saat teks sama).
+  Edit hanya berlaku 15 menit setelah pesan dikirim (Evolution enforcement).
+- Response `state` di-override: `'deleted'` untuk `/delete`, `'edited'` untuk `/edit`
+  (bukan `'sent'`).
+- Payload hash untuk edit/delete sertakan `wa_message_id` (targetMessageId) supaya
+  operasi dengan teks sama ke pesan berbeda tidak di-replay. Update signature
+  `computePayloadHash` untuk field ke-5 `targetMessageId`.
+- File: `src/evolution/client.js` (`deleteMessageForEveryone`, `updateMessage`),
+  `src/evolution/ci4Routes.js` (`POST /delete`, `POST /edit`),
+  `src/delivery/outgoingOperationService.js` (signature `computePayloadHash`).
+- Test: `test/simulate-evolution-adapter.js` tambah kasus delete/edit sukses,
+  idempotensi, validasi payload, edit window expired (>15 min), edit media
+  unsupported (masih TODO di Evolution). Jalankan: `npm test`.
+- Verifikasi E2E: curl ke adapter `/delete` dan `/edit`, lihat perubahan di
+  WhatsApp Web (pesan dihapus/diedit, teks terupdate, timestamp berubah).
+
 ## 2026-10-07 — WhatsApp read receipt (dua arah): `/read` + event `MESSAGES_UPDATE`
 
 - Endpoint baru `POST /read` (Bearer CI4 token): AuliaPos meminta adapter

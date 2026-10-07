@@ -37,15 +37,23 @@ function validateOperationId(raw) {
 
 /**
  * Fingerprint payload (ASSUMPTION-005): SHA-256 dari JSON kanonik
- * [kind, chatId, text | null, mediaMeta | null]. Urutan elemen array tetap, jadi
- * hasilnya deterministik. Hanya teks/metadata yang masuk; base64 media TIDAK
- * pernah di-hash apa adanya (lihat mediaMeta di ci4Routes.js). Dipanggil SETELAH
- * seluruh validasi payload lolos (A-7).
+ * [kind, chatId, text | null, mediaMeta | null, targetMessageId | null].
+ * Urutan elemen array tetap, jadi hasilnya deterministik. Hanya
+ * teks/metadata yang masuk; base64 media TIDAK pernah di-hash apa adanya
+ * (lihat mediaMeta di ci4Routes.js). `targetMessageId` sertakan HANYA untuk
+ * edit/delete (bukan null) supaya hash unik per kombinasi (chat + pesan +
+ * teks baru), mencegah replay palsu kalau dua pesan berbeda diedit ke teks
+ * yang sama. Backward-compatible: /send & /send-media tidak sertakan
+ * targetMessageId, jadi hash-nya tetap 4-elemen seperti sebelum.
+ * Dipanggil SETELAH seluruh validasi payload lolos (A-7).
  */
-function computePayloadHash({ kind, chatId, text = null, mediaMeta = null }) {
+function computePayloadHash({ kind, chatId, text = null, mediaMeta = null, targetMessageId = null }) {
+  const payload = targetMessageId
+    ? [kind, chatId, text, mediaMeta, targetMessageId]
+    : [kind, chatId, text, mediaMeta];
   return crypto
     .createHash('sha256')
-    .update(JSON.stringify([kind, chatId, text, mediaMeta]))
+    .update(JSON.stringify(payload))
     .digest('hex');
 }
 

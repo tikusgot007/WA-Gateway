@@ -444,6 +444,91 @@ async function getMediaBase64(key, opts = {}) {
   };
 }
 
+/**
+ * DELETE /chat/deleteMessageForEveryone/{instance} -- hapus pesan keluar
+ * untuk semua (delete for everyone).
+ *
+ * Body DIVERIFIKASI dari source v2.3.7 (`src/validate/chat.schema.ts`
+ * deleteMessageSchema + `src/api/controllers/chat.controller.ts:41`):
+ * `{ id, fromMe, remoteJid, participant? }`.
+ *
+ * Respons sukses HTTP 201 dengan protocolMessage REVOKE; gagal -> 400/500.
+ *
+ * @param {{id: string, fromMe: boolean, remoteJid: string, participant?: string}} args
+ * @returns {Promise<{deleted: boolean, timestamp: string}>}
+ */
+async function deleteMessageForEveryone({ id, fromMe, remoteJid, participant = null }) {
+  if (!isConfigured()) throw notConfiguredError();
+
+  const body = {
+    id: String(id),
+    fromMe: Boolean(fromMe),
+    remoteJid: String(remoteJid),
+  };
+  if (participant) body.participant = String(participant);
+
+  let res;
+  try {
+    res = await withTimeout((signal) => fetch(instancePath('/chat/deleteMessageForEveryone'), {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+      body: JSON.stringify(body),
+      signal,
+    }));
+  } catch (err) {
+    throw networkError(err);
+  }
+
+  const { json, rawText } = await parseJsonSafely(res);
+  if (!res.ok || !json) throw sendFailedError(json, rawText, res.status);
+
+  return { deleted: true, timestamp: new Date().toISOString() };
+}
+
+/**
+ * POST /chat/updateMessage/{instance} -- edit pesan keluar (text).
+ *
+ * Body DIVERIFIKASI dari source v2.3.7 (`src/validate/chat.schema.ts`
+ * updateMessageSchema + `src/api/controllers/chat.controller.ts:109`):
+ * `{ number, key: { id, remoteJid, fromMe }, text }`.
+ *
+ * Respons sukses HTTP 200 dengan protocolMessage MESSAGE_EDIT; gagal -> 400/500.
+ * Edit hanya berlaku 15 menit setelah pesan dikirim.
+ *
+ * @param {{number: string, key: {id: string, remoteJid: string, fromMe: boolean}, text: string}} args
+ * @returns {Promise<{edited: boolean, timestamp: string}>}
+ */
+async function updateMessage({ number, key, text }) {
+  if (!isConfigured()) throw notConfiguredError();
+
+  const body = {
+    number: String(number),
+    key: {
+      id: String(key.id),
+      remoteJid: String(key.remoteJid),
+      fromMe: Boolean(key.fromMe),
+    },
+    text: String(text),
+  };
+
+  let res;
+  try {
+    res = await withTimeout((signal) => fetch(instancePath('/chat/updateMessage'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+      body: JSON.stringify(body),
+      signal,
+    }));
+  } catch (err) {
+    throw networkError(err);
+  }
+
+  const { json, rawText } = await parseJsonSafely(res);
+  if (!res.ok || !json) throw sendFailedError(json, rawText, res.status);
+
+  return { edited: true, timestamp: new Date().toISOString() };
+}
+
 module.exports = {
   isConfigured,
   sendText,
@@ -455,4 +540,6 @@ module.exports = {
   getGroupInfo,
   setWebhook,
   getMediaBase64,
+  deleteMessageForEveryone,
+  updateMessage,
 };

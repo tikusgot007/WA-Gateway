@@ -35,7 +35,7 @@ const { FORWARD_MARKERS } = require('../whatsapp/forwardMarker');
  */
 
 const TERMINAL_STATES = ['sent', 'failed', 'abandoned'];
-const VALID_KINDS = ['text', 'media'];
+const VALID_KINDS = ['text', 'media', 'delete', 'edit'];
 // Enum tunggal alasan dead-letter (spec 2, A-6). Di jalur kirim keluar hanya
 // `max_attempts` yang dipakai; nilai lain ikut diterima supaya enum-nya satu.
 const ABANDON_REASONS = ['max_attempts', 'max_age', 'permanent_rejection'];
