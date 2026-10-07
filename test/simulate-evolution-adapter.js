@@ -33,6 +33,10 @@ process.env.CI4_GATEWAY_TOKEN = 'token-uji';
 process.env.EVOLUTION_API_KEY = 'apikey-uji';
 process.env.EVOLUTION_INSTANCE = 'inst-uji';
 process.env.EVOLUTION_BASE_URL = 'http://127.0.0.1:8080';
+// Isolasi dari .env: test ini mengirim webhook TANPA secret, jadi paksa kosong.
+// Tanpa ini, environment dengan EVOLUTION_WEBHOOK_SECRET non-kosong (mis. test env)
+// membuat webhook menolak request (401) sebelum section delete/edit tercapai.
+process.env.EVOLUTION_WEBHOOK_SECRET = '';
 
 const assert = require('assert');
 const express = require('express');
@@ -838,102 +842,6 @@ function webhookPayload(overrides = {}) {
   assert.ok(!logText().includes(SECRET), 'isi pesan tidak boleh muncul di log');
   console.log('OK');
 
-  section('Klien Evolution: mapping request nyata ke kontrak v2.3.7 (fetch di-stub)');
-  const realFetch = global.fetch;
-  const captured = [];
-  global.fetch = async (url, opts) => {
-    captured.push({ url, opts });
-    return new Response(
-      JSON.stringify({ key: { id: 'REAL-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }),
-      { status: 201 }
-    );
-  };
-  // Modul client yang ASLI (bukan stub di atas router) untuk menguji HTTP client.
-  delete require.cache[require.resolve('../src/evolution/client')];
-  const realClient = require('../src/evolution/client');
-
-  const realSent = await realClient.sendText({
-    number: '628999',
-    text: 'hai',
-    quoted: { key: { id: 'Q1', remoteJid: '628999@s.whatsapp.net', fromMe: false }, message: { conversation: 'asal' } },
-  });
-  const sentCall = captured[0];
-  assert.ok(sentCall.url.endsWith('/message/sendText/inst-uji'), 'path sendText benar');
-  assert.strictEqual(sentCall.opts.headers.apikey, 'apikey-uji', 'auth memakai header apikey (bukan Bearer)');
-  const sentBody = JSON.parse(sentCall.opts.body);
-  assert.strictEqual(sentBody.number, '628999');
-  assert.strictEqual(sentBody.text, 'hai', 'schema resmi v2.3.7 memakai field flat "text"');
-  assert.strictEqual(sentBody.quoted.key.id, 'Q1');
-  assert.strictEqual(realSent.messageId, 'REAL-1', 'wa_message_id diambil dari key.id');
-
-  captured.length = 0;
-  global.fetch = async (url, opts) => {
-    captured.push({ url, opts });
-    return new Response(
-      JSON.stringify({ key: { id: 'MEDIA-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }),
-      { status: 201 }
-    );
-  };
-  const mediaBytes = Buffer.from('GAMBAR-UJI');
-  const realMedia = await realClient.sendMedia({
-    number: '628999',
-    mediatype: 'image',
-    buffer: mediaBytes,
-    mimetype: 'image/jpeg',
-    fileName: 'uji.jpg',
-    caption: 'balas gambar',
-    quoted: {
-      key: { id: 'QIMG-1', remoteJid: '628999@s.whatsapp.net', fromMe: false },
-      message: { imageMessage: { mimetype: 'image/jpeg', caption: 'gambar asal' } },
-    },
-  });
-  const mediaCall = captured[0];
-  assert.ok(mediaCall.url.endsWith('/message/sendMedia/inst-uji'), 'path sendMedia benar');
-  assert.strictEqual(mediaCall.opts.headers['Content-Type'], 'application/json', 'sendMedia dengan quote dikirim sebagai JSON');
-  assert.strictEqual(typeof mediaCall.opts.body, 'string', 'sendMedia body JSON string, bukan FormData');
-  const mediaBody = JSON.parse(mediaCall.opts.body);
-  assert.strictEqual(mediaBody.number, '628999');
-  assert.strictEqual(mediaBody.mediatype, 'image');
-  assert.strictEqual(mediaBody.media, mediaBytes.toString('base64'), 'media dikirim sebagai base64');
-  assert.strictEqual(mediaBody.fileName, 'uji.jpg');
-  assert.strictEqual(mediaBody.mimetype, 'image/jpeg');
-  assert.strictEqual(mediaBody.caption, 'balas gambar');
-  assert.strictEqual(mediaBody.quoted.key.id, 'QIMG-1', 'quoted tetap object pada sendMedia');
-  assert.strictEqual(mediaBody.quoted.message.imageMessage.caption, 'gambar asal');
-  assert.strictEqual(realMedia.messageId, 'MEDIA-1');
-  await realClient.setWebhook({ url: 'http://127.0.0.1:3000/evolution/webhook', events: ['MESSAGES_UPSERT'] });
-  const webhookCall = captured[0];
-  // TODO-WEBHOOK: path webhook/set assertion gagal pre-existing (CHANGELOG 2026-10-07 catatan "path webhook/set benar" sudah merah).
-  // Penyebab tidak jelas — mungkin path yang di-capture berbeda dari yang diharapkan.
-  // Skip assertion ini untuk sekarang supaya test tidak terhenti. Harus di-debug & fix kemudian.
-  // if (webhookCall) assert.ok(webhookCall.url.endsWith('/webhook/set/inst-uji'), 'path webhook/set benar');
-  if (webhookCall) {
-    const webhookBody = JSON.parse(webhookCall.opts.body);
-    if (webhookBody.webhook) {
-      assert.strictEqual(webhookBody.webhook.url, 'http://127.0.0.1:3000/evolution/webhook');
-      assert.deepStrictEqual(webhookBody.webhook.events, ['MESSAGES_UPSERT']);
-    }
-  }
-
-  // sendSticker WAJIB JSON { number, sticker: base64 }, BUKAN multipart `file`:
-  // Evolution v2.3.7 mediaSticker() memakai data.sticker (bukan file) sehingga
-  // upload file -> convertToWebP(undefined) -> 500 "Invalid URL".
-  captured.length = 0;
-  global.fetch = async (url, opts) => {
-    captured.push({ url, opts });
-    return new Response(JSON.stringify({ key: { id: 'STK-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }), { status: 201 });
-  };
-  const stickerBytes = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]);
-  const realSticker = await realClient.sendSticker({ number: '628999', buffer: stickerBytes });
-  const stkCall = captured[0];
-  assert.ok(stkCall.url.endsWith('/message/sendSticker/inst-uji'), 'path sendSticker benar');
-  assert.strictEqual(stkCall.opts.headers['Content-Type'], 'application/json', 'sticker dikirim sebagai JSON');
-  assert.strictEqual(typeof stkCall.opts.body, 'string', 'body JSON string, bukan FormData');
-  const stkBody = JSON.parse(stkCall.opts.body);
-  assert.strictEqual(stkBody.number, '628999');
-  assert.strictEqual(stkBody.sticker, stickerBytes.toString('base64'), 'sticker = base64 di body');
-  assert.strictEqual(realSticker.messageId, 'STK-1');
-
   // Delete & Edit endpoint test
   section('Delete & Edit pesan keluar: /delete dan /edit endpoint');
 
@@ -1112,6 +1020,102 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(editRes.status, 400);
   assert.strictEqual(editRes.body.error_code, 'TEXT_TOO_LONG');
   console.log('OK: /edit validasi text terlalu panjang');
+
+  section('Klien Evolution: mapping request nyata ke kontrak v2.3.7 (fetch di-stub)');
+  const realFetch = global.fetch;
+  const captured = [];
+  global.fetch = async (url, opts) => {
+    captured.push({ url, opts });
+    return new Response(
+      JSON.stringify({ key: { id: 'REAL-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }),
+      { status: 201 }
+    );
+  };
+  // Modul client yang ASLI (bukan stub di atas router) untuk menguji HTTP client.
+  delete require.cache[require.resolve('../src/evolution/client')];
+  const realClient = require('../src/evolution/client');
+
+  const realSent = await realClient.sendText({
+    number: '628999',
+    text: 'hai',
+    quoted: { key: { id: 'Q1', remoteJid: '628999@s.whatsapp.net', fromMe: false }, message: { conversation: 'asal' } },
+  });
+  const sentCall = captured[0];
+  assert.ok(sentCall.url.endsWith('/message/sendText/inst-uji'), 'path sendText benar');
+  assert.strictEqual(sentCall.opts.headers.apikey, 'apikey-uji', 'auth memakai header apikey (bukan Bearer)');
+  const sentBody = JSON.parse(sentCall.opts.body);
+  assert.strictEqual(sentBody.number, '628999');
+  assert.strictEqual(sentBody.text, 'hai', 'schema resmi v2.3.7 memakai field flat "text"');
+  assert.strictEqual(sentBody.quoted.key.id, 'Q1');
+  assert.strictEqual(realSent.messageId, 'REAL-1', 'wa_message_id diambil dari key.id');
+
+  captured.length = 0;
+  global.fetch = async (url, opts) => {
+    captured.push({ url, opts });
+    return new Response(
+      JSON.stringify({ key: { id: 'MEDIA-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }),
+      { status: 201 }
+    );
+  };
+  const mediaBytes = Buffer.from('GAMBAR-UJI');
+  const realMedia = await realClient.sendMedia({
+    number: '628999',
+    mediatype: 'image',
+    buffer: mediaBytes,
+    mimetype: 'image/jpeg',
+    fileName: 'uji.jpg',
+    caption: 'balas gambar',
+    quoted: {
+      key: { id: 'QIMG-1', remoteJid: '628999@s.whatsapp.net', fromMe: false },
+      message: { imageMessage: { mimetype: 'image/jpeg', caption: 'gambar asal' } },
+    },
+  });
+  const mediaCall = captured[0];
+  assert.ok(mediaCall.url.endsWith('/message/sendMedia/inst-uji'), 'path sendMedia benar');
+  assert.strictEqual(mediaCall.opts.headers['Content-Type'], 'application/json', 'sendMedia dengan quote dikirim sebagai JSON');
+  assert.strictEqual(typeof mediaCall.opts.body, 'string', 'sendMedia body JSON string, bukan FormData');
+  const mediaBody = JSON.parse(mediaCall.opts.body);
+  assert.strictEqual(mediaBody.number, '628999');
+  assert.strictEqual(mediaBody.mediatype, 'image');
+  assert.strictEqual(mediaBody.media, mediaBytes.toString('base64'), 'media dikirim sebagai base64');
+  assert.strictEqual(mediaBody.fileName, 'uji.jpg');
+  assert.strictEqual(mediaBody.mimetype, 'image/jpeg');
+  assert.strictEqual(mediaBody.caption, 'balas gambar');
+  assert.strictEqual(mediaBody.quoted.key.id, 'QIMG-1', 'quoted tetap object pada sendMedia');
+  assert.strictEqual(mediaBody.quoted.message.imageMessage.caption, 'gambar asal');
+  assert.strictEqual(realMedia.messageId, 'MEDIA-1');
+  await realClient.setWebhook({ url: 'http://127.0.0.1:3000/evolution/webhook', events: ['MESSAGES_UPSERT'] });
+  const webhookCall = captured[0];
+  // TODO-WEBHOOK: path webhook/set assertion gagal pre-existing (CHANGELOG 2026-10-07 catatan "path webhook/set benar" sudah merah).
+  // Penyebab tidak jelas — mungkin path yang di-capture berbeda dari yang diharapkan.
+  // Skip assertion ini untuk sekarang supaya test tidak terhenti. Harus di-debug & fix kemudian.
+  // if (webhookCall) assert.ok(webhookCall.url.endsWith('/webhook/set/inst-uji'), 'path webhook/set benar');
+  if (webhookCall) {
+    const webhookBody = JSON.parse(webhookCall.opts.body);
+    if (webhookBody.webhook) {
+      assert.strictEqual(webhookBody.webhook.url, 'http://127.0.0.1:3000/evolution/webhook');
+      assert.deepStrictEqual(webhookBody.webhook.events, ['MESSAGES_UPSERT']);
+    }
+  }
+
+  // sendSticker WAJIB JSON { number, sticker: base64 }, BUKAN multipart `file`:
+  // Evolution v2.3.7 mediaSticker() memakai data.sticker (bukan file) sehingga
+  // upload file -> convertToWebP(undefined) -> 500 "Invalid URL".
+  captured.length = 0;
+  global.fetch = async (url, opts) => {
+    captured.push({ url, opts });
+    return new Response(JSON.stringify({ key: { id: 'STK-1', remoteJid: '628999@s.whatsapp.net', fromMe: true }, message: {}, status: 'PENDING' }), { status: 201 });
+  };
+  const stickerBytes = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]);
+  const realSticker = await realClient.sendSticker({ number: '628999', buffer: stickerBytes });
+  const stkCall = captured[0];
+  assert.ok(stkCall.url.endsWith('/message/sendSticker/inst-uji'), 'path sendSticker benar');
+  assert.strictEqual(stkCall.opts.headers['Content-Type'], 'application/json', 'sticker dikirim sebagai JSON');
+  assert.strictEqual(typeof stkCall.opts.body, 'string', 'body JSON string, bukan FormData');
+  const stkBody = JSON.parse(stkCall.opts.body);
+  assert.strictEqual(stkBody.number, '628999');
+  assert.strictEqual(stkBody.sticker, stickerBytes.toString('base64'), 'sticker = base64 di body');
+  assert.strictEqual(realSticker.messageId, 'STK-1');
 
   global.fetch = realFetch;
   console.log('OK: mapping klien benar.');
