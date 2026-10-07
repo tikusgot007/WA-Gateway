@@ -6,7 +6,7 @@ const config = require('../config');
 const logger = require('../logging');
 const incomingBuffer = require('../store/incomingBuffer');
 const { enqueueWithRetry } = require('../store/enqueueRetry');
-const { normalizeMessagesUpsert, normalizeConnectionUpdate, pickMessageRecord, unwrapMessage } = require('./normalize');
+const { normalizeMessagesUpsert, normalizeMessagesUpdate, normalizeConnectionUpdate, pickMessageRecord, unwrapMessage } = require('./normalize');
 const { captureMessageEditFixture } = require('./messageEditFixture');
 const { isDecryptEnabled, resolveMessageEditText } = require('./messageEditResolver');
 const evolutionState = require('./state');
@@ -14,7 +14,7 @@ const quotedStore = require('./quotedStore');
 const mediaStore = require('./mediaStore');
 const evolutionClient = require('./client');
 const groupInfo = require('./groupInfo');
-const { jidToPhone } = require('./jid');
+const { jidToPhone, isGroupJid } = require('./jid');
 const ownSent = require('./ownSentRegistry').instance;
 
 /**
@@ -78,11 +78,15 @@ router.post('/webhook', jsonBody, async (req, res) => {
     return handleMessagesDelete(res, payload);
   }
 
-  if (eventName === 'messagesupdate' || eventName === 'sendmessage') {
-    // Status kirim (delivered/read) -- belum dikonsumsi CI4. Dicatat singkat
-    // untuk diagnosis, tidak diproses lebih jauh.
-    logger.debug('[EVOLUTION-HOOK] event status diabaikan (belum dipakai CI4)', { event: eventName });
-    return res.json({ success: true, skipped: true, reason: 'event status belum dikonsumsi CI4' });
+  if (eventName === 'messagesupdate') {
+    // Status kirim pesan KELUAR (delivered/read) -> diteruskan ke CI4.
+    return handleMessagesUpdate(res, payload);
+  }
+
+  if (eventName === 'sendmessage') {
+    // Echo pesan yang dikirim instance; BUKAN sumber status baca (itu
+    // MESSAGES_UPDATE). Diabaikan seperti sebelumnya.
+    return res.json({ success: true, skipped: true, reason: 'sendmessage belum dikonsumsi CI4' });
   }
 
   return res.json({ success: true, skipped: true, reason: `event "${eventName}" belum ditangani` });
@@ -415,7 +419,64 @@ function handleMessagesDelete(res, payload) {
   });
 }
 
+/**
+ * Handler webhook `messages.update` (status kirim/baca pesan KELUAR).
+ * Event disimpan ke buffer durable dengan `messageId` SINTETIS
+ * (`status:<status>:<wa_message_id>`) -- bukan wa_message_id pesan asli --
+ * supaya UNIQUE `wa_message_id` di buffer tidak bentrok dengan baris pesan
+ * asli DAN supaya event status yang sama berulang (retry Evolution) menjadi
+ * no-op (INSERT OR IGNORE). Diteruskan ke CI4 oleh `deliverStatus()`.
+ */
+async function handleMessagesUpdate(res, payload) {
+  const normalized = normalizeMessagesUpdate(payload);
+  if (!normalized.ok) {
+    logger.debug('[EVOLUTION-IN] messages.update dilewati', { reason: normalized.reason });
+    return res.json({ success: true, skipped: true, reason: normalized.reason });
+  }
+
+  const { waMessageId, chatId, status, timestamp } = normalized.statusEvent;
+  const event = {
+    messageId: `status:${status}:${waMessageId}`,
+    chatId,
+    jidType: isGroupJid(chatId) ? 'group' : 'pn',
+    sender: { name: null, phone: null, jid: null },
+    sender_jid: null,
+    messageType: 'status',
+    text: '',
+    media: null,
+    extra: {
+      kind: 'status',
+      status,
+      target_wa_message_id: waMessageId,
+      chat_id: chatId,
+      from_me: true,
+    },
+    timestamp,
+    direction: 'outgoing',
+    is_forwarded: false,
+    quoted: null,
+  };
+
+  try {
+    const result = await enqueueWithRetry(incomingBuffer, event);
+    logger.info('[EVOLUTION-IN] status pesan keluar tersimpan di buffer durable', {
+      waMessageId,
+      status,
+      result: result.status,
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    logger.error('[EVOLUTION-IN] GAGAL menyimpan status pesan ke buffer durable', {
+      waMessageId,
+      status,
+      error: err.message,
+    });
+    return res.status(500).json({ success: false, error: 'enqueue_failed' });
+  }
+}
+
 module.exports = router;
 module.exports.normalizeEventName = normalizeEventName;
 module.exports.handleMessagesDelete = handleMessagesDelete;
+module.exports.handleMessagesUpdate = handleMessagesUpdate;
 module.exports.enqueueLifecycle = enqueueLifecycle;

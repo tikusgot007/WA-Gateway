@@ -223,6 +223,56 @@ async function sendSticker({ number, buffer, quoted = null }) {
   };
 }
 
+/**
+ * POST /chat/markMessageAsRead/{instance} -- tandai pesan MASUK pelanggan
+ * sebagai sudah dibaca supaya WhatsApp mengirim blue tick ke pelanggan.
+ *
+ * Body DIVERIFIKASI dari source v2.3.7 (`src/validate/chat.schema.ts`
+ * readMessageSchema + `src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts:3676`
+ * markMessageAsRead -> `client.readMessages`): `{ readMessages: [{ id, fromMe, remoteJid }] }`.
+ * Instance melanggan event ini tanpa setup tambahan (route chat sudah aktif).
+ *
+ * `fromMe:false` -- yang ditandai adalah pesan MASUK dari pelanggan.
+ * Evolution hanya memakai key dengan `remoteJid` grup atau PN user
+ * (`isJidGroup || isPnUser`); `@lid` di-skip oleh Evolution.
+ *
+ * Respons sukses HTTP 201 `{ message:'Read messages', read:'success' }`;
+ * gagal -> 500. Tidak ada dedup server: mengirim ulang aman (idempoten).
+ *
+ * @param {{remoteJid:string, keys:string[]}} args
+ * @returns {Promise<{requested:number, response:object|null}>}
+ */
+async function markMessageAsRead({ remoteJid, keys }) {
+  if (!isConfigured()) throw notConfiguredError();
+
+  const readMessages = (keys || [])
+    .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 255)
+    .map((id) => ({ remoteJid: String(remoteJid), fromMe: false, id }));
+
+  if (readMessages.length === 0) {
+    const e = new Error('Tidak ada wa_message_id yang valid untuk ditandai dibaca.');
+    e.code = 'EVOLUTION_NO_READ_KEYS';
+    throw e;
+  }
+
+  let res;
+  try {
+    res = await withTimeout((signal) => fetch(instancePath('/chat/markMessageAsRead'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: config.evolution.apiKey },
+      body: JSON.stringify({ readMessages }),
+      signal,
+    }));
+  } catch (err) {
+    throw networkError(err);
+  }
+
+  const { json, rawText } = await parseJsonSafely(res);
+  if (!res.ok) throw sendFailedError(json, rawText, res.status);
+
+  return { requested: readMessages.length, response: json };
+}
+
 /** GET /instance/connectionState/{instance} -> { instance: { state: open|close|connecting } } */
 async function getConnectionState(timeoutMs) {
   if (!isConfigured()) throw notConfiguredError();
@@ -399,6 +449,7 @@ module.exports = {
   sendText,
   sendMedia,
   sendSticker,
+  markMessageAsRead,
   getConnectionState,
   getInstancePhone,
   getGroupInfo,

@@ -39,6 +39,11 @@ async function deliverOne(event, dependencies = {}) {
     return deliverLifecycle(event, { post, buffer, deliveryLogger });
   }
 
+  // Status kirim pesan KELUAR (delivered/read) punya endpoint sendiri juga.
+  if (event.message_type === 'status') {
+    return deliverStatus(event, { post, buffer, deliveryLogger });
+  }
+
   const body = {
     wa_message_id: event.wa_message_id,
     chat_id: event.chat_id,
@@ -254,6 +259,67 @@ async function deliverLifecycle(event, { post, buffer, deliveryLogger }) {
   });
 }
 
+/**
+ * Kirim status pesan keluar (delivered/read) ke CI4:
+ * `POST /api/inbox/gateway/message-status` dengan
+ * `{ wa_message_id, chat_id, from_me, status, event_time }`.
+ * Aturan sukses/retry/dead-letter SAMA dengan pesan biasa.
+ */
+async function deliverStatus(event, { post, buffer, deliveryLogger }) {
+  let extra = {};
+  try {
+    extra = event.extra_json ? JSON.parse(event.extra_json) : {};
+  } catch (err) {
+    extra = {};
+  }
+
+  const targetWaMessageId = extra.target_wa_message_id;
+  const status = extra.status;
+  if (!targetWaMessageId || (status !== 'delivered' && status !== 'read')) {
+    buffer.markPermanentDead(event.id, 'status event tanpa target/status valid');
+    deliveryLogger.warn('[DELIVERY] status event tidak valid -- dibuang', {
+      waMessageId: event.wa_message_id,
+      extra: event.extra_json,
+    });
+    return;
+  }
+
+  const body = {
+    wa_message_id: targetWaMessageId,
+    chat_id: extra.chat_id || event.chat_id,
+    from_me: true,
+    status,
+    event_time: event.message_timestamp,
+  };
+
+  const result = await post('/api/inbox/gateway/message-status', body);
+
+  if (result.ok) {
+    buffer.markCompleted(event.id);
+    deliveryLogger.info('[DELIVERY] status pesan diteruskan ke CI4', {
+      target: targetWaMessageId,
+      status,
+      matched: result.json?.matched,
+    });
+    return;
+  }
+
+  if (result.status === 400 || result.status === 422) {
+    buffer.markPermanentDead(event.id, result.error);
+    return;
+  }
+
+  const failure = buffer.markFailedAttempt(event.id, event.attempts, result.error);
+  deliveryLogger.warn('[DELIVERY] gagal meneruskan status pesan ke CI4', {
+    target: targetWaMessageId,
+    status,
+    httpStatus: result.status,
+    error: result.error,
+    retryInMs: failure.delayMs,
+    deadLettered: failure.deadLettered,
+  });
+}
+
 // `tick` diekspos supaya test/simulate-*.js bisa memanggil satu siklus worker
 // secara langsung (deterministik, tanpa menunggu timer nyata).
-module.exports = { start, stop, tick, deliverOne, deliverLifecycle };
+module.exports = { start, stop, tick, deliverOne, deliverLifecycle, deliverStatus };
