@@ -21,6 +21,9 @@ Format bebas, kronologis terbaru di atas.
   `src/evolution/webhookRoutes.js` (`handleMessagesUpdate`), `src/evolution/jid.js`
   (`isLidJid`), `src/delivery/incomingDelivery.js` (`deliverStatus`).
 - Test: `test/test-read-status.js` (pure). Dijalankan bersama suite `npm test`.
+- WAJIB operasional: nomor WhatsApp instance harus `readreceipts: all`
+  (`chat/fetchPrivacySettings`), kalau tidak blue tick tidak dikirim walau
+  Evolution balas 201. Cara aktifkan: `installer/petunjuk-penggunaan.md` §4.1.
 - Catatan: `test/simulate-evolution-adapter.js` punya kegagalan assertion
   pra-eksisting ("path webhook/set benar") yang sudah merah di HEAD sebelum
   perubahan ini.
