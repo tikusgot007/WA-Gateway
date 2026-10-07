@@ -34,6 +34,16 @@ function isGroupJid(jid) {
 }
 
 /**
+ * true bila JID berupa identitas LID (`@lid`). Evolution (Baileys) menerima
+ * `@s.whatsapp.net` / `@g.us` untuk `readMessages`, BUKAN `@lid`
+ * (`isPnUser` menolaknya) -- jadi endpoint read harus menolak/men-skip LID
+ * supaya kegagalan tidak terjadi diam-diam di sisi Evolution.
+ */
+function isLidJid(jid) {
+  return typeof jid === 'string' && /@lid$/i.test(jid);
+}
+
+/**
  * Validasi longgar: string, punya "user@server", bagian user berisi digit.
  * Tidak menormalkan isi JID.
  */
@@ -45,4 +55,4 @@ function isDecodableJid(jid) {
   return Boolean(user && server && USER_RE.test(user));
 }
 
-module.exports = { phoneToJid, jidToPhone, isGroupJid, isDecodableJid };
+module.exports = { phoneToJid, jidToPhone, isGroupJid, isLidJid, isDecodableJid };

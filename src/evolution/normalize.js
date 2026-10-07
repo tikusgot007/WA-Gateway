@@ -600,8 +600,75 @@ function normalizeConnectionUpdate(payload) {
   return { state, phone };
 }
 
+/**
+ * Map status Evolution (dari `fetchStatus`/MessageUpdate) ke status yang
+ * dikonsumsi AuliaPos. Hanya status PESAN KELUAR yang relevan:
+ *  - DELIVERY_ACK -> 'delivered' (sampai HP pelanggan)
+ *  - READ         -> 'read'      (pelanggan membaca)
+ * PLAYED/PENDING/SERVER_ACK/ERROR sengaja tidak dipetakan.
+ * Sumber enum: `src/utils/renderStatus.ts` + `src/api/types/wa.types.ts`
+ * (StatusMessage) di source Evolution API v2.3.7.
+ */
+const MESSAGE_STATUS_MAP = {
+  DELIVERY_ACK: 'delivered',
+  READ: 'read',
+};
+
+/**
+ * Normalisasi payload webhook `MESSAGES_UPDATE` (status kirim/baca) menjadi
+ * event status yang diteruskan ke CI4.
+ *
+ * Bentuk `data` (dari `whatsapp.baileys.service.ts:1613-1621`, dikirim pada
+ * `sendDataWebhook(Events.MESSAGES_UPDATE, message)`):
+ *   { keyId, remoteJid, fromMe, participant, status, pollUpdates, instanceId, messageId? }
+ * `keyId` = wa_message_id pesan yang di-ACK.
+ *
+ * @param {object} payload
+ * @returns {{ok:true, statusEvent:{waMessageId:string,chatId:string,status:string,timestamp:string}} | {ok:false, skip?:boolean, reason:string}}
+ */
+function normalizeMessagesUpdate(payload) {
+  const data = payload.data || {};
+  const waMessageId = data.keyId;
+  const remoteJid = data.remoteJid;
+
+  if (typeof remoteJid !== 'string' || !remoteJid) {
+    return { ok: false, skip: true, reason: 'messages.update tanpa remoteJid' };
+  }
+  if (typeof waMessageId !== 'string' || !waMessageId) {
+    return { ok: false, skip: true, reason: 'messages.update tanpa keyId' };
+  }
+
+  // Hanya status pesan KELUAR (fromMe=true) = receipt dari pelanggan untuk
+  // pesan yang kita kirim. fromMe=false adalah update pesan MASUK (mis.
+  // tanda baca perangkat kita sendiri) -- BUKAN receipt pelanggan.
+  if (data.fromMe !== true) {
+    return { ok: false, skip: true, reason: 'messages.update bukan pesan keluar (fromMe!=true)' };
+  }
+
+  // Grup dikecualikan (semantik read grup berbeda; konsisten dengan POS).
+  if (isGroupJid(remoteJid)) {
+    return { ok: false, skip: true, reason: 'messages.update grup diabaikan' };
+  }
+
+  const status = MESSAGE_STATUS_MAP[String(data.status || '').toUpperCase()];
+  if (!status) {
+    return { ok: false, skip: true, reason: `status "${data.status}" tidak dipetakan` };
+  }
+
+  return {
+    ok: true,
+    statusEvent: {
+      waMessageId,
+      chatId: remoteJid,
+      status,
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
 module.exports = {
   normalizeMessagesUpsert,
+  normalizeMessagesUpdate,
   pickMessageRecord,
   normalizeConnectionUpdate,
   detectMessageType,

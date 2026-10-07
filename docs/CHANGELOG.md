@@ -3,6 +3,31 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-07 — WhatsApp read receipt (dua arah): `/read` + event `MESSAGES_UPDATE`
+
+- Endpoint baru `POST /read` (Bearer CI4 token): AuliaPos meminta adapter
+  menandai pesan MASUK pelanggan sebagai dibaca -> Evolution
+  `POST /chat/markMessageAsRead/{instance}` body
+  `{ readMessages: [{ id, fromMe:false, remoteJid }] }`. `@lid`/grup ditolak
+  lebih awal (Evolution tidak mendukung read untuk keduanya).
+- Event `MESSAGES_UPDATE` TIDAK lagi dibuang: `messages.update`
+  (`fromMe=true`, `status` `READ`/`DELIVERY_ACK`) dinormalisasi
+  (`normalizeMessagesUpdate`) lalu diteruskan lewat buffer durabel ke CI4
+  `POST /api/inbox/gateway/message-status`. Idempotent via `messageId` sintetis
+  `status:<status>:<wa_message_id>` (INSERT OR IGNORE). Status lain, pesan
+  masuk (`fromMe=false`), dan grup di-skip.
+- File: `src/evolution/client.js` (`markMessageAsRead`), `src/evolution/ci4Routes.js`
+  (`POST /read`), `src/evolution/normalize.js` (`normalizeMessagesUpdate`),
+  `src/evolution/webhookRoutes.js` (`handleMessagesUpdate`), `src/evolution/jid.js`
+  (`isLidJid`), `src/delivery/incomingDelivery.js` (`deliverStatus`).
+- Test: `test/test-read-status.js` (pure). Dijalankan bersama suite `npm test`.
+- WAJIB operasional: nomor WhatsApp instance harus `readreceipts: all`
+  (`chat/fetchPrivacySettings`), kalau tidak blue tick tidak dikirim walau
+  Evolution balas 201. Cara aktifkan: `installer/petunjuk-penggunaan.md` §4.1.
+- Catatan: `test/simulate-evolution-adapter.js` punya kegagalan assertion
+  pra-eksisting ("path webhook/set benar") yang sudah merah di HEAD sebelum
+  perubahan ini.
+
 ## 2026-10-05 — TODO-F8 masuk `evolution` (dekripsi teks pesan diedit + patch LID)
 
 - `evolution` di-fast-forward ke `integration/realtime-f8` (`ba4bcf3..e653de5`),

@@ -125,6 +125,33 @@ nomor tersebut. QR tidak pernah dicetak atau disimpan oleh skrip.
 powershell -ExecutionPolicy Bypass -File installer\status.ps1 -InstallRoot C:\AuliaGateway
 ```
 
+### 4.1 Read receipts / status dibaca — WAJIB
+
+Fitur centang biru ("status dibaca") di Inbox AuliaPos **hanya** bekerja bila nomor
+WhatsApp gateway mengirim read receipt. Baileys/Evolution bisa menandai pesan
+dibaca, tetapi WhatsApp tetap **tidak** mengirim blue tick ke pelanggan jika
+privasi **Read receipts** nomor gateway = `none`. Jadi setelah instance `open`,
+pastikan read receipts aktif:
+
+```powershell
+# Lihat nilai sekarang -- yang benar: "readreceipts":"all"
+curl.exe -s -H "apikey: <EVOLUTION_API_KEY>" http://127.0.0.1:8080/chat/fetchPrivacySettings/<InstanceName>
+
+# Aktifkan (ganti <InstanceName>, default aulia-toko)
+curl.exe -s -X POST -H "apikey: <EVOLUTION_API_KEY>" -H "Content-Type: application/json" -d "{\"readreceipts\":\"all\",\"profile\":\"all\",\"status\":\"all\",\"online\":\"match_last_seen\",\"last\":\"none\",\"groupadd\":\"all\"}" http://127.0.0.1:8080/chat/updatePrivacySettings/<InstanceName>
+```
+
+`<InstanceName>` default `aulia-toko` (lihat `-InstanceName`); `EVOLUTION_API_KEY`
+ada di `<InstallRoot>\evolution-gateway\.env`.
+
+> Catatan penting:
+> - Setelan `settings.readMessages` **tidak** perlu diaktifkan (biarkan `false`).
+>   Pesan tidak otomatis dibaca; AuliaPos menandai dibaca hanya saat kasir
+>   membuka percakapan.
+> - Mengubah privacy sesaat dapat membuat koneksi instance singkat tidak stabil
+>   (`connecting`/`close`). Tunggu sampai `open` stabil sebelum menguji; bila perlu
+>   `installer\stop.ps1` lalu `installer\start.ps1`.
+
 ---
 
 ## 5. Verifikasi
@@ -183,6 +210,7 @@ gateway sudah jalan tetapi Inbox tidak saling terhubung.
 | Adapter tidak listen di 3000 | error saat start | lihat `<InstallRoot>\logs\adapter.err.log` |
 | Pesan masuk tidak sampai ke Inbox | `inbox.gatewayBaseUrl`/token AuliaPos belum disamakan | ulangi bagian 6 |
 | Pesan tanpa secret ditolak di webhook | secret webhook tidak cocok | ulangi pendaftaran webhook (jalankan `node scripts\setup-instance.js` dari folder adapter) |
+| Blue tick/status dibaca tidak muncul di HP pelanggan | privasi **Read receipts** nomor gateway = `none` | aktifkan seperti bagian 4.1 (`readreceipts: all`) |
 
 Bila perlu memulai ulang dari awal: `stop.ps1`, lalu ulangi `install.ps1` dengan
 parameter yang sama (langkah yang sudah selesai akan dilewati).

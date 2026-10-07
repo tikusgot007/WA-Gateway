@@ -4,7 +4,7 @@ const express = require('express');
 const config = require('../config');
 const logger = require('../logging');
 const { requireCI4Token } = require('../api/authMiddleware');
-const { isDecodableJid, jidToPhone } = require('./jid');
+const { isDecodableJid, isGroupJid, isLidJid, jidToPhone } = require('./jid');
 const evolutionClient = require('./client');
 const evolutionState = require('./state');
 const quotedStore = require('./quotedStore');
@@ -424,6 +424,70 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
     return res.status(500).json({
       success: false,
       error_code: err.code || 'SEND_FAILED',
+      message: err.message,
+    });
+  }
+});
+
+// --- POST /read ---------------------------------------------------------
+// AuliaPos meminta adapter menandai pesan MASUK pelanggan sebagai sudah
+// dibaca, supaya WhatsApp mengirim blue tick ke pelanggan. Fail-soft di sisi
+// pemanggil: kegagalan endpoint ini TIDAK boleh menggagalkan Inbox.
+router.post('/read', jsonSmall, requireCI4Token, async (req, res) => {
+  const { chat_id: chatId } = req.body || {};
+  const rawIds = (req.body || {}).wa_message_ids;
+
+  if (typeof chatId !== 'string' || !isDecodableJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_CHAT_ID',
+      message: `chat_id tidak valid/tidak dapat didecode sebagai JID: ${chatId}`,
+    });
+  }
+
+  // Evolution (Baileys) hanya menerima PN (@s.whatsapp.net) atau grup untuk
+  // readMessages; `@lid` di-skip-nya diam-diam. Ditolak lebih awal dengan
+  // kode jelas supaya tidak gagal senyap.
+  if (isLidJid(chatId) || isGroupJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'UNSUPPORTED_CHAT_ID',
+      message: 'Mark-as-read hanya didukung untuk chat pribadi (@s.whatsapp.net), bukan @lid/grup.',
+    });
+  }
+
+  const ids = Array.isArray(rawIds)
+    ? [...new Set(rawIds.filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 255))].slice(0, 200)
+    : [];
+
+  if (ids.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'INVALID_IDS',
+      message: 'Field "wa_message_ids" wajib array id non-kosong (maks 200).',
+    });
+  }
+
+  if (!isReady()) {
+    return res.status(409).json({
+      success: false,
+      error_code: 'NOT_CONNECTED',
+      message: 'WhatsApp belum connected.',
+    });
+  }
+
+  try {
+    const result = await evolutionClient.markMessageAsRead({ remoteJid: chatId, keys: ids });
+    logger.info('[READ-EVOLUTION] permintaan mark-as-read dari POS diteruskan', {
+      chatId,
+      requested: result.requested,
+    });
+    return res.json({ success: true, state: 'read', requested: result.requested });
+  } catch (err) {
+    logger.error('[READ-EVOLUTION] gagal menandai pesan dibaca', { chatId, error: err.message });
+    return res.status(500).json({
+      success: false,
+      error_code: err.code || 'READ_FAILED',
       message: err.message,
     });
   }
