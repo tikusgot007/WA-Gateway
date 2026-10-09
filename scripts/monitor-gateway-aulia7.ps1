@@ -95,7 +95,7 @@ if (Test-Path -LiteralPath $evoCur) { $evoFiles += $evoCur }
 $evoFiles += @(Get-ChildItem -LiteralPath $LogDir -Filter 'AuliaPosGatewayEvolution.*.out.log' -File -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending | Select-Object -First 3 | ForEach-Object { $_.FullName })
 
-$keepAlive = 0; $streamErr = 0; $initErr = 0; $handleErr = 0; $evoLevel50 = 0; $cacheErr = 0
+$keepAlive = 0; $streamErr = 0; $initErr = 0; $handleErr = 0; $evoLevel50 = 0; $cacheErr = 0; $cacheP2002 = 0
 $f10DecryptFail = 0; $f10SessionNoMatch = 0; $f10StubIgnored = 0; $f10MessageCounter = 0
 $f10RecentDecryptFail = 0; $f10RecentSessionNoMatch = 0; $f10RecentStubIgnored = 0; $f10RecentMessageCounter = 0
 $f10LastEventLocal = $null; $f10LastEventType = $null
@@ -115,6 +115,9 @@ foreach ($fp in $evoFiles) {
     if ($ln -match 'error in handling message') { $handleErr++ }
     if ($ln -match '"level":(50|60)') { $evoLevel50++ }
     if ($ln -match 'saveOnWhatsappCache') { $cacheErr++ }
+    # Known benign: Evolution onWhatsapp cache race (P2002 unique remoteJid).
+    # Counted for visibility only; NOT a WARN trigger.
+    if ($ln -match "code: 'P2002'|Unique constraint failed") { $cacheP2002++ }
 
     $f10Type = $null
     if ($ln -match 'No matching sessions found for message') { $f10SessionNoMatch++; $f10Type = 'SESSION_NO_MATCH' }
@@ -195,7 +198,7 @@ $summary = ($stamp + ' | ' + $status +
   ' f10_recent=' + $f10RecentTotal +
   ' decrypt=' + $f10RecentDecryptFail + ' sessionNoMatch=' + $f10RecentSessionNoMatch +
   ' stubIgnored=' + $f10RecentStubIgnored + ' msgCounter=' + $f10RecentMessageCounter +
-  ' lvl40adapter=' + $lvl40 + ' evo50=' + $evoLevel50 + ' cacheErr=' + $cacheErr +
+  ' lvl40adapter=' + $lvl40 + ' evo50=' + $evoLevel50 + ' cacheErr=' + $cacheErr + ' p2002=' + $cacheP2002 +
   ' hdlErr=' + $handleErr + ' streamErr=' + $streamErr + ' initErr=' + $initErr +
   ' | delivered=' + $delivered + ' sent=' + $sent +
   ' | evolution.log=' + $(if ($evoSize -ge 0) { '' + $evoSize + 'B age=' + $evoAgeMin + 'min' + $(if ($evoStale) { ' STALE' } else { '' }) } else { 'tidak ada' }) +
@@ -206,7 +209,7 @@ $detail += '===== DETIL ' + $stamp + ' (' + $status + ') ====='
 $detail += 'port        : pg=' + $(if ($pgChecked) { $pgUp } else { 'n/a' }) + ' evolution=' + $evoUp + ' adapter=' + $adUp
 $detail += 'service     : ' + ($svcInfo -join '; ')
 $detail += 'state       : ' + $lastState + $(if ($lastStateTime) { '  (jam ' + $lastStateTime.ToString('yyyy-MM-dd HH:mm') + ' WIB)' } else { '' })
-$detail += 'tren ' + $WindowHours + 'j   : flaps=' + $flaps + ' keepAlive=' + $keepAlive + ' authReject=' + $authReject + ' adapterLvl40=' + $lvl40 + ' evo50=' + $evoLevel50 + ' cacheErr=' + $cacheErr + ' handleErr=' + $handleErr + ' streamErr=' + $streamErr + ' initErr=' + $initErr
+$detail += 'tren ' + $WindowHours + 'j   : flaps=' + $flaps + ' keepAlive=' + $keepAlive + ' authReject=' + $authReject + ' adapterLvl40=' + $lvl40 + ' evo50=' + $evoLevel50 + ' cacheErr=' + $cacheErr + ' p2002=' + $cacheP2002 + ' handleErr=' + $handleErr + ' streamErr=' + $streamErr + ' initErr=' + $initErr
 $detail += 'F10         : 24h=' + ($f10DecryptFail + $f10SessionNoMatch + $f10StubIgnored + $f10MessageCounter) + ' recent=' + $f10RecentTotal + ' decrypt=' + $f10RecentDecryptFail + ' sessionNoMatch=' + $f10RecentSessionNoMatch + ' stubIgnored=' + $f10RecentStubIgnored + ' messageCounter=' + $f10RecentMessageCounter + ' last=' + $(if ($f10LastEventLocal) { $f10LastEventLocal.ToString('yyyy-MM-dd HH:mm:ss') + ' WIB/' + $f10LastEventType } else { 'none' }) + ' window=' + $F10WindowMinutes + 'm'
 $detail += 'trafik      : delivered=' + $delivered + ' sent=' + $sent
 $detail += 'evolution.log: size=' + $evoSize + 'B age=' + $evoAgeMin + 'min stale=' + $evoStale
