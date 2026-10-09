@@ -58,7 +58,8 @@ const CREATE_TABLE_SQL = `
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
     resolved_at         TEXT,
-    dead_lettered_at    TEXT
+    dead_lettered_at    TEXT,
+    stale_reported_at   INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_outgoing_operations_state
     ON outgoing_operations (state, updated_at);
@@ -153,6 +154,15 @@ class OutgoingOperationsSqlite {
     if (!columns.map((col) => col.name).includes('forward_marker_applied')) {
       this.db.exec(`ALTER TABLE outgoing_operations ADD COLUMN forward_marker_applied TEXT`);
       logger.info('[MIGRASI] kolom forward_marker_applied ditambahkan ke outgoing_operations (database SQLite lama).');
+    }
+
+    // L2: kolom penanda "stale in_flight sudah dilaporkan saat start" supaya
+    // restart berikutnya tidak menulis log ERROR berulang. Nullable, tanpa
+    // default -- baris lama (NULL) dibaca sebagai "belum pernah dilaporkan".
+    // Status TIDAK diubah oleh kolom ini; hanya noise log yang dikurangi.
+    if (!columns.map((col) => col.name).includes('stale_reported_at')) {
+      this.db.exec(`ALTER TABLE outgoing_operations ADD COLUMN stale_reported_at INTEGER`);
+      logger.info('[MIGRASI] kolom stale_reported_at ditambahkan ke outgoing_operations (database SQLite lama).');
     }
 
     this.insertStmt = this.db.prepare(`
@@ -278,6 +288,25 @@ class OutgoingOperationsSqlite {
     return this.pruneTx(new Date(this.now() - olderThanMs).toISOString());
   }
 
+  // L2: tandai baris in_flight basi yang SUDAH dilaporkan saat start, supaya
+  // start berikutnya tidak menulis log ERROR berulang. Hanya menyentuh kolom
+  // `stale_reported_at`; state TIDAK berubah (retry tetap utuh). Guard
+  // `state = 'in_flight'` wajib: klien retry bisa mengubah state ke
+  // sent/failed/abandoned di sela, dan baris terminal tidak boleh disentuh.
+  markStaleReported(operationIds, timestampMs) {
+    if (!Array.isArray(operationIds) || operationIds.length === 0) return 0;
+
+    const ids = operationIds.map(String);
+    const placeholders = ids.map(() => '?').join(', ');
+    const stmt = this.db.prepare(
+      `UPDATE outgoing_operations
+          SET stale_reported_at = ?
+        WHERE operation_id IN (${placeholders}) AND state = 'in_flight'`
+    );
+
+    return stmt.run(timestampMs, ...ids).changes;
+  }
+
   close() {
     this.db.close();
   }
@@ -360,6 +389,7 @@ class OutgoingOperationsJsonFile {
       updated_at: now,
       resolved_at: null,
       dead_lettered_at: null,
+      stale_reported_at: null,
     });
     this._persist();
     return { created: true };
@@ -438,6 +468,23 @@ class OutgoingOperationsJsonFile {
     prunable.forEach((row) => this.rows.delete(row.operation_id));
     if (prunable.length > 0) this._persist();
     return prunable.length;
+  }
+
+  // Paritas dengan OutgoingOperationsSqlite.markStaleReported(): hanya
+  // menyentuh baris in_flight (guard state), tidak mengubah state.
+  markStaleReported(operationIds, timestampMs) {
+    if (!Array.isArray(operationIds) || operationIds.length === 0) return 0;
+
+    const targets = new Set(operationIds.map(String));
+    let changed = 0;
+    for (const row of this.rows.values()) {
+      if (targets.has(row.operation_id) && row.state === 'in_flight') {
+        row.stale_reported_at = timestampMs;
+        changed += 1;
+      }
+    }
+    if (changed > 0) this._persist();
+    return changed;
   }
 
   close() {

@@ -385,7 +385,10 @@ function toHttpResponse(decision, { operationId, withMediaRef = false, withQuote
  *
  * 1. REQ-031: operasi `in_flight` yang lebih tua dari `OUTGOING_LEASE_MS` dicatat
  *    level error (jumlah + maksimum 20 operation_id) -- sinyal paling awal bahwa
- *    ada kirim yang hasilnya tidak pasti (ASSUMPTION-009).
+ *    ada kirim yang hasilnya tidak pasti (ASSUMPTION-009). L2: supaya restart
+ *    tidak menulis log ERROR berulang untuk baris yang sama, baris yang sudah
+ *    pernah dilaporkan ditandai `stale_reported_at` dan hanya dilaporkan ulang
+ *    setelah `OUTGOING_OPERATION_TTL_MS`. State TIDAK diubah -- retry tetap utuh.
  * 2. REQ-032: `pruneTerminal()` menghapus baris terminal yang lebih tua dari
  *    `OUTGOING_OPERATION_TTL_MS` (`in_flight` TIDAK PERNAH dihapus) dan mencatat
  *    `[CRITICAL]` untuk tiap baris `abandoned` sebelum dihapus. Pemangkasan inilah
@@ -400,14 +403,35 @@ function runStartupRecovery() {
 
   try {
     stale = outgoingOperations.listStaleInFlight(config.outgoingLeaseMs);
-    if (stale.length > 0) {
-      logger.error('[SEND-OPERATION] operasi in_flight basi ditemukan saat start -- hasil kirim belum pasti', {
-        jumlah: stale.length,
-        operationIds: stale.slice(0, MAX_LISTED_IDS).map((row) => row.operation_id),
-      });
-    }
   } catch (err) {
     logger.error('[SEND-OPERATION] gagal memeriksa operasi in_flight basi saat start', { error: err.message });
+  }
+
+  // L2: laporkan hanya baris yang belum pernah dilaporkan, atau yang laporan
+  // terakhirnya sudah melewati TTL. Baris lain dilewati supaya restart tidak
+  // membanjiri log dengan sinyal yang sama berulang kali.
+  const nowMs = Date.now();
+  const toReport = stale.filter((row) => {
+    const reportedAt = row.stale_reported_at;
+    if (reportedAt === null || reportedAt === undefined) return true;
+    return (nowMs - reportedAt) >= config.outgoingOperationTtlMs;
+  });
+
+  if (toReport.length > 0) {
+    logger.error('[SEND-OPERATION] operasi in_flight basi ditemukan saat start -- hasil kirim belum pasti', {
+      jumlah: toReport.length,
+      operationIds: toReport.slice(0, MAX_LISTED_IDS).map((row) => row.operation_id),
+      reported: true,
+    });
+    try {
+      outgoingOperations.markStaleReported(toReport.map((row) => row.operation_id), nowMs);
+    } catch (err) {
+      logger.warn('[SEND-OPERATION] gagal menandai operasi in_flight basi sudah dilaporkan', { error: err.message });
+    }
+  } else if (stale.length > 0) {
+    logger.info('[SEND-OPERATION] stale in_flight masih ada, belum perlu dilaporkan ulang', {
+      jumlah: stale.length,
+    });
   }
 
   try {
