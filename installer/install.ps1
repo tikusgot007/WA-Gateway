@@ -1,9 +1,10 @@
 <#
   install.ps1 -- paket instalasi gateway WhatsApp untuk PC Windows baru
-  (bootstrap ONLINE). Memasang: PostgreSQL 16 + Evolution API (tag terpin) +
-  adapter evolution-gateway, lalu menyiapkan .env, database, patch view-once,
-  firewall, instance, dan webhook. Evolution + adapter didaftarkan sebagai
-  Windows Service (WinSW): auto-start saat boot, auto-restart saat crash.
+  (bootstrap ONLINE). Memasang: PostgreSQL 16 + Evolution API (tag terpin,
+  via git clone/checkout) + adapter evolution-gateway (via git clone/checkout),
+  lalu menyiapkan .env, database, patch view-once + LID, firewall, instance,
+  dan webhook. Evolution + adapter didaftarkan sebagai Windows Service
+  (WinSW): auto-start saat boot, auto-restart saat crash.
 
   Prasyarat: Windows x64, PowerShell 5.1+, Administrator, akses internet.
   Start/stop/status manual: installer\start.ps1 / stop.ps1 / status.ps1.
@@ -15,7 +16,11 @@
       -Ci4GatewayTokenFile "$env:TEMP\aulia-gateway-token.txt" `
       -LanSources "192.168.1.10"
 
-  Idempotent: sumber yang sudah ada dilewati; langkah provisioning aman diulang.
+  Idempotent: sumber yang sudah ada (working tree Git) hanya di-fetch +
+  checkout ulang ke ref yang diminta (tidak dihapus/clone ulang), sehingga
+  .env/data/node_modules (gitignored) selamat. Langkah provisioning lain
+  juga aman diulang. Untuk update: jalankan ulang dengan -AdapterRef dan/atau
+  -EvolutionRef baru.
 #>
 [CmdletBinding()]
 param(
@@ -84,13 +89,6 @@ function Invoke-ChildScript {
     Get-Content -LiteralPath $outFile | ForEach-Object { Write-Log ('  ' + $Label + ': ' + $_) }
   }
   if ($code -ne 0) { throw ($Label + ' gagal (exit ' + $code + ')') }
-}
-
-function Get-ZipUrl {
-  param([string]$Repo, [string]$Ref, [switch]$IsTag)
-  if ($Ref -match '^[0-9a-fA-F]{40}$') { return ('https://codeload.github.com/' + $Repo + '/zip/' + $Ref) }
-  if ($IsTag) { return ('https://codeload.github.com/' + $Repo + '/zip/refs/tags/' + $Ref) }
-  return ('https://codeload.github.com/' + $Repo + '/zip/refs/heads/' + $Ref)
 }
 
 function Ensure-Node {
@@ -174,14 +172,6 @@ function Install-WinSwService {
   Set-Service -Name $ServiceId -StartupType Automatic
 }
 
-function Ensure-Source {
-  param([string]$Dest, [string]$Url, [string]$Label)
-  if (Test-Path -LiteralPath (Join-Path $Dest 'package.json')) { Write-Log ($Label + ': sumber sudah ada, dilewati.'); return }
-  $zip = Join-Path $dlDir ($Label + '.zip')
-  if (-not (Test-Path -LiteralPath $zip)) { Get-RemoteFile -Url $Url -OutFile $zip -Label $Label }
-  Expand-RepoZip -ZipPath $zip -DestDir $Dest
-}
-
 try {
   Write-Log '=== INSTALL GATEWAY (bootstrap online) ==='
   Assert-Admin
@@ -228,6 +218,7 @@ try {
   if ($SkipPrereqs) { Write-Log 'prereqs: dilewati (-SkipPrereqs).' }
   else {
     Ensure-Node
+    Ensure-Git
     Ensure-Postgres
   }
 
@@ -236,8 +227,8 @@ try {
   Write-Log ('node  : ' + $tools.Node.Source)
   Write-Log ('npm   : ' + $tools.Npm.Source)
 
-  Ensure-Source -Dest $evoDir -Url (Get-ZipUrl -Repo 'evolution-foundation/evolution-api' -Ref $EvolutionRef -IsTag) -Label 'evolution-api'
-  Ensure-Source -Dest $adapterDir -Url (Get-ZipUrl -Repo 'tikusgot007/WA-Gateway' -Ref $AdapterRef) -Label 'evolution-gateway'
+  $evoSource = Ensure-GitSource -Dest $evoDir -Repo 'evolution-foundation/evolution-api' -Ref $EvolutionRef -Label 'evolution-api'
+  $adapterSource = Ensure-GitSource -Dest $adapterDir -Repo 'tikusgot007/WA-Gateway' -Ref $AdapterRef -Label 'evolution-gateway'
 
   # Guard kecocokan versi: installer ini memanggil setup-env.ps1 dengan
   # dukungan -Ci4GatewayToken yang harus ada di ref adaptor yang diunduh.
@@ -249,16 +240,23 @@ try {
     throw ('Sumber adapter pada ref ''' + $AdapterRef + ''' tidak mendukung paket installer ini. Pin -AdapterRef ke commit yang memuat folder installer/ (lihat petunjuk-penggunaan.md).')
   }
 
-  # npm ci idempotent: kalau node_modules sudah ada, lewati (mempercepat
-  # jalur pemulihan setelah kegagalan di langkah berikutnya).
+  # npm ci: jalan kalau node_modules belum ada (fresh install) ATAU HEAD
+  # sumber berubah run ini (commit baru lewat git checkout bisa membawa
+  # dependency baru). Ambigu (mis. $Changed tidak terbaca) diperlakukan
+  # sebagai "jalankan" (fail-open), bukan "lewati" (fail-closed), supaya
+  # dependency baru tidak pernah diam-diam tertinggal.
   $env:HUSKY = '0'
   foreach ($pair in @(
-    @{ Dir = $evoDir; Label = 'evolution-api' },
-    @{ Dir = $adapterDir; Label = 'adapter' }
+    @{ Dir = $evoDir; Label = 'evolution-api'; Source = $evoSource },
+    @{ Dir = $adapterDir; Label = 'adapter'; Source = $adapterSource }
   )) {
     $dir = $pair['Dir']
-    if (Test-Path -LiteralPath (Join-Path $dir 'node_modules')) {
-      Write-Log ('npm ci (' + $pair['Label'] + '): node_modules sudah ada, dilewati.')
+    $changed = $true
+    if ($pair['Source'] -and ($pair['Source'].PSObject.Properties.Name -contains 'Changed')) {
+      $changed = [bool]$pair['Source'].Changed
+    }
+    if (-not $changed -and (Test-Path -LiteralPath (Join-Path $dir 'node_modules'))) {
+      Write-Log ('npm ci (' + $pair['Label'] + '): HEAD tidak berubah dan node_modules sudah ada, dilewati.')
       continue
     }
     Write-Log ('npm ci: ' + $pair['Label'] + '...')

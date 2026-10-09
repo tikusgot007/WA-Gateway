@@ -61,18 +61,20 @@ Parameter yang bisa diubah:
 | `-LanSources` | (wajib) | IP yang diizinkan ke port 3000/8080 |
 | `-InstanceName` | `aulia-toko` | nama instance Evolution |
 | `-PgPort` / `-EvolutionPort` / `-AdapterPort` | `5432` / `8080` / `3000` | port |
-| `-EvolutionRef` | `2.3.7` | tag sumber Evolution API |
-| `-AdapterRef` | `master` | branch/commit sumber adapter (sebaiknya commit SHA saat rilis) |
+| `-EvolutionRef` | `2.3.7` | tag/branch/commit sumber Evolution API (git checkout) |
+| `-AdapterRef` | `master` | branch/commit sumber adapter (sebaiknya commit SHA saat rilis; git checkout) |
 | `-PgVersion` | `16.15-1` | versi binari PostgreSQL Windows |
-| `-SkipPrereqs` | mati | lewati pemasangan Node/PostgreSQL (bila sudah ada) |
+| `-SkipPrereqs` | mati | lewati pemasangan Node/Git/PostgreSQL (bila sudah ada) |
 
 Apa yang dilakukan `install.ps1` (berurutan):
 
 1. Memeriksa hak admin dan memastikan port belum terpakai.
-2. Menyiapkan **Node.js LTS** (lewat `winget`) dan **binari PostgreSQL 16**.
-3. Mengunduh **Evolution API** (tag `2.3.7`) dan **adapter** (ref terpin).
-4. `npm ci` kedua repo, lalu `prisma generate`.
-5. Menerapkan **patch view-once** ke sumber Evolution (idempotent).
+2. Menyiapkan **Node.js LTS**, **Git**, dan **binari PostgreSQL 16** (Node & Git lewat `winget`).
+3. Mengambil **Evolution API** dan **adapter** lewat Git (`git clone` sekali, lalu
+   `git fetch` + `git checkout <ref>` pada run berikutnya — bukan unduh ZIP ulang).
+4. `npm ci` kedua repo (dijalankan ulang bila commit berubah dari run sebelumnya), lalu `prisma generate`.
+5. Menerapkan **patch view-once** dan **patch LID** ke sumber Evolution (idempotent;
+   dijalankan ulang setiap kali Evolution di-checkout ke ref baru).
 6. Membuat `.env` adapter + Evolution (kunci API dibuat lokal).
 7. Menyiapkan **cluster + service PostgreSQL**, role, dan database.
 8. `prisma migrate deploy` (skema Evolution).
@@ -82,6 +84,13 @@ Apa yang dilakukan `install.ps1` (berurutan):
 12. Menulis **`install-summary.txt`** (nilai ter-resolve + langkah berikutnya).
 
 Selesai. Ringkasan tersimpan di `<InstallRoot>\install-summary.txt`.
+
+**Update ke versi baru**: jalankan ulang `install.ps1` dengan parameter yang
+sama, tapi `-AdapterRef`/`-EvolutionRef` diisi commit/tag/branch baru. Source
+yang sudah ada **tidak dihapus** — hanya di-`fetch`+`checkout` ke ref baru,
+jadi `.env`, data instance, dan `node_modules` lama tetap aman. `npm ci`
+otomatis dijalankan ulang kalau commit yang di-checkout berbeda dari
+sebelumnya (dependency baru ikut terpasang).
 
 ---
 

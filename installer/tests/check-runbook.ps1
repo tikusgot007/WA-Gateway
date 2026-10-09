@@ -1,5 +1,6 @@
 # check-runbook.ps1 -- AC-14/AC-15: panduan penggunaan lengkap dan memakai
-# path/host netral (tanpa literal aulia3 / D:\).
+# path/host netral (tanpa literal aulia3 / D:\). AC-9 (2026-10-08): dokumen
+# menjelaskan mekanisme Git (bukan ZIP) dan cara update.
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installer = Split-Path -Parent $here
@@ -13,12 +14,12 @@ $sections = @(
   '## 6. Menyambungkan ke AuliaPos', '## 7. Perawatan dan keamanan',
   '## 8. Penanganan masalah'
 )
-$needed = @('inbox.gatewayBaseUrl', 'inbox.gatewayToken', 'scan QR', 'start.ps1', 'stop.ps1', 'status.ps1', 'install.ps1')
+$needed = @('inbox.gatewayBaseUrl', 'inbox.gatewayToken', 'scan QR', 'start.ps1', 'stop.ps1', 'status.ps1', 'install.ps1', 'git checkout', 'Update ke versi baru', 'lewat Git')
 $forbidden = @('aulia3', 'AULIA3', 'AULIA-SERVER2', 'D:\')
 
 $missing = @($sections + $needed | Where-Object { $text -notlike ('*' + $_ + '*') })
 $bad = @($forbidden | Where-Object { $text -like ('*' + $_ + '*') })
 
-if ($missing.Count -eq 0 -and $bad.Count -eq 0) { Write-Host 'PASS check-runbook (AC-14/AC-15)'; exit 0 }
-Write-Host ('FAIL check-runbook (AC-14/AC-15): missing=[' + ($missing -join ', ') + '] forbidden=[' + ($bad -join ', ') + ']')
+if ($missing.Count -eq 0 -and $bad.Count -eq 0) { Write-Host 'PASS check-runbook (AC-9/AC-14/AC-15)'; exit 0 }
+Write-Host ('FAIL check-runbook (AC-9/AC-14/AC-15): missing=[' + ($missing -join ', ') + '] forbidden=[' + ($bad -join ', ') + ']')
 exit 1

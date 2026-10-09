@@ -1,6 +1,9 @@
 # check-static.ps1 -- AC-12 (tanpa scheduled task, tanpa NSSM) + AC-13 (tanpa
 # literal aulia3 di dalam paket installer) + AC-8 (service WinSW WAJIB ada:
 # template, install.ps1, start.ps1/stop.ps1 berbasis Start-Service/Stop-Service).
+# AC-8 (2026-10-08, requirements terpisah): mekanisme sumber berbasis Git
+# WAJIB ada (Ensure-GitSource); mekanisme ZIP (Get-ZipUrl/codeload.github.com)
+# WAJIB sudah tidak ada lagi di install.ps1.
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $installer = Split-Path -Parent $here
@@ -64,6 +67,18 @@ $installPs1Path = Join-Path $installer 'install.ps1'
 $installPs1 = Get-Content -LiteralPath $installPs1Path -Raw
 foreach ($token in @('Ensure-WinSW', 'Install-WinSwService')) {
   if ($installPs1 -notlike ('*' + $token + '*')) { $problems.Add('install.ps1 tidak memuat ' + $token + ' (mekanisme service hilang)') }
+}
+
+# 5b. Sumber Evolution/adapter WAJIB via Git; mekanisme ZIP lama WAJIB sudah
+# tidak ada (bukan dua jalur paralel).
+if ($installPs1 -notlike '*Ensure-GitSource*') { $problems.Add('install.ps1 tidak memuat Ensure-GitSource (mekanisme Git hilang)') }
+foreach ($token in @('Get-ZipUrl', 'codeload.github.com')) {
+  if ($installPs1 -like ('*' + $token + '*')) { $problems.Add('install.ps1 masih memuat ' + $token + ' (mekanisme ZIP seharusnya sudah diganti Git)') }
+}
+$commonPs1Path = Join-Path $installer 'lib\common.ps1'
+$commonPs1 = Get-Content -LiteralPath $commonPs1Path -Raw
+foreach ($token in @('Ensure-Git', 'Ensure-GitSource')) {
+  if ($commonPs1 -notlike ('*' + $token + '*')) { $problems.Add('lib\common.ps1 tidak memuat ' + $token) }
 }
 
 $startPs1Path = Join-Path $installer 'start.ps1'

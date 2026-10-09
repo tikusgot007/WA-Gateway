@@ -3,6 +3,8 @@
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $checks = @(
   'check-viewonce-patch.ps1',
+  'check-lid-preservation-patch.ps1',
+  'check-git-source.ps1',
   'check-env-parity.ps1',
   'check-firewall.ps1',
   'check-runbook.ps1',
