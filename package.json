@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/app/evolution.js",
     "dev": "node --watch src/app/evolution.js",
-    "test": "node test/test-message-edit-fixture.js && node test/test-message-edit-crypto.js && node test/test-lifecycle.js && node test/test-read-status.js && node test/test-outgoing-stale-report.js && node test/simulate-evolution-adapter.js && node test/simulate-evolution-phone-backfill.js && node test/simulate-evolution-boot.js && node test/simulate-maintenance.js && node test/test-realtime-delivery.js && node test/test-realtime-websocket.js",
+    "test": "node test/test-message-edit-fixture.js && node test/test-message-edit-crypto.js && node test/test-lifecycle.js && node test/test-read-status.js && node test/test-outgoing-stale-report.js && node test/simulate-evolution-adapter.js && node test/simulate-evolution-phone-backfill.js && node test/simulate-evolution-boot.js && node test/simulate-maintenance.js && node test/test-realtime-delivery.js && node test/test-realtime-websocket.js && node test/test-contract-ci4.js",
     "webhook:set": "node scripts/set-webhook.js",
     "webhook:info": "node scripts/webhook-info.js"
   },
