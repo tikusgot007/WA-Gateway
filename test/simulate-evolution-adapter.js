@@ -1084,19 +1084,13 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(mediaBody.quoted.key.id, 'QIMG-1', 'quoted tetap object pada sendMedia');
   assert.strictEqual(mediaBody.quoted.message.imageMessage.caption, 'gambar asal');
   assert.strictEqual(realMedia.messageId, 'MEDIA-1');
+  captured.length = 0;
   await realClient.setWebhook({ url: 'http://127.0.0.1:3000/evolution/webhook', events: ['MESSAGES_UPSERT'] });
   const webhookCall = captured[0];
-  // TODO-WEBHOOK: path webhook/set assertion gagal pre-existing (CHANGELOG 2026-10-07 catatan "path webhook/set benar" sudah merah).
-  // Penyebab tidak jelas — mungkin path yang di-capture berbeda dari yang diharapkan.
-  // Skip assertion ini untuk sekarang supaya test tidak terhenti. Harus di-debug & fix kemudian.
-  // if (webhookCall) assert.ok(webhookCall.url.endsWith('/webhook/set/inst-uji'), 'path webhook/set benar');
-  if (webhookCall) {
-    const webhookBody = JSON.parse(webhookCall.opts.body);
-    if (webhookBody.webhook) {
-      assert.strictEqual(webhookBody.webhook.url, 'http://127.0.0.1:3000/evolution/webhook');
-      assert.deepStrictEqual(webhookBody.webhook.events, ['MESSAGES_UPSERT']);
-    }
-  }
+  assert.ok(webhookCall.url.endsWith('/webhook/set/inst-uji'), 'path webhook/set benar');
+  const webhookBody = JSON.parse(webhookCall.opts.body);
+  assert.strictEqual(webhookBody.webhook.url, 'http://127.0.0.1:3000/evolution/webhook');
+  assert.deepStrictEqual(webhookBody.webhook.events, ['MESSAGES_UPSERT']);
 
   // sendSticker WAJIB JSON { number, sticker: base64 }, BUKAN multipart `file`:
   // Evolution v2.3.7 mediaSticker() memakai data.sticker (bukan file) sehingga
