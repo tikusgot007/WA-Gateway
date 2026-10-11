@@ -213,9 +213,17 @@ function extractExtra(messageObj) {
 const NOISE_NODES = [
   'reactionMessage',
   'protocolMessage',
-  'senderKeyDistributionMessage',
   'pollUpdateMessage',
 ];
+
+/**
+ * Nodes that ride ALONGSIDE real content and are not content themselves.
+ * `senderKeyDistributionMessage` (group encryption key) is attached by WhatsApp
+ * to a member's first group message after a key change, next to the actual
+ * `conversation`/media node -- treating it as noise dropped real group
+ * messages. Skip only when nothing else is present.
+ */
+const NON_CONTENT_KEYS = ['messageContextInfo', 'base64', 'senderKeyDistributionMessage'];
 
 /**
  * Wadah yang ISINYA dikirim Evolution sebagai pesan TERPISAH.
@@ -239,8 +247,8 @@ function noiseReason(record, messageObj) {
     if (messageObj[node]) return node + ' (isinya dikirim sebagai pesan terpisah)';
   }
   const keys = Object.keys(messageObj);
-  if (keys.length > 0 && keys.every((k) => k === 'messageContextInfo' || k === 'base64')) {
-    return 'messageContextInfo saja (tanpa konten)';
+  if (keys.length > 0 && keys.every((k) => NON_CONTENT_KEYS.includes(k))) {
+    return 'metadata saja (tanpa konten): ' + keys.join(',');
   }
   return null;
 }
