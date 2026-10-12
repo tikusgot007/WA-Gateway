@@ -251,6 +251,24 @@ const section = (title) => console.log(`\n--- ${title} ---`);
   assert.strictEqual(captured.body.sender_jid, '628999@s.whatsapp.net', 'sender_jid harus terkirim untuk jid_type=group+incoming (field wajib sisi CI4)');
   console.log('OK');
 
+  section('(B2b) deliverOne -- reaksi masuk: teks emoji + quoted (AC-RX-1, shape = balasan teks biasa)');
+  captured = null;
+  await incomingDelivery.deliverOne(
+    {
+      ...fakeRow,
+      id: 3,
+      wa_message_id: 'RXN-CONTRACT-1',
+      text: '👍',
+      quoted_json: JSON.stringify({ wa_message_id: 'TARGET-CONTRACT-1', sender_jid: null, snippet: null }),
+    },
+    { postToCI4: async (p, b) => { captured = { pathSuffix: p, body: b }; return { ok: true, status: 200, json: { status: 'success' } }; } }
+  );
+  assert.strictEqual(captured.pathSuffix, '/api/inbox/gateway/messages');
+  assert.strictEqual(captured.body.message_type, 'text');
+  assert.strictEqual(captured.body.text, '👍');
+  assert.strictEqual(captured.body.quoted.wa_message_id, 'TARGET-CONTRACT-1', 'quoted.wa_message_id wajib (InboxGatewayApi::resolveKutipanMasuk)');
+  console.log('OK');
+
   section('(B3) deliverLifecycle -- event edited dengan edited_text (TODO-F8)');
   captured = null;
   const lifecycleRow = {

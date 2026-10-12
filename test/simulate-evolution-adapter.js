@@ -723,13 +723,43 @@ function webhookPayload(overrides = {}) {
   assert.ok(dwcRow, 'dokumen berjudul masuk antrean');
   assert.strictEqual(dwcRow.message_type, 'document');
 
-  // Reaction: metadata, bukan konten -> dilewati, TIDAK menambah baris.
+  // Incoming 1:1 reaction (AC-RX-1/6): text row quoting the reacted message.
+  // Shape mirrors a real Evolution 2.3.7 row (Message table, 2026-10-12).
+  const reaksiPayload = (overrides = {}) => webhookPayload({
+    data: {
+      key: { id: 'RXN-1', remoteJid: PN, fromMe: false, ...(overrides.key || {}) },
+      pushName: 'Pelanggan',
+      message: { reactionMessage: { key: { id: 'TARGET-1', remoteJid: PN, fromMe: true }, text: '👍', senderTimestampMs: { low: 1, high: 417, unsigned: false }, ...(overrides.reaction || {}) } },
+      messageType: 'reactionMessage',
+    },
+  });
+  wres = await post('/evolution/webhook', reaksiPayload(), { withAuth: false });
+  assert.strictEqual(wres.body.success, true);
+  assert.notStrictEqual(wres.body.skipped, true, 'reaksi 1:1 tidak lagi dilewati (AC-RX-1)');
+  const rxnRows = incomingBuffer.getDueEvents(500).filter((e) => e.wa_message_id === 'RXN-1');
+  assert.strictEqual(rxnRows.length, 1, 'reaksi masuk antrean sebagai satu baris');
+  assert.strictEqual(rxnRows[0].message_type, 'text', 'AC-RX-1: message_type text');
+  assert.strictEqual(rxnRows[0].text, '👍', 'AC-RX-1: text = emoji');
+  assert.strictEqual(rxnRows[0].direction, 'incoming');
+  assert.strictEqual(JSON.parse(rxnRows[0].quoted_json).wa_message_id, 'TARGET-1', 'AC-RX-1: quoted = pesan target');
+  assert.strictEqual(quotedStore.get('RXN-1'), null, 'stanza reaksi tidak disimpan sebagai kutipan');
+
+  // AC-RX-6: the same webhook twice -> still one row.
+  await post('/evolution/webhook', reaksiPayload(), { withAuth: false });
+  assert.strictEqual(incomingBuffer.getDueEvents(500).filter((e) => e.wa_message_id === 'RXN-1').length, 1, 'AC-RX-6: reaksi idempoten');
+
+  // AC-RX-4/5/9 + malformed: skipped, no row.
   const pendingBeforeNoise = incomingBuffer.countPending();
-  wres = await post('/evolution/webhook', webhookPayload({
-    data: { key: { id: 'RXN-1', remoteJid: PN, fromMe: false }, message: { reactionMessage: { text: 'ok' } }, messageType: 'reactionMessage' },
-  }), { withAuth: false });
-  assert.strictEqual(wres.body.skipped, true, 'reaction dilewati');
-  assert.strictEqual(incomingBuffer.countPending(), pendingBeforeNoise, 'reaction tidak menambah baris');
+  for (const [label, overrides] of [
+    ['AC-RX-4 fromMe', { key: { id: 'RXN-OWN', fromMe: true } }],
+    ['AC-RX-5 ditarik', { key: { id: 'RXN-DEL' }, reaction: { text: '' } }],
+    ['AC-RX-9 grup', { key: { id: 'RXN-GRP', remoteJid: '120363431232595303@g.us', participant: '149701252890753@lid' } }],
+    ['tanpa key target', { key: { id: 'RXN-NOKEY' }, reaction: { key: null } }],
+  ]) {
+    wres = await post('/evolution/webhook', reaksiPayload(overrides), { withAuth: false });
+    assert.strictEqual(wres.body.skipped, true, label + ' dilewati');
+  }
+  assert.strictEqual(incomingBuffer.countPending(), pendingBeforeNoise, 'reaksi yang dilewati tidak menambah baris');
 
   // Protocol (mis. hapus pesan/sistem): juga dilewati.
   wres = await post('/evolution/webhook', webhookPayload({

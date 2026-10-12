@@ -237,6 +237,31 @@ const NON_CONTENT_KEYS = ['messageContextInfo', 'base64', 'senderKeyDistribution
  */
 const CONTAINER_ONLY_NODES = ['albumMessage'];
 
+const REACTION_TEXT_MAX_CHARS = 32;
+
+/**
+ * Incoming 1:1 customer reaction -> shown in Inbox as a text row quoting the
+ * reacted message (docs/design/2026-10-12-reaksi-masuk-dan-emoji-picker-inbox.md).
+ * Verified shape (Evolution 2.3.7 `Message` table, 2026-10-12):
+ * `message.reactionMessage = { key: { id: <target wa id>, ... }, text: '<emoji>' }`,
+ * outer `key.id` unique per reaction.
+ * Returns null when the message is not a reaction; `{ skip }` for reactions
+ * that stay ignored (own, group, removed, malformed); otherwise `{ emoji, targetId }`.
+ * ponytail: a changed reaction arrives as a new row (no merge per target);
+ * upgrade path: lifecycle event that replaces the previous reaction row.
+ */
+function extractIncomingReaction(key, messageObj) {
+  const reaction = messageObj && messageObj.reactionMessage;
+  if (!reaction || typeof reaction !== 'object') return null;
+  if (key.fromMe) return { skip: 'reaksi dari perangkat sendiri' };
+  if (isGroupJid(key.remoteJid)) return { skip: 'reaksi di grup' };
+  const emoji = typeof reaction.text === 'string' ? reaction.text.trim() : '';
+  if (!emoji) return { skip: 'reaksi ditarik' };
+  const targetId = reaction.key && typeof reaction.key.id === 'string' ? reaction.key.id : '';
+  if (!targetId) return { skip: 'reaksi tanpa key target' };
+  return { emoji: Array.from(emoji).slice(0, REACTION_TEXT_MAX_CHARS).join(''), targetId };
+}
+
 function noiseReason(record, messageObj) {
   if (record && record.messageStubType) return 'stub sistem (messageStubType)';
   if (!messageObj || typeof messageObj !== 'object') return null;
@@ -495,6 +520,35 @@ function normalizeMessagesUpsert(payload) {
   const messageObj = viewOnce ? {} : unwrapMessage(record.message || {});
 
   if (!viewOnce) {
+    const reaction = extractIncomingReaction(key, messageObj);
+    if (reaction && reaction.skip) {
+      return { ok: false, skip: true, reason: 'pesan sistem/metadata dilewati: reactionMessage (' + reaction.skip + ')' };
+    }
+    if (reaction) {
+      return {
+        ok: true,
+        event: {
+          messageId: key.id || synthesizeMessageIdFallback(record),
+          chatId: remoteJid,
+          jidType: 'pn',
+          sender: { name: record.pushName || null, phone: jidToPhone(remoteJid), jid: remoteJid },
+          sender_jid: remoteJid,
+          messageType: 'text',
+          text: reaction.emoji,
+          media: null,
+          extra: null,
+          timestamp: toIsoTimestamp(record.messageTimestamp),
+          direction: 'incoming',
+          is_forwarded: false,
+          quoted: { wa_message_id: reaction.targetId, sender_jid: null, snippet: null },
+          _evolutionKey: key,
+          _evolutionMessage: messageObj,
+          _evolutionMedia: null,
+          _isReaction: true,
+        },
+      };
+    }
+
     // Metadata/sistem (reaction, protocol, stub) bukan konten pelanggan.
     const noise = noiseReason(record, messageObj);
     if (noise) {
@@ -687,6 +741,7 @@ module.exports = {
   extractQuotedContext,
   extractForwardFlag,
   extractEditTarget,
+  extractIncomingReaction,
   buildQuotedSnippet,
   noiseReason,
   toIsoTimestamp,

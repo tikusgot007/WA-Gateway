@@ -158,9 +158,11 @@ async function handleMessagesUpsert(req, res, payload) {
   const evolutionKey = event._evolutionKey;
   const evolutionMessage = event._evolutionMessage;
   const media = event._evolutionMedia;
+  const isReaction = event._isReaction === true;
   delete event._evolutionKey;
   delete event._evolutionMessage;
   delete event._evolutionMedia;
+  delete event._isReaction;
 
   // Saring pesan yang DIKIRIM adapter sendiri (echo webhook) supaya tidak
   // masuk kembali ke Inbox sebagai pesan ganda.
@@ -242,7 +244,9 @@ async function handleMessagesUpsert(req, res, payload) {
     storedMessage = { ...storedMessage };
     delete storedMessage.base64;
   }
-  quotedStore.save(event.messageId, evolutionKey, storedMessage);
+  // A reaction stanza must never be sent back to WhatsApp as a quote; replying
+  // to a reaction row degrades to the existing quote_applied:false path.
+  if (!isReaction) quotedStore.save(event.messageId, evolutionKey, storedMessage);
 
   try {
     const result = await enqueueWithRetry(incomingBuffer, event);
