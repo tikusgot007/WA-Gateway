@@ -4,7 +4,7 @@ const express = require('express');
 const config = require('../config');
 const logger = require('../logging');
 const { requireCI4Token } = require('../api/authMiddleware');
-const { isDecodableJid, isGroupJid, isLidJid, jidToPhone } = require('./jid');
+const { isDecodableJid, isGroupJid, isLidJid, evolutionNumberFor } = require('./jid');
 const evolutionClient = require('./client');
 const evolutionState = require('./state');
 const quotedStore = require('./quotedStore');
@@ -190,7 +190,7 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
 
   const doSend = async () => {
     const result = await evolutionClient.sendText({
-      number: jidToPhone(chatId),
+      number: evolutionNumberFor(chatId),
       text: outgoingText,
       quoted,
     });
@@ -326,7 +326,7 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
   const outgoingCaption = forward.requested && caption ? `${FORWARD_TEXT_PREFIX}${caption}` : caption;
 
   const doSend = async () => {
-    const number = jidToPhone(chatId);
+    const number = evolutionNumberFor(chatId);
     let result;
     if (mediaType === 'sticker') {
       // Evolution punya endpoint sticker tersendiri; sticker tidak punya caption.
@@ -632,7 +632,7 @@ router.post('/edit', jsonSmall, requireCI4Token, async (req, res) => {
 
   const doEdit = async () => {
     const result = await evolutionClient.updateMessage({
-      number: jidToPhone(chatId),
+      number: evolutionNumberFor(chatId),
       key: {
         id: waMessageId,
         remoteJid: chatId,

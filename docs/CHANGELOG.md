@@ -3,6 +3,23 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-13 — Kirim ke grup dengan JID gaya lama (AULIA ADA AAN)
+
+- Bug: kirim ke grup karyawan "AULIA ADA AAN" (`628563324637-1623478602@g.us`)
+  selalu gagal `INVALID_CHAT_ID`. Dua akar bertumpuk:
+  - `isDecodableJid()` (`src/evolution/jid.js`) menolak tanda `-` pada bagian
+    user JID grup gaya lama.
+  - titik kirim memakai `jidToPhone()` yang membuang non-digit sehingga Evolution
+    menerima `6285633246371623478602` (22 digit), lalu `createJid()` mengarang
+    grup yang tidak ada -- pesan tidak pernah sampai.
+- Fix: `isDecodableJid()` kini menerima server `g.us` dengan user
+  `^[0-9]+(?:-[0-9]+)?$` (`GROUP_USER_RE`); helper baru `evolutionNumberFor()`
+  mengirim JID grup utuh dan nomor polos untuk chat pribadi. Dipakai di
+  `/send`, `/send-media` (termasuk sticker), dan `/edit`.
+- Test baru `test/test-group-send.js` (terkunci di `npm test`).
+- Catatan: endpoint `/read` (mark-as-read) tetap menolak grup (`UNSUPPORTED_CHAT_ID`)
+  -- keputusan terpisah yang belum berubah.
+
 ## 2026-10-07 — Fix: VALID_KINDS di outgoingOperations.js
 
 - Bug: `/edit` dan `/delete` gagal dengan `OPERATION_STORE_ERROR` sebelum memanggil Evolution API.
