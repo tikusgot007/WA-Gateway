@@ -107,4 +107,41 @@ const keyOnlyPayload = {
 const r4 = normalizeMessagesUpsert(keyOnlyPayload);
 assert.ok(!r4.ok && r4.skip, 'senderKeyDistributionMessage tanpa konten tetap dilewati');
 
+// --- regresi: grup legacy tanpa key.participant, sender berupa LID di pushName ---
+// Payload nyata Evolution v2.3.7 (grup "AULIA ADA AAN" 628563324637-1623478602@g.us,
+// 2026-10-13): key.participant KOSONG, identitas pengirim hanya LID di pushName.
+// Dulu pesan ini dibuang oleh penjaga `key.participant`, sehingga grup legacy
+// tidak pernah masuk Inbox.
+const legacyGroupPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: { id: 'ACD5956C73F0198110AD453485A7AC4D', fromMe: false, remoteJid: '628563324637-1623478602@g.us' },
+    pushName: '49800263282890',
+    messageType: 'conversation',
+    messageTimestamp: 1791354831,
+    message: { conversation: 'Ijin tlat antar bocil ngaji', messageContextInfo: { threadId: [], messageSecret: 'x' } },
+  },
+};
+const r5 = normalizeMessagesUpsert(legacyGroupPayload);
+assert.ok(r5.ok && r5.event, 'grup legacy tanpa participant tidak boleh dibuang');
+assert.equal(r5.event.jidType, 'group');
+assert.equal(r5.event.sender_jid, '49800263282890@lid', 'sender_jid dipulihkan dari pushName LID');
+assert.equal(r5.event.text, 'Ijin tlat antar bocil ngaji');
+
+// Bila participant DAN pushName sama-sama tidak memberi identitas -> tetap dibuang.
+const noIdentityPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: { id: 'NONE-1', fromMe: false, remoteJid: '628563324637-1623478602@g.us' },
+    pushName: '',
+    messageType: 'conversation',
+    messageTimestamp: 1791354831,
+    message: { conversation: 'halo' },
+  },
+};
+const r6 = normalizeMessagesUpsert(noIdentityPayload);
+assert.ok(!r6.ok && !r6.skip, 'pesan grup tanpa identitas pengirim apa pun tetap dibuang');
+
 console.log('gateway lifecycle tests: OK');

@@ -3,6 +3,26 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-13 — Pesan masuk grup legacy tanpa key.participant dibuang
+
+- Bug: pesan masuk dari grup legacy "AULIA ADA AAN" (`628563324637-1623478602@g.us`)
+  tidak pernah sampai ke Inbox CI4.
+- Akar: Evolution/Baileys mengirim pesan grup legacy dengan `key.participant` KOSONG;
+  identitas pengirim hanya berupa LID di `pushName` (Evolution `prepareMessage()`
+  menurunkan `pushName` dari top-level `message.participant` tanpa menyertakan
+  `participant` di `key`). Penjaga lama di `normalize.js` membuang semua pesan grup
+  masuk tanpa `key.participant` (kontrak CI4 mewajibkan `sender_jid`), sehingga
+  pesan hilang senyap.
+- Fix: `normalizeMessagesUpsert()` kini memulihkan `sender_jid` dari `record.pushName`
+  saat `key.participant` absen (numeric -> `<lid>@lid`), lalu diteruskan seperti
+  biasa (`groupInfo` mencoba memetakan LID -> nomor). Pesan tetap dibuang hanya bila
+  `key.participant` DAN `pushName` sama-sama tidak memberi identitas.
+- Trade-off: untuk grup legacy, `findGroupInfos` Evolution balas 404 sehingga mapping
+  LID->nomor tidak tersedia; pengirim tampil sebagai LID (bukan nama/HP), tapi pesan
+  tetap masuk.
+- Test: `test/test-lifecycle.js` tambah 2 kasus (grup legacy tanpa participant +
+  pushName LID -> diterima; tanpa identitas sama sekali -> tetap dibuang).
+
 ## 2026-10-13 — Kirim ke grup dengan JID gaya lama (AULIA ADA AAN)
 
 - Bug: kirim ke grup karyawan "AULIA ADA AAN" (`628563324637-1623478602@g.us`)

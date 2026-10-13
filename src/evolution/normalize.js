@@ -501,10 +501,24 @@ function normalizeMessagesUpsert(payload) {
   const fromMe = Boolean(key.fromMe);
   const isGroup = isGroupJid(remoteJid);
 
-  // Grup: butuh identitas pengirim (key.participant). Tanpa itu, pesan grup
-  // masuk ditolak CI4 -- lebih baik dibuang di sini dengan log jelas.
-  if (isGroup && !fromMe && !key.participant) {
-    return { ok: false, reason: 'pesan grup masuk tanpa key.participant -- dibuang (kontrak CI4 mewajibkan sender_jid)' };
+  // key.participant (nomor/LID peserta) dipakai sebagai identitas pengirim grup.
+  let groupParticipantJid = isGroup ? (key.participant || null) : null;
+
+  // Grup legacy (mis. "AULIA ADA AAN" 628563324637-1623478602@g.us) dikirim
+  // Baileys/Evolution dengan key.participant KOSONG -- identitas pengirim hanya
+  // berupa LID di pushName (Evolution prepareMessage() menurunkan pushName dari
+  // message.participant tanpa menyertakan participant di key). Pulihkan dari
+  // pushName (numeric -> `<lid>@lid`) supaya pesan grup tetap masuk ke CI4 dan
+  // kontrak sender_jid (wajib untuk grup masuk) tetap terpenuhi. groupInfo lalu
+  // mencoba memetakan LID -> nomor (webhookRoutes); bila gagal (grup legacy,
+  // findGroupInfos 404), sender tampil sebagai LID -- lebih baik daripada hilang.
+  if (isGroup && !fromMe && !groupParticipantJid) {
+    const lid = typeof record.pushName === 'string' ? record.pushName.trim() : '';
+    if (/^[0-9]+$/.test(lid)) {
+      groupParticipantJid = `${lid}@lid`;
+    } else {
+      return { ok: false, reason: 'pesan grup masuk tanpa identitas pengirim (key.participant & pushName absen/non-LID) -- dibuang (kontrak CI4 mewajibkan sender_jid)' };
+    }
   }
 
   // View-once: isinya memang tidak dapat diambil di perangkat tertaut, dan
@@ -609,7 +623,7 @@ function normalizeMessagesUpsert(payload) {
   const isForwarded = !viewOnce ? extractForwardFlag(record) : false;
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
-  const senderJid = isGroup ? (key.participant || null) : (fromMe ? null : remoteJid);
+  const senderJid = isGroup ? groupParticipantJid : (fromMe ? null : remoteJid);
   const senderPhone = jidToPhone(senderJid || remoteJid);
 
   const event = {
