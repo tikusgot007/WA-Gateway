@@ -156,6 +156,10 @@ function webhookPayload(overrides = {}) {
   assert.strictEqual(res.body.error_code, 'INVALID_OPERATION_ID');
   res = await post('/send', { chat_id: 'bukan-jid', text: 'x' });
   assert.strictEqual(res.body.error_code, 'INVALID_CHAT_ID');
+  // LID tidak boleh dikirim (bug balasan LID 2026-10-13).
+  res = await post('/send', { chat_id: '182690745680043@lid', text: 'x' });
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual(res.body.error_code, 'UNSUPPORTED_CHAT_ID');
   res = await post('/send', { chat_id: CHAT, text: '   ' });
   assert.strictEqual(res.body.error_code, 'INVALID_TEXT');
   res = await post('/send', { chat_id: CHAT, text: 'x'.repeat(4097) });
@@ -285,6 +289,9 @@ function webhookPayload(overrides = {}) {
   const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]);
   const imgB64 = Buffer.from('GAMBAR').toString('base64');
   resetStub();
+  res = await post('/send-media', { chat_id: '182690745680043@lid', media_type: 'image', media_base64: imgB64 });
+  assert.strictEqual(res.status, 400);
+  assert.strictEqual(res.body.error_code, 'UNSUPPORTED_CHAT_ID', '/send-media menolak chat_id @lid');
   res = await post('/send-media', { chat_id: CHAT, media_type: 'image', media_base64: imgB64, mimetype: 'image/jpeg' });
   assert.strictEqual(res.status, 200);
   assert.strictEqual(stub.media.length, 1);

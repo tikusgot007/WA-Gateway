@@ -3,6 +3,29 @@
 Semua perubahan signifikan pada adapter `evolution-gateway` dicatat di sini.
 Format bebas, kronologis terbaru di atas.
 
+## 2026-10-13 — Balasan ke kontak ber-identitas LID gagal terkirim (exists:false)
+
+- Bug: percakapan 1:1 yang tersimpan dengan identitas LID (`<lid>@lid`) tidak bisa
+  dibalas — `jidToPhone()` memotong LID menjadi angka karangan 15 digit, lalu
+  Evolution menolak `400 exists:false` (`182690745680043@s.whatsapp.net`). Pembatalan
+  balasan itu dicatat `SEND_UNRESOLVED` (belum pasti), sehingga pelanggan yang tidak
+  pernah dibalas tidak terlihat di laporan mana pun. Ditemukan M.A.R.A. 2026-10-13
+  (conv#244, nomor asli `6282245422009` tersedia di `key.remoteJidAlt`).
+- Akar: (1) `normalize.js` menyimpan `chat_id` = `remoteJid` apa adanya dan tidak
+  pernah memakai `key.remoteJidAlt`; (2) `/send` & `/send-media` di `ci4Routes.js`
+  tidak menolak `@lid` (hanya `/read` yang punya guard `isLidJid`).
+- Fix: (1) `normalizeMessagesUpsert()` — untuk chat 1:1 dengan `remoteJid` ber-`@lid`
+  dan `key.remoteJidAlt` ber-`@s.whatsapp.net`, derivasi identitas efektif dari PN
+  (`chatId`/`sender.phone`/`sender.jid`) dan LID asli dipertahankan sebagai
+  `identity_hint.lid` agar CI4 merekonsiliasi conversation `@lid` lama lewat
+  `resolveConversationId()` langkah 2; (2) `/send` & `/send-media` menolak
+  `UNSUPPORTED_CHAT_ID` untuk `@lid` (paritas dengan `/read`).
+- Test: `test/test-lifecycle.js` (5 kasus LID→PN, tanpa-alt, alt non-PN, grup tidak
+  tersentuh) + `test/simulate-evolution-adapter.js` (guard `UNSUPPORTED_CHAT_ID` di
+  `/send` & `/send-media`). `npm test` full lulus.
+- Tersisa: backfill data lama `conv#244` (prosedur terpisah, lihat `docs/sesi/`);
+  penandaan status `exists:false` sebagai GAGAL definitif (TODO terpisah).
+
 ## 2026-10-13 — Pesan masuk grup legacy tanpa key.participant dibuang
 
 - Bug: pesan masuk dari grup legacy "AULIA ADA AAN" (`628563324637-1623478602@g.us`)

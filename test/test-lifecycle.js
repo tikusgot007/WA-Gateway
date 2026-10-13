@@ -144,4 +144,79 @@ const noIdentityPayload = {
 const r6 = normalizeMessagesUpsert(noIdentityPayload);
 assert.ok(!r6.ok && !r6.skip, 'pesan grup tanpa identitas pengirim apa pun tetap dibuang');
 
+// --- regresi: balasan LID (bug 2026-10-13) --------------------------------
+// Pesan 1:1 ber-identitas @lid tapi membawa nomor asli di remoteJidAlt:
+// identitas efektif harus PN (@s.whatsapp.net), dan LID asli dipertahankan
+// sebagai identity_hint.lid supaya CI4 merekonsiliasi conversation @lid lama.
+const lidToPnPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: { id: 'LID1', fromMe: false, remoteJid: '182690745680043@lid', remoteJidAlt: '6282245422009@s.whatsapp.net' },
+    pushName: 'Pelanggan 4R',
+    messageTimestamp: 1791748388,
+    message: { conversation: 'Cetak 4R satu lembar' },
+  },
+};
+const r7 = normalizeMessagesUpsert(lidToPnPayload);
+assert.ok(r7.ok && r7.event, 'pesan 1:1 @lid dengan remoteJidAlt harus diteruskan');
+assert.equal(r7.event.chatId, '6282245422009@s.whatsapp.net', 'chatId pakai PN dari remoteJidAlt, bukan @lid');
+assert.equal(r7.event.jidType, 'pn');
+assert.equal(r7.event.sender.phone, '6282245422009', 'sender.phone pakai nomor asli');
+assert.equal(r7.event.sender.jid, '6282245422009@s.whatsapp.net');
+assert.deepEqual(r7.event.identityHint, { lid: '182690745680043@lid' }, 'LID asli dipertahankan sebagai identity_hint.lid');
+
+// @lid TANPA remoteJidAlt PN -> tidak boleh menebak nomor; tetap @lid apa adanya.
+const lidNoAltPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: { id: 'LID2', fromMe: false, remoteJid: '182690745680043@lid' },
+    pushName: 'Pelanggan 4R',
+    messageTimestamp: 1791748388,
+    message: { conversation: 'Cetak 4R satu lembar' },
+  },
+};
+const r8 = normalizeMessagesUpsert(lidNoAltPayload);
+assert.ok(r8.ok && r8.event, '@lid tanpa alt tetap diteruskan');
+assert.equal(r8.event.chatId, '182690745680043@lid', 'tanpa remoteJidAlt, chatId tetap @lid (tidak menebak)');
+assert.equal(r8.event.identityHint, null, 'tanpa resolusi PN, tidak ada identity_hint');
+
+// remoteJidAlt yang BUKAN @s.whatsapp.net tidak dipakai sebagai identitas.
+const lidWeirdAltPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: { id: 'LID3', fromMe: false, remoteJid: '182690745680043@lid', remoteJidAlt: '182690745680043@lid' },
+    pushName: 'Pelanggan 4R',
+    messageTimestamp: 1791748388,
+    message: { conversation: 'Cetak 4R satu lembar' },
+  },
+};
+const r9 = normalizeMessagesUpsert(lidWeirdAltPayload);
+assert.equal(r9.event.chatId, '182690745680043@lid', 'remoteJidAlt non-PN diabaikan');
+
+// Grup TIDAK boleh tersentuh resolusi LID (pakai logika grup existing).
+const groupLidPayload = {
+  event: 'messages.upsert',
+  instance: 't',
+  data: {
+    key: {
+      id: 'GLID1',
+      fromMe: false,
+      remoteJid: '120363431232595303@g.us',
+      remoteJidAlt: '628123456789@s.whatsapp.net',
+      participant: '255490491736112@lid',
+    },
+    pushName: 'Anshar',
+    messageTimestamp: 1791748388,
+    message: { conversation: 'halo grup' },
+  },
+};
+const r10 = normalizeMessagesUpsert(groupLidPayload);
+assert.ok(r10.ok && r10.event, 'grup tetap diteruskan');
+assert.equal(r10.event.chatId, '120363431232595303@g.us', 'chatId grup tidak diubah oleh remoteJidAlt');
+assert.equal(r10.event.jidType, 'group');
+assert.equal(r10.event.identityHint, null, 'grup tidak menghasilkan identity_hint');
+
 console.log('gateway lifecycle tests: OK');

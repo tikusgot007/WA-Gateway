@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const logger = require('../logging');
-const { isGroupJid, jidToPhone } = require('./jid');
+const { isGroupJid, isLidJid, jidToPhone } = require('./jid');
 
 /**
  * Normalisasi payload webhook Evolution API -> event buffer incoming gateway
@@ -501,6 +501,20 @@ function normalizeMessagesUpsert(payload) {
   const fromMe = Boolean(key.fromMe);
   const isGroup = isGroupJid(remoteJid);
 
+  // LID-FIRST -> PN-LATER (bug balasan LID 2026-10-13): WhatsApp kadang mengirim
+  // `remoteJid` berupa identitas LID (`<lid>@lid`) padahal nomor asli tersedia di
+  // `key.remoteJidAlt` (`<nomor>@s.whatsapp.net`). Mengirim balik ke LID akan
+  // dipotong jidToPhone() menjadi angka karangan (15 digit) yang ditolak Evolution
+  // (400 exists:false). Untuk chat 1:1: simpan/derivasi identitas dari PN, dan
+  // pertahankan LID asli sebagai `identity_hint.lid` supaya CI4 dapat
+  // merekonsiliasi conversation @lid lama lewat resolveConversationId() (langkah 2).
+  let effectiveRemoteJid = remoteJid;
+  let identityLidHint = null;
+  if (!isGroup && typeof key.remoteJidAlt === 'string' && /@s\.whatsapp\.net$/i.test(key.remoteJidAlt) && isLidJid(remoteJid)) {
+    effectiveRemoteJid = key.remoteJidAlt;
+    identityLidHint = remoteJid;
+  }
+
   // key.participant (nomor/LID peserta) dipakai sebagai identitas pengirim grup.
   let groupParticipantJid = isGroup ? (key.participant || null) : null;
 
@@ -543,14 +557,15 @@ function normalizeMessagesUpsert(payload) {
         ok: true,
         event: {
           messageId: key.id || synthesizeMessageIdFallback(record),
-          chatId: remoteJid,
+          chatId: effectiveRemoteJid,
           jidType: 'pn',
-          sender: { name: record.pushName || null, phone: jidToPhone(remoteJid), jid: remoteJid },
-          sender_jid: remoteJid,
+          sender: { name: record.pushName || null, phone: jidToPhone(effectiveRemoteJid), jid: effectiveRemoteJid },
+          sender_jid: effectiveRemoteJid,
           messageType: 'text',
           text: reaction.emoji,
           media: null,
           extra: null,
+          identityHint: identityLidHint ? { lid: identityLidHint } : null,
           timestamp: toIsoTimestamp(record.messageTimestamp),
           direction: 'incoming',
           is_forwarded: false,
@@ -579,7 +594,7 @@ function normalizeMessagesUpsert(payload) {
         lifecycle: {
           event: 'edited',
           targetWaMessageId: editTarget,
-          chatId: remoteJid,
+          chatId: effectiveRemoteJid,
           jidType: isGroup ? 'group' : 'pn',
           timestamp: toIsoTimestamp(record.messageTimestamp),
           sender: { name: record.pushName || null, jid: null, phone: null },
@@ -623,12 +638,12 @@ function normalizeMessagesUpsert(payload) {
   const isForwarded = !viewOnce ? extractForwardFlag(record) : false;
 
   const waMessageId = key.id || synthesizeMessageIdFallback(record);
-  const senderJid = isGroup ? groupParticipantJid : (fromMe ? null : remoteJid);
-  const senderPhone = jidToPhone(senderJid || remoteJid);
+  const senderJid = isGroup ? groupParticipantJid : (fromMe ? null : effectiveRemoteJid);
+  const senderPhone = jidToPhone(senderJid || effectiveRemoteJid);
 
   const event = {
     messageId: waMessageId,
-    chatId: remoteJid,
+    chatId: effectiveRemoteJid,
     jidType: isGroup ? 'group' : 'pn',
     sender: {
       name: record.pushName || null,
@@ -636,6 +651,7 @@ function normalizeMessagesUpsert(payload) {
       jid: senderJid,
     },
     sender_jid: senderJid,
+    identityHint: identityLidHint ? { lid: identityLidHint } : null,
     messageType,
     text: text || '',
     media: null, // Tahap 4: diisi oleh caller bila messageType butuh referensi media

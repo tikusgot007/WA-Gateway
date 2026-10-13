@@ -169,6 +169,17 @@ router.post('/send', jsonSmall, requireCI4Token, async (req, res) => {
     });
   }
 
+  // Evolution tidak bisa mengirim ke identitas LID (`@lid`); jidToPhone() akan
+  // memotongnya menjadi angka karangan yang ditolak 400 exists:false. Tolak di
+  // sini supaya pemanggil tahu lebih awal (bug balasan LID 2026-10-13).
+  if (isLidJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'UNSUPPORTED_CHAT_ID',
+      message: 'chat_id berformat @lid tidak didukung untuk pengiriman; gunakan nomor @s.whatsapp.net.',
+    });
+  }
+
   if (typeof text !== 'string' || text.trim().length === 0) {
     return res.status(400).json({
       success: false,
@@ -277,6 +288,15 @@ router.post('/send-media', jsonMedia, requireCI4Token, async (req, res) => {
       success: false,
       error_code: 'INVALID_CHAT_ID',
       message: `chat_id tidak valid/tidak dapat didecode sebagai JID: ${chatId}`,
+    });
+  }
+
+  // Sama seperti /send: jangan pernah kirim ke identitas LID (bug balasan LID).
+  if (isLidJid(chatId)) {
+    return res.status(400).json({
+      success: false,
+      error_code: 'UNSUPPORTED_CHAT_ID',
+      message: 'chat_id berformat @lid tidak didukung untuk pengiriman; gunakan nomor @s.whatsapp.net.',
     });
   }
 
